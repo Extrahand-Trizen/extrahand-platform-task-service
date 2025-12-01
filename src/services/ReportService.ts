@@ -70,7 +70,7 @@ export class ReportService {
       .sort({ createdAt: -1 })
       .lean();
 
-    return reports as ITaskReport[];
+    return reports as unknown as ITaskReport[];
   }
 }
 

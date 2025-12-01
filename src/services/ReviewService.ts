@@ -154,7 +154,7 @@ export class ReviewService {
 
     // Note: populate doesn't work with UID strings, so we'd need to manually fetch profiles
     // For now, return as-is (original backend also had this limitation)
-    return review;
+    return review as unknown as IReview | null;
   }
 
   /**

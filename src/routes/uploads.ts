@@ -13,7 +13,7 @@ const upload = multer({
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB limit per file
   },
-  fileFilter: (req, file, cb) => {
+  fileFilter: (_req, file, cb) => {
     // Accept only images
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
@@ -51,7 +51,7 @@ router.delete(
 
 // GET /api/v1/uploads/health
 // Health check for storage service (public, no auth required)
-router.get('/health', asyncHandler(async (req, res) => {
+router.get('/health', asyncHandler(async (_req, res) => {
   const { healthCheck, getStorageType } = await import('../utils/storageManager');
   const isHealthy = await healthCheck();
   const provider = getStorageType();

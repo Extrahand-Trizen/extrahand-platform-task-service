@@ -64,10 +64,14 @@ const envSchema = z.object({
   AWS_CLOUDFRONT_DOMAIN: z.string().optional(),
 });
 
+// Extend global type for CORS config logging
+declare global {
+  // eslint-disable-next-line no-var
+  var __CORS_CONFIG_LOGGED__: boolean | undefined;
+}
+
 // CORS configuration
 export function getCorsConfig(env: z.infer<typeof envSchema>) {
-  const isDevelopment = env.NODE_ENV === 'development';
-  
   const allowedOrigins = [
     'https://extrahand.in',
     'https://www.extrahand.in',

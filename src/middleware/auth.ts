@@ -1,7 +1,6 @@
-import { Request, Response, NextFunction } from 'express';
+import { Response, NextFunction } from 'express';
 import { auth } from '../config/firebase';
 import { AuthenticatedRequest } from '../types';
-import { UnauthorizedError } from '../errors/AppError';
 
 export async function authMiddleware(
   req: AuthenticatedRequest,
@@ -13,7 +12,8 @@ export async function authMiddleware(
     const match = /^Bearer (.+)$/.exec(header);
     
     if (!match) {
-      return res.status(401).json({ error: 'Missing Authorization header' });
+      res.status(401).json({ error: 'Missing Authorization header' });
+      return;
     }
     
     const idToken = match[1];
@@ -21,14 +21,15 @@ export async function authMiddleware(
     req.user = { uid: token.uid, token };
     next();
   } catch (e) {
-    return res.status(401).json({ error: 'Invalid token' });
+    res.status(401).json({ error: 'Invalid token' });
+    return;
   }
 }
 
 // Optional auth middleware - sets req.user if token is present, but doesn't require it
 export async function optionalAuthMiddleware(
   req: AuthenticatedRequest,
-  res: Response,
+  _res: Response,
   next: NextFunction
 ): Promise<void> {
   const header = req.headers.authorization || '';

@@ -99,7 +99,7 @@ export class TaskService {
     const total = await Task.countDocuments(query);
 
     return {
-      tasks,
+      tasks: tasks as unknown as ITask[],
       pagination: {
         page,
         limit,
@@ -143,7 +143,7 @@ export class TaskService {
     const total = await Task.countDocuments(query);
 
     return {
-      tasks,
+      tasks: tasks as unknown as ITask[],
       pagination: {
         page: 1,
         limit,
@@ -181,7 +181,7 @@ export class TaskService {
     const total = await Task.countDocuments(query);
 
     return {
-      tasks,
+      tasks: tasks as unknown as ITask[],
       pagination: {
         page,
         limit,
@@ -199,7 +199,7 @@ export class TaskService {
     if (!task) {
       throw new NotFoundError('Task not found');
     }
-    return task;
+    return task as unknown as ITask;
   }
 
   /**
@@ -305,7 +305,7 @@ export class TaskService {
     }
 
     logger.info(`Task updated: ${taskId} by user ${uid}`);
-    return updatedTask as ITask;
+    return updatedTask as unknown as ITask;
   }
 
   /**
@@ -402,7 +402,7 @@ export class TaskService {
     }
 
     logger.info(`Task status updated: ${taskId} to ${status} by user ${uid}`);
-    return updatedTask as ITask;
+    return updatedTask as unknown as ITask;
   }
 }
 

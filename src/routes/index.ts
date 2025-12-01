@@ -13,7 +13,7 @@ import { asyncHandler } from '../middleware/errorHandler';
 const router = Router();
 
 // Health check endpoint (no auth required)
-router.get('/health', asyncHandler(async (req, res) => {
+router.get('/health', asyncHandler(async (_req, res) => {
   res.json({
     success: true,
     service: 'extrahand-task-service',

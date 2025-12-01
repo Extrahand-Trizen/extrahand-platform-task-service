@@ -75,7 +75,7 @@ export class QuestionService {
   /**
    * Get all questions for a task
    */
-  static async getTaskQuestions(taskId: string, uid: string): Promise<any[]> {
+  static async getTaskQuestions(taskId: string, _uid: string): Promise<any[]> {
     // Check if task exists
     const task = await Task.findById(taskId);
     if (!task) {
