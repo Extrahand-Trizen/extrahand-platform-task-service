@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 2,
+  "dockerfilePath": "./Dockerfile",
+  "buildArguments": {
+    "CACHE_BUST": "latest",
+    "NODE_ENV": "production",
+    "PORT": "4002",
+    "LOG_LEVEL": "info",
+    "RATE_LIMIT_WINDOW_MS": "900000",
+    "RATE_LIMIT_MAX_REQUESTS": "100",
+    "CORS_ORIGIN": "https://extrahand.in,https://www.extrahand.in,http://localhost:3000,http://localhost:4000,http://localhost:4001,http://localhost:4002",
+    "MONGODB_URI": "YOUR_MONGODB_URI_HERE",
+    "FIREBASE_PROJECT_ID": "extrahand-app",
+    "FIREBASE_PRIVATE_KEY_ID": "YOUR_FIREBASE_PRIVATE_KEY_ID",
+    "FIREBASE_PRIVATE_KEY": "YOUR_FIREBASE_PRIVATE_KEY",
+    "FIREBASE_CLIENT_EMAIL": "YOUR_FIREBASE_CLIENT_EMAIL",
+    "FIREBASE_CLIENT_ID": "YOUR_FIREBASE_CLIENT_ID",
+    "FIREBASE_AUTH_URI": "https://accounts.google.com/o/oauth2/auth",
+    "FIREBASE_TOKEN_URI": "https://oauth2.googleapis.com/token",
+    "FIREBASE_AUTH_PROVIDER_X509_CERT_URL": "https://www.googleapis.com/oauth2/v1/certs",
+    "FIREBASE_CLIENT_X509_CERT_URL": "YOUR_FIREBASE_CLIENT_X509_CERT_URL",
+    "SERVICE_AUTH_TOKEN": "YOUR_SERVICE_AUTH_TOKEN_HERE",
+    "USER_SERVICE_URL": "http://srv-captain--extrahand-user-service:4001",
+    "MESSAGING_SERVICE_URL": "http://srv-captain--extrahand-messaging-service:4006",
+    "PAYMENT_SERVICE_URL": "http://srv-captain--extrahand-payment-service:4003"
+  },
+  "expose": {
+    "api": {
+      "containerPort": 4002,
+      "httpPort": 80,
+      "httpsPort": 443
+    }
+  },
+  "healthcheck": {
+    "path": "/api/v1/health",
+    "port": 4002,
+    "interval": 30,
+    "timeout": 10,
+    "retries": 3,
+    "startPeriod": 30
+  },
+  "notify": {
+    "webhook": "",
+    "slack": "",
+    "discord": ""
+  },
+  "customDomain": "",
+  "forceSsl": true,
+  "appName": "extrahand-task-service",
+  "hasPersistentData": false,
+  "description": "ExtraHand Task Service - Task Management, Applications, Reviews, and Task Operations",
+  "instanceCount": 1,
+  "tags": ["nodejs", "typescript", "express", "firebase", "mongodb", "api", "extrahand", "task-service"],
+  "envVars": {
+    "NODE_ENV": "production"
+  },
+  "volumes": [
+    {
+      "name": "app-logs",
+      "path": "/app/logs"
+    }
+  ],
+  "restart": {
+    "policy": "unless-stopped",
+    "maximumRetryCount": 10
+  },
+  "resources": {
+    "memory": "512Mi",
+    "cpu": "0.5"
+  },
+  "networking": {
+    "publishAllPorts": false,
+    "enableTcpProxy": false
+  }
+}
