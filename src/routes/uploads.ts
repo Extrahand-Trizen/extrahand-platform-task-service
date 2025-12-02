@@ -23,7 +23,24 @@ const upload = multer({
   }
 });
 
-// All upload routes require authentication
+// GET /api/v1/uploads/health
+// Health check for storage service (public, no auth required)
+router.get('/health', asyncHandler(async (_req, res) => {
+  const { healthCheck, getStorageType } = await import('../utils/storageManager');
+  const isHealthy = await healthCheck();
+  const provider = getStorageType();
+  
+  res.json({
+    success: true,
+    data: {
+      provider,
+      healthy: isHealthy,
+      timestamp: new Date().toISOString()
+    }
+  });
+}));
+
+// All other upload routes require authentication
 router.use(authMiddleware);
 
 // POST /api/v1/uploads/task-image
@@ -56,23 +73,6 @@ router.delete(
   '/completion-proof/:taskId',
   asyncHandler(UploadController.deleteCompletionProof)
 );
-
-// GET /api/v1/uploads/health
-// Health check for storage service (public, no auth required)
-router.get('/health', asyncHandler(async (_req, res) => {
-  const { healthCheck, getStorageType } = await import('../utils/storageManager');
-  const isHealthy = await healthCheck();
-  const provider = getStorageType();
-  
-  res.json({
-    success: true,
-    data: {
-      provider,
-      healthy: isHealthy,
-      timestamp: new Date().toISOString()
-    }
-  });
-}));
 
 export default router;
 
