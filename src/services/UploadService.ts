@@ -6,6 +6,47 @@ import { uploadFile, deleteFile, getStorageType } from '../utils/storageManager'
 
 export class UploadService {
   /**
+   * Upload task image (for task creation/editing)
+   */
+  static async uploadTaskImage(
+    userId: string,
+    fileBuffer: Buffer,
+    filename: string,
+    mimetype: string,
+    taskId?: string
+  ): Promise<{ url: string; key: string }> {
+    if (!fileBuffer || !filename) {
+      throw new BadRequestError('No image file provided');
+    }
+
+    // Upload to storage (MinIO, S3, etc.)
+    const result = await uploadFile(
+      fileBuffer,
+      filename,
+      mimetype,
+      'task-images',
+      {
+        userId,
+        taskId: taskId || 'unknown',
+        type: 'task-image'
+      }
+    );
+
+    logger.info('Task image uploaded', {
+      userId,
+      taskId,
+      url: result.url,
+      key: result.key,
+      provider: getStorageType()
+    });
+
+    return {
+      url: result.url,
+      key: result.key
+    };
+  }
+
+  /**
    * Upload completion proof image(s)
    */
   static async uploadCompletionProof(

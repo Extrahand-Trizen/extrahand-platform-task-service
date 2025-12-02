@@ -26,6 +26,14 @@ const upload = multer({
 // All upload routes require authentication
 router.use(authMiddleware);
 
+// POST /api/v1/uploads/task-image
+// Upload task image (for task creation/editing)
+router.post(
+  '/task-image',
+  upload.single('image'),
+  asyncHandler(UploadController.uploadTaskImage)
+);
+
 // POST /api/v1/uploads/completion-proof/:taskId
 // Upload single completion proof image
 router.post(

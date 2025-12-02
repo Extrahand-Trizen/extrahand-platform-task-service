@@ -75,6 +75,40 @@ export class UploadController {
   }
 
   /**
+   * POST /api/v1/uploads/task-image
+   * Upload task image (for task creation/editing)
+   */
+  static async uploadTaskImage(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { uid } = req.user!;
+    const file = (req as any).file;
+    const { taskId } = req.body;
+
+    if (!file) {
+      res.status(400).json({
+        success: false,
+        error: 'No image file provided'
+      });
+      return;
+    }
+
+    const result = await UploadService.uploadTaskImage(
+      uid,
+      file.buffer,
+      file.originalname || 'task.jpg',
+      file.mimetype,
+      taskId
+    );
+
+    res.json({
+      success: true,
+      data: {
+        url: result.url,
+        key: result.key
+      }
+    });
+  }
+
+  /**
    * DELETE /api/v1/uploads/completion-proof/:taskId
    * Delete completion proof image
    */
