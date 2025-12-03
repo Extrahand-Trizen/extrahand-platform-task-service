@@ -41,6 +41,7 @@ export interface ITask extends Document {
   completedAt?: Date;
   cancelledAt?: Date;
   cancellationReason?: string;
+  cancelledBy?: string; // UID of user who cancelled (poster or performer)
   expiresAt?: Date;
   completionProof?: Array<{
     url: string;
@@ -208,6 +209,7 @@ const TaskSchema = new Schema<ITask>({
   completedAt: Date,
   cancelledAt: Date,
   cancellationReason: String,
+  cancelledBy: String, // UID of user who cancelled (poster or performer)
   expiresAt: {
     type: Date,
     index: true

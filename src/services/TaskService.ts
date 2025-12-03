@@ -335,7 +335,14 @@ export class TaskService {
   /**
    * Update task status
    */
-  static async updateTaskStatus(taskId: string, uid: string, status: TaskStatus): Promise<ITask> {
+  static async updateTaskStatus(
+    taskId: string,
+    uid: string,
+    status: TaskStatus,
+    options?: {
+      cancellationReason?: string;
+    }
+  ): Promise<ITask> {
     const validStatuses = ['open', 'assigned', 'started', 'in_progress', 'review', 'completed', 'cancelled'];
     if (!validStatuses.includes(status)) {
       throw new BadRequestError('Invalid status');
@@ -369,11 +376,11 @@ export class TaskService {
       throw new ForbiddenError('Not authorized to update this task');
     }
 
-    // Performers can only update status to certain values
+    // Performers can only update status to certain values (including cancellation)
     if (isAssignedPerformer && !isCreator) {
-      const allowedPerformerStatuses = ['started', 'in_progress', 'review'];
+      const allowedPerformerStatuses = ['started', 'in_progress', 'review', 'cancelled'];
       if (!allowedPerformerStatuses.includes(status)) {
-        throw new ForbiddenError('Performers can only update status to: started, in_progress, or review');
+        throw new ForbiddenError('Performers can only update status to: started, in_progress, review, or cancelled');
       }
     }
 
@@ -385,10 +392,17 @@ export class TaskService {
       }
     }
 
-    // Special handling for task completion
+    // Special handling for task completion and cancellation
     let updateData: any = { status, updatedAt: new Date() };
     if (status === 'completed') {
       updateData.completedAt = new Date();
+    }
+    if (status === 'cancelled') {
+      updateData.cancelledAt = new Date();
+      updateData.cancelledBy = uid;
+      if (options?.cancellationReason) {
+        updateData.cancellationReason = options.cancellationReason;
+      }
     }
 
     const updatedTask = await Task.findByIdAndUpdate(

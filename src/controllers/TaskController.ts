@@ -114,8 +114,13 @@ export class TaskController {
    * Update task status
    */
   static async updateTaskStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { status } = req.body;
-    const task = await TaskService.updateTaskStatus(req.params.id, req.user!.uid, status);
+    const { status, cancellationReason } = req.body;
+    const task = await TaskService.updateTaskStatus(
+      req.params.id,
+      req.user!.uid,
+      status,
+      { cancellationReason }
+    );
 
     // Old format: return task directly
     res.json(task);
