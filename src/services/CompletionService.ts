@@ -150,8 +150,11 @@ export class CompletionService {
         completionStatus: 'rejected',
         completionRejectedReason: reason,
         completionRejectedAt: new Date(),
-        // Clear completion proof so performer can resubmit
-        $unset: { completionProof: '' },
+        // Clear completion proof and notes so performer can resubmit
+        $unset: { 
+          completionProof: '',
+          completionNotes: ''
+        },
         updatedAt: new Date(),
       },
       { new: true, runValidators: true }

@@ -248,7 +248,11 @@ export class TaskService {
       requesterId: uid,
       requesterName: finalRequesterName,
       estimatedDuration: taskData.estimatedDuration || taskData.duration,
-      scheduledDate: taskData.scheduledDate,
+      scheduledDate: taskData.scheduledDate 
+        ? (typeof taskData.scheduledDate === 'string' 
+            ? new Date(taskData.scheduledDate) 
+            : taskData.scheduledDate)
+        : undefined,
       scheduledTime: taskData.scheduledTime, // Keep for backward compatibility
       scheduledTimeStart: taskData.scheduledTimeStart, // New: Start time range
       scheduledTimeEnd: taskData.scheduledTimeEnd, // New: End time range
