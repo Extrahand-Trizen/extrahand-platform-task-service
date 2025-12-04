@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
+import { ApplicationService } from '../services/ApplicationService';
 import { BadRequestError } from '../errors/AppError';
 
 export class TaskController {
@@ -107,6 +108,31 @@ export class TaskController {
 
     // Old format: return message object
     res.json({ message: 'Task deleted successfully' });
+  }
+
+  /**
+   * GET /api/v1/tasks/:id/applications
+   * Get applications for a specific task
+   */
+  static async getTaskApplications(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id: taskId } = req.params;
+    const { limit, page } = req.query;
+
+    if (!taskId) {
+      throw new BadRequestError('Task ID is required');
+    }
+
+    const result = await ApplicationService.getApplications(req.user!.uid, {
+      taskId,
+      limit: limit ? parseInt(limit as string) : undefined,
+      page: page ? parseInt(page as string) : undefined,
+    });
+
+    res.json({
+      success: true,
+      applications: result.applications,
+      pagination: result.pagination,
+    });
   }
 
   /**

@@ -8,7 +8,7 @@ export interface ITask extends Document {
   subcategory?: string;
   budget: number;
   budgetType: BudgetType;
-  location: Location;
+  location?: Location;
   urgency: Urgency;
   status: TaskStatus;
   priority: Priority;
@@ -102,20 +102,20 @@ const TaskSchema = new Schema<ITask>({
     },
     coordinates: {
       type: [Number],
-      required: true
+      required: false // Made optional
     },
     address: {
       type: String,
-      required: true
+      required: false // Made optional
     },
     city: {
       type: String,
-      required: true,
+      required: false, // Made optional
       index: true
     },
     state: {
       type: String,
-      required: true
+      required: false // Made optional
     },
     pinCode: String,
     country: {

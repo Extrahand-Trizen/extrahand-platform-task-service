@@ -222,27 +222,29 @@ export class TaskService {
     // Handle budget - can be object or number
     const budget = taskData.budget?.amount || taskData.budget;
 
-    // Handle location with fallbacks
-    const location = {
-      type: 'Point' as const,
-      coordinates: taskData.location?.coordinates || [
-        taskData.location?.longitude || 0,
-        taskData.location?.latitude || 0
-      ], // Default coordinates
-      address: taskData.location?.address || taskData.location || 'Address not specified',
-      city: taskData.location?.city || taskData.city || 'City not specified',
-      state: taskData.location?.state || taskData.state || 'State not specified',
-      country: taskData.location?.country || taskData.country || 'India'
-    };
+    // Handle location - only include if provided
+    let location;
+    if (taskData.location && (taskData.location.address || taskData.location.coordinates)) {
+      location = {
+        type: 'Point' as const,
+        coordinates: taskData.location.coordinates || [
+          taskData.location.longitude || 0,
+          taskData.location.latitude || 0
+        ],
+        address: taskData.location.address || taskData.location || undefined,
+        city: taskData.location.city || taskData.city || undefined,
+        state: taskData.location.state || taskData.state || undefined,
+        country: taskData.location.country || taskData.country || 'India'
+      };
+    }
 
-    const task = await Task.create({
+    const taskPayload: any = {
       title: taskData.title,
       description: taskData.description,
       category: mappedCategory,
       subcategory: taskData.subcategory,
       budget: budget, // Handle both object and number
       budgetType: taskData.budgetType || 'fixed',
-      location: location,
       urgency: taskData.urgency || 'medium',
       priority: taskData.priority || 'normal',
       requesterId: uid,
@@ -265,7 +267,14 @@ export class TaskService {
       status: 'open',
       createdAt: new Date(),
       updatedAt: new Date()
-    });
+    };
+
+    // Only include location if it was provided
+    if (location) {
+      taskPayload.location = location;
+    }
+
+    const task = await Task.create(taskPayload);
 
     logger.info(`✅ Task created successfully: ${task._id}`);
     return task.toObject();

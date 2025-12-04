@@ -17,6 +17,9 @@ router.get('/nearby', asyncHandler(TaskController.getNearbyTasks));
 // GET /api/v1/tasks/my-tasks - Get tasks posted by current user
 router.get('/my-tasks', asyncHandler(TaskController.getMyTasks));
 
+// GET /api/v1/tasks/:id/applications - Get applications for a task (must come before /:id route)
+router.get('/:id/applications', asyncHandler(TaskController.getTaskApplications));
+
 // GET /api/v1/tasks/:id - Get a single task
 router.get('/:id', asyncHandler(TaskController.getTask));
 
