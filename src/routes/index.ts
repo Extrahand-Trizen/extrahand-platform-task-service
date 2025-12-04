@@ -9,6 +9,8 @@ import reportRoutes from './reports';
 import matchRoutes from './matches';
 import uploadRoutes from './uploads';
 import { asyncHandler } from '../middleware/errorHandler';
+import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
+import { serviceAuthMiddleware } from '../middleware/serviceAuth';
 
 const router = Router();
 
@@ -21,6 +23,13 @@ router.get('/health', asyncHandler(async (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 }));
+
+// Service-to-service cascade delete endpoint (requires service auth)
+router.delete(
+  '/cascade-delete/user/:uid',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.deleteUserData.bind(CascadeDeleteController))
+);
 
 // API routes
 router.use('/tasks', taskRoutes);
