@@ -249,7 +249,9 @@ export class TaskService {
       requesterName: finalRequesterName,
       estimatedDuration: taskData.estimatedDuration || taskData.duration,
       scheduledDate: taskData.scheduledDate,
-      scheduledTime: taskData.scheduledTime,
+      scheduledTime: taskData.scheduledTime, // Keep for backward compatibility
+      scheduledTimeStart: taskData.scheduledTimeStart, // New: Start time range
+      scheduledTimeEnd: taskData.scheduledTimeEnd, // New: End time range
       flexibility: taskData.flexibility || 'flexible',
       requirements: taskData.requirements || taskData.skillsRequired || [],
       images: taskData.images || [],

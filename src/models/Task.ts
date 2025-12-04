@@ -21,7 +21,9 @@ export interface ITask extends Document {
   estimatedDuration?: number;
   actualDuration?: number;
   scheduledDate?: Date;
-  scheduledTime?: string;
+  scheduledTime?: string; // Keep for backward compatibility
+  scheduledTimeStart?: string; // New: Start time "HH:MM AM/PM" (e.g., "10:00 AM")
+  scheduledTimeEnd?: string; // New: End time "HH:MM AM/PM" (e.g., "11:00 AM")
   flexibility: Flexibility;
   requirements?: string[];
   attachments?: Array<{
@@ -167,7 +169,15 @@ const TaskSchema = new Schema<ITask>({
     min: 0
   },
   scheduledDate: Date,
-  scheduledTime: String,
+  scheduledTime: String, // Keep for backward compatibility
+  scheduledTimeStart: {
+    type: String,
+    // Format: "HH:MM AM/PM" (e.g., "10:00 AM", "02:30 PM")
+  },
+  scheduledTimeEnd: {
+    type: String,
+    // Format: "HH:MM AM/PM" (e.g., "11:00 AM", "03:30 PM")
+  },
   flexibility: {
     type: String,
     enum: ['strict', 'flexible', 'anytime'],
