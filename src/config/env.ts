@@ -40,6 +40,7 @@ const envSchema = z.object({
   SERVICE_AUTH_TOKEN: z.string().min(1, 'SERVICE_AUTH_TOKEN is required for service-to-service communication').optional(),
   USER_SERVICE_URL: z.string().url().default('http://localhost:4001'),
   MESSAGING_SERVICE_URL: z.string().url().default('http://localhost:4006'),
+  NOTIFICATION_SERVICE_URL: z.string().url().default('http://localhost:4005'),
   PAYMENT_SERVICE_URL: z.string().url().default('http://localhost:4003'),
   
   // Storage Configuration
