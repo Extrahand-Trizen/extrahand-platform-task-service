@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { QuestionService } from '../services/QuestionService';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class QuestionController {
   /**
@@ -14,21 +15,7 @@ export class QuestionController {
       req.body.question
     );
 
-    // Old format: return question with id at root
-    res.status(201).json({
-      id: String(question._id),
-      _id: String(question._id),
-      taskId: String(question.taskId),
-      askedByUid: question.askedByUid,
-      question: question.question,
-      answer: question.answer,
-      answeredByUid: question.answeredByUid,
-      answeredAt: question.answeredAt,
-      isPublic: question.isPublic,
-      createdAt: question.createdAt,
-      updatedAt: question.updatedAt,
-      askerProfile: (question as any).askerProfile
-    });
+    ApiResponse.created(res, question, 'Question submitted successfully');
   }
 
   /**
@@ -41,11 +28,7 @@ export class QuestionController {
       req.user!.uid
     );
 
-    // Old format: return { questions: [...], count: ... }
-    res.json({
-      questions,
-      count: questions.length
-    });
+    ApiResponse.success(res, questions, 'Questions retrieved successfully');
   }
 
   /**
@@ -60,22 +43,7 @@ export class QuestionController {
       req.body.answer
     );
 
-    // Old format: return question with id at root
-    res.json({
-      id: String(question._id),
-      _id: String(question._id),
-      taskId: String(question.taskId),
-      askedByUid: question.askedByUid,
-      question: question.question,
-      answer: question.answer,
-      answeredByUid: question.answeredByUid,
-      answeredAt: question.answeredAt,
-      isPublic: question.isPublic,
-      createdAt: question.createdAt,
-      updatedAt: question.updatedAt,
-      askerProfile: (question as any).askerProfile,
-      answererProfile: (question as any).answererProfile
-    });
+    ApiResponse.success(res, question, 'Question answered successfully');
   }
 
   /**
@@ -89,10 +57,7 @@ export class QuestionController {
       req.user!.uid
     );
 
-    // Old format: return message object
-    res.json({
-      message: 'Question deleted successfully'
-    });
+    ApiResponse.success(res, null, 'Question deleted successfully');
   }
 }
 

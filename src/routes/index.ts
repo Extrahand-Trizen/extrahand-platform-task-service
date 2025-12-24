@@ -11,6 +11,7 @@ import uploadRoutes from './uploads';
 import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
+import { gatewayAuthMiddleware } from '../middleware/gatewayAuth';
 
 const router = Router();
 
@@ -23,6 +24,9 @@ router.get('/health', asyncHandler(async (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 }));
+
+// Gateway auth middleware (requires gateway auth)
+router.use(gatewayAuthMiddleware);
 
 // Service-to-service cascade delete endpoint (requires service auth)
 router.delete(

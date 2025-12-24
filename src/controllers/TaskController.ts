@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
 import { ApplicationService } from '../services/ApplicationService';
 import { BadRequestError } from '../errors/AppError';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class TaskController {
   /**
@@ -20,7 +21,7 @@ export class TaskController {
       page: page ? parseInt(page as string) : undefined,
     });
 
-    res.json(result);
+    ApiResponse.paginated(res, result.tasks, 'Tasks retrieved successfully', result.pagination);
   }
 
   /**
@@ -42,7 +43,7 @@ export class TaskController {
       status: status as any,
     });
 
-    res.json(result);
+    ApiResponse.success(res, result, 'Nearby tasks retrieved successfully');
   }
 
   /**
@@ -58,7 +59,7 @@ export class TaskController {
       page: page ? parseInt(page as string) : undefined,
     });
 
-    res.json(result);
+    ApiResponse.paginated(res, result.tasks, 'Your tasks retrieved successfully', result.pagination);
   }
 
   /**
@@ -71,7 +72,7 @@ export class TaskController {
     // Increment views
     await TaskService.incrementViews(req.params.id);
 
-    res.json(task);
+    ApiResponse.success(res, task, 'Task retrieved successfully');
   }
 
   /**
@@ -80,12 +81,11 @@ export class TaskController {
    */
   static async createTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     const uid = req.user!.uid;
-    const requesterName = req.body.requesterName || req.body.creatorName; // Fallback will be handled in service
+    const requesterName = req.body.requesterName || req.body.creatorName;
 
     const task = await TaskService.createTask(uid, requesterName, req.body);
 
-    // Old format: return task directly
-    res.status(201).json(task);
+    ApiResponse.created(res, task, 'Task created successfully');
   }
 
   /**
@@ -95,8 +95,7 @@ export class TaskController {
   static async updateTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     const task = await TaskService.updateTask(req.params.id, req.user!.uid, req.body);
 
-    // Old format: return task directly
-    res.json(task);
+    ApiResponse.success(res, task, 'Task updated successfully');
   }
 
   /**
@@ -106,8 +105,7 @@ export class TaskController {
   static async deleteTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     await TaskService.deleteTask(req.params.id, req.user!.uid);
 
-    // Old format: return message object
-    res.json({ message: 'Task deleted successfully' });
+    ApiResponse.success(res, null, 'Task deleted successfully');
   }
 
   /**
@@ -128,11 +126,7 @@ export class TaskController {
       page: page ? parseInt(page as string) : undefined,
     });
 
-    res.json({
-      success: true,
-      applications: result.applications,
-      pagination: result.pagination,
-    });
+    ApiResponse.paginated(res, result.applications, 'Applications retrieved successfully', result.pagination);
   }
 
   /**
@@ -148,8 +142,7 @@ export class TaskController {
       { cancellationReason }
     );
 
-    // Old format: return task directly
-    res.json(task);
+    ApiResponse.success(res, task, 'Task status updated successfully');
   }
 }
 

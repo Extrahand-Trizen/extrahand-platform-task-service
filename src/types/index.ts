@@ -1,11 +1,11 @@
 import { Request } from 'express';
-import { DecodedIdToken } from 'firebase-admin/auth';
 
-// Extended Express Request with user
+// Extended Express Request with user (set by gatewayAuthMiddleware)
 export interface AuthenticatedRequest extends Request {
   user?: {
     uid: string;
-    token: DecodedIdToken;
+    sessionId?: string;
+    token?: string;
   };
   rateLimitUserId?: string;
 }

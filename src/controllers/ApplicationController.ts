@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { ApplicationService } from '../services/ApplicationService';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class ApplicationController {
   /**
@@ -14,12 +15,7 @@ export class ApplicationController {
       req.body
     );
 
-    // Old format: return application with id at root
-    res.json({
-      id: String(application._id),
-      ...application,
-      message: 'Application submitted successfully'
-    });
+    ApiResponse.created(res, application, 'Application submitted successfully');
   }
 
   /**
@@ -45,11 +41,7 @@ export class ApplicationController {
 
     const result = await ApplicationService.getApplications(req.user!.uid, filters);
 
-    // Old format: return applications array with pagination
-    res.json({
-      applications: result.applications,
-      pagination: result.pagination
-    });
+    ApiResponse.paginated(res, result.applications, 'Applications retrieved successfully', result.pagination);
   }
 
   /**
@@ -64,12 +56,7 @@ export class ApplicationController {
       { status, message }
     );
 
-    // Old format: return application with id at root
-    res.json({
-      id: String(application._id),
-      ...application,
-      message: 'Application updated successfully'
-    });
+    ApiResponse.success(res, application, 'Application updated successfully');
   }
 
   /**
@@ -82,12 +69,7 @@ export class ApplicationController {
       req.user!.uid
     );
 
-    // Old format: return application with id at root
-    res.json({
-      id: String(application._id),
-      ...application,
-      message: 'Application updated successfully'
-    });
+    ApiResponse.success(res, application, 'Application accepted successfully');
   }
 
   /**
@@ -100,12 +82,7 @@ export class ApplicationController {
       req.user!.uid
     );
 
-    // Old format: return application with id at root
-    res.json({
-      id: String(application._id),
-      ...application,
-      message: 'Application updated successfully'
-    });
+    ApiResponse.success(res, application, 'Application rejected successfully');
   }
 
   /**
@@ -115,10 +92,7 @@ export class ApplicationController {
   static async withdrawApplication(req: AuthenticatedRequest, res: Response): Promise<void> {
     await ApplicationService.withdrawApplication(req.params.id, req.user!.uid);
 
-    // Old format: return message object
-    res.json({
-      message: 'Application withdrawn successfully'
-    });
+    ApiResponse.success(res, null, 'Application withdrawn successfully');
   }
 }
 
