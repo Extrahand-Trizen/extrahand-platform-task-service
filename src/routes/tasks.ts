@@ -9,15 +9,15 @@ const router = Router();
 // GET /api/v1/tasks - Get all tasks (public, but can show personalized data if authenticated)
 router.get('/', optionalAuthMiddleware, asyncHandler(TaskController.getTasks));
 
-// GET /api/v1/tasks/:id - Get a single task (public, but can show additional info if authenticated)
-router.get('/:id', optionalAuthMiddleware, asyncHandler(TaskController.getTask));
-
 // ✅ PROTECTED routes (require authentication)
 // GET /api/v1/tasks/nearby - Get nearby tasks (requires user location from profile)
 router.get('/nearby', authMiddleware, asyncHandler(TaskController.getNearbyTasks));
 
 // GET /api/v1/tasks/my-tasks - Get tasks posted by current user
 router.get('/my-tasks', authMiddleware, asyncHandler(TaskController.getMyTasks));
+
+// GET /api/v1/tasks/:id - Get a single task (public, but can show additional info if authenticated)
+router.get('/:id', optionalAuthMiddleware, asyncHandler(TaskController.getTask));
 
 // GET /api/v1/tasks/:id/applications - Get applications for a task
 router.get('/:id/applications', authMiddleware, asyncHandler(TaskController.getTaskApplications));
