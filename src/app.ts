@@ -53,13 +53,16 @@ export function createApp(): Application {
   // Routes
   app.use('/api/v1', routes);
 
-  // 404 handler
+  // 404 handler (only for unmatched routes)
   app.use((req, res) => {
-    res.status(404).json({
-      success: false,
-      error: 'Not Found',
-      message: `Route ${req.method} ${req.path} not found`
-    });
+    // Only send 404 if headers haven't been sent
+    if (!res.headersSent) {
+      res.status(404).json({
+        success: false,
+        error: 'Not Found',
+        message: `Route ${req.method} ${req.path} not found`
+      });
+    }
   });
 
   // Error handler (must be last)

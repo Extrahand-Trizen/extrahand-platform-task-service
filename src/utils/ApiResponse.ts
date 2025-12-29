@@ -29,6 +29,11 @@ export class ApiResponse {
    * Send a success response (200 OK)
    */
   static success<T>(res: Response, data: T, message = 'Success'): void {
+    // Check if headers have already been sent to avoid "Cannot set headers" error
+    if (res.headersSent) {
+      console.warn('⚠️ [ApiResponse] Attempted to send response but headers already sent');
+      return;
+    }
     res.status(200).json({
       success: true,
       code: 200,
@@ -41,6 +46,11 @@ export class ApiResponse {
    * Send a created response (201 Created)
    */
   static created<T>(res: Response, data: T, message = 'Created successfully'): void {
+    // Check if headers have already been sent to avoid "Cannot set headers" error
+    if (res.headersSent) {
+      console.warn('⚠️ [ApiResponse] Attempted to send response but headers already sent');
+      return;
+    }
     res.status(201).json({
       success: true,
       code: 201,
@@ -53,6 +63,11 @@ export class ApiResponse {
    * Send a success response with pagination metadata
    */
   static paginated<T>(res: Response, data: T, message: string, pagination: PaginationMeta): void {
+    // Check if headers have already been sent to avoid "Cannot set headers" error
+    if (res.headersSent) {
+      console.warn('⚠️ [ApiResponse] Attempted to send response but headers already sent');
+      return;
+    }
     res.status(200).json({
       success: true,
       code: 200,

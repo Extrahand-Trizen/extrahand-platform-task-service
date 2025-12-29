@@ -46,7 +46,6 @@ export async function authMiddleware(
     res.status(401).json({ error: 'Invalid token' });
     return;
   }
-  next();
 }
 
 /**
@@ -54,8 +53,8 @@ export async function authMiddleware(
  * req.user will be set if authenticated, undefined otherwise
  */
 export async function optionalAuthMiddleware(
-  _req: AuthenticatedRequest,
-  _res: Response,
+  req: AuthenticatedRequest,
+  res: Response,
   next: NextFunction
 ): Promise<void> {
   const header = req.headers.authorization || '';

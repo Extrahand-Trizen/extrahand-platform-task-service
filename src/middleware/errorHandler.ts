@@ -16,6 +16,16 @@ export function errorHandler(
     method: req.method
   });
 
+  // Check if headers have already been sent to avoid "Cannot set headers" error
+  if (res.headersSent) {
+    logger.warn('⚠️ [ErrorHandler] Attempted to send error response but headers already sent', {
+      url: req.url,
+      method: req.method,
+      error: err.message
+    });
+    return;
+  }
+
   // If it's an AppError, use its status code
   if (err instanceof AppError) {
     const statusCode = err.statusCode || 500;

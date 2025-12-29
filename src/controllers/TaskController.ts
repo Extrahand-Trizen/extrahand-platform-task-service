@@ -89,7 +89,13 @@ export class TaskController {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    const task = await TaskService.createTask(req.user!.profileId, req.body);
+    // Pass both profileId (ObjectId) and uid (Firebase UID string)
+    // profileId is used for database references, uid is used for notifications (actorId)
+    const task = await TaskService.createTask(
+      req.user!.profileId,
+      req.body,
+      req.user!.uid // Firebase UID for notification actorId
+    );
 
     ApiResponse.created(res, task, 'Task created successfully');
   }

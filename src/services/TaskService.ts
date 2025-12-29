@@ -221,7 +221,8 @@ export class TaskService {
    */
   static async createTask(
     profileId: mongoose.Types.ObjectId,
-    taskData: any
+    taskData: any,
+    uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
     // Map frontend category to backend enum
     const frontendCategory = taskData.category || taskData.type;
@@ -303,72 +304,79 @@ export class TaskService {
 
     // STEP 1: Emit TASK_CREATED_RECOMMENDED notification
     // Find taskers with matching skill category
-    try {
-      const recommendedTaskers = await UserServiceClient.matchUsers('skill', {
-        category: mappedCategory
-      });
-      if (recommendedTaskers.length > 0) {
-        await NotificationClient.sendBatch(
-          {
-            eventKey: 'TASK_CREATED_RECOMMENDED',
-            category: 'recommendedTaskAlerts',
-            actorId: uid, // Suppress notification to task creator
-            entity: { type: 'task', id: task._id.toString() },
-            title: `New task matching your skills: ${task.title}`,
-            body: `A ${mappedCategory} task has been posted that matches your skills.`,
-            data: {
-              taskId: task._id.toString(),
-              category: mappedCategory,
-              budget: task.budget.amount
-            }
-          },
-          recommendedTaskers
-        );
-      }
-    } catch (error) {
-      logger.error('Error sending TASK_CREATED_RECOMMENDED notification', {
-        taskId: task._id,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-
-    // STEP 2: Emit TASK_CREATED_KEYWORD notification
-    // Find users who have saved keywords matching this task
-    try {
-      // Extract keywords from task title and description
-      const taskKeywords = [
-        ...task.title.toLowerCase().split(/\s+/),
-        ...task.description.toLowerCase().split(/\s+/)
-      ]
-        .filter(word => word.length > 3) // Filter short words
-        .slice(0, 10); // Limit to top 10 keywords
-
-      if (taskKeywords.length > 0) {
-        const keywordMatchedUsers = await UserServiceClient.matchUsers('keywords', {
-          keywords: taskKeywords
+    if (uid) {
+      try {
+        const recommendedTaskers = await UserServiceClient.matchUsers('skill', {
+          category: mappedCategory
         });
-        if (keywordMatchedUsers.length > 0) {
+        if (recommendedTaskers.length > 0) {
           await NotificationClient.sendBatch(
             {
-              eventKey: 'TASK_CREATED_KEYWORD',
-              category: 'keywordTaskAlerts',
+              eventKey: 'TASK_CREATED_RECOMMENDED',
+              category: 'recommendedTaskAlerts',
               actorId: uid, // Suppress notification to task creator
               entity: { type: 'task', id: task._id.toString() },
-              title: `Alert: Task matches your saved keywords`,
-              body: `A new task has been posted with keywords you're interested in: ${taskKeywords.slice(0, 2).join(', ')}`,
+              title: `New task matching your skills: ${task.title}`,
+              body: `A ${mappedCategory} task has been posted that matches your skills.`,
               data: {
                 taskId: task._id.toString(),
-                matchedKeywords: taskKeywords.slice(0, 5)
+                category: mappedCategory,
+                budget: task.budget.amount
               }
             },
-            keywordMatchedUsers
+            recommendedTaskers
           );
         }
+      } catch (error) {
+        logger.error('Error sending TASK_CREATED_RECOMMENDED notification', {
+          taskId: task._id,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
       }
-    } catch (error) {
-      logger.error('Error sending TASK_CREATED_KEYWORD notification', {
+
+      // STEP 2: Emit TASK_CREATED_KEYWORD notification
+      // Find users who have saved keywords matching this task
+      try {
+        // Extract keywords from task title and description
+        const taskKeywords = [
+          ...task.title.toLowerCase().split(/\s+/),
+          ...task.description.toLowerCase().split(/\s+/)
+        ]
+          .filter(word => word.length > 3) // Filter short words
+          .slice(0, 10); // Limit to top 10 keywords
+
+        if (taskKeywords.length > 0) {
+          const keywordMatchedUsers = await UserServiceClient.matchUsers('keywords', {
+            keywords: taskKeywords
+          });
+          if (keywordMatchedUsers.length > 0) {
+            await NotificationClient.sendBatch(
+              {
+                eventKey: 'TASK_CREATED_KEYWORD',
+                category: 'keywordTaskAlerts',
+                actorId: uid, // Suppress notification to task creator
+                entity: { type: 'task', id: task._id.toString() },
+                title: `Alert: Task matches your saved keywords`,
+                body: `A new task has been posted with keywords you're interested in: ${taskKeywords.slice(0, 2).join(', ')}`,
+                data: {
+                  taskId: task._id.toString(),
+                  matchedKeywords: taskKeywords.slice(0, 5)
+                }
+              },
+              keywordMatchedUsers
+            );
+          }
+        }
+      } catch (error) {
+        logger.error('Error sending TASK_CREATED_KEYWORD notification', {
+          taskId: task._id,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    } else {
+      logger.warn('Skipping notifications - uid not provided for task creation', {
         taskId: task._id,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        profileId: profileId.toString()
       });
     }
 
