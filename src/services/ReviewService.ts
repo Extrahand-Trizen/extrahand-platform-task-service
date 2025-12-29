@@ -148,13 +148,37 @@ export class ReviewService {
       throw new ForbiddenError('Not authorized to view this review');
     }
 
-    // Find review for this task with populated profiles
-    const review = await Review.findOne({ taskId: taskId })
-      .lean();
+    // Find review for this task
+    const review = await Review.findOne({ taskId: taskId }).lean();
+    
+    if (!review) {
+      return null;
+    }
 
-    // Note: populate doesn't work with UID strings, so we'd need to manually fetch profiles
-    // For now, return as-is (original backend also had this limitation)
-    return review as unknown as IReview | null;
+    // Manually fetch reviewer and reviewed user profiles
+    try {
+      const Profile = mongoose.connection.collection('profiles');
+      
+      const [reviewerProfile, reviewedProfile] = await Promise.all([
+        Profile.findOne({ uid: review.reviewerUid }),
+        Profile.findOne({ uid: review.reviewedUid })
+      ]);
+
+      // Attach profile data to review
+      const enrichedReview: any = {
+        ...review,
+        reviewerName: reviewerProfile?.fullName || reviewerProfile?.displayName || 'Anonymous',
+        reviewerAvatar: reviewerProfile?.avatar || null,
+        reviewedName: reviewedProfile?.fullName || reviewedProfile?.displayName || 'User',
+        reviewedAvatar: reviewedProfile?.avatar || null,
+      };
+
+      return enrichedReview as IReview;
+    } catch (error) {
+      logger.warn('Could not fetch profile data for review:', error);
+      // Return review without profile data as fallback
+      return review as unknown as IReview;
+    }
   }
 
   /**

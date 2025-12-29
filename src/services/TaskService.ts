@@ -596,4 +596,64 @@ export class TaskService {
     logger.info(`Task ${taskId} status updated to ${status} by ${profileId.toString()}`);
     return updatedTask as ITask;
   }
+
+  /**
+   * Submit completion proof for review
+   */
+  static async submitCompletionProof(
+    taskId: string,
+    uid: string,
+    notes?: string
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError('Task not found');
+    }
+
+    // Check if user is the assigned performer
+    const isAssignedPerformer = task.assigneeUid === uid;
+    let hasAcceptedApplication = false;
+
+    if (!isAssignedPerformer) {
+      try {
+        const TaskApplication = (await import('../models/TaskApplication')).default;
+        const acceptedApplication = await TaskApplication.findOne({
+          taskId: task._id,
+          applicantUid: uid,
+          status: 'accepted'
+        });
+        hasAcceptedApplication = !!acceptedApplication;
+      } catch (error) {
+        logger.warn('Could not check applications for performer status:', error);
+      }
+    }
+
+    if (!isAssignedPerformer && !hasAcceptedApplication) {
+      throw new ForbiddenError('Only the assigned performer can submit completion proof');
+    }
+
+    // Verify that completion proof exists
+    if (!task.completionProof || task.completionProof.length === 0) {
+      throw new BadRequestError('Please upload at least one proof image before submitting');
+    }
+
+    // Update task to review status
+    const updatedTask = await Task.findByIdAndUpdate(
+      taskId,
+      {
+        status: 'review',
+        completionStatus: 'pending_approval',
+        completionNotes: notes,
+        updatedAt: new Date()
+      },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updatedTask) {
+      throw new NotFoundError('Task not found');
+    }
+
+    logger.info(`Completion proof submitted for task ${taskId} by user ${uid}`);
+    return updatedTask as unknown as ITask;
+  }
 }

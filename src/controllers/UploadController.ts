@@ -54,7 +54,8 @@ export class UploadController {
       fileData
     );
 
-    ApiResponse.success(res, { uploads: results }, 'Completion proofs uploaded successfully');
+    const urls = results.map(r => r.url);
+    ApiResponse.success(res, { urls }, 'Completion proofs uploaded successfully');
   }
 
   /**

@@ -44,7 +44,7 @@ const envSchema = z.object({
   PAYMENT_SERVICE_URL: z.string().url().default('http://localhost:4003'),
   
   // Storage Configuration
-  STORAGE_PROVIDER: z.enum(['minio', 's3']).default('minio'),
+  STORAGE_PROVIDER: z.enum(['minio', 's3', 'local']).default('local'),
   
   // MinIO Configuration
   MINIO_ENDPOINT: z.string().optional(),
@@ -243,7 +243,7 @@ export class Config {
     return this.env.PAYMENT_SERVICE_URL;
   }
 
-  static get STORAGE_PROVIDER(): 'minio' | 's3' {
+  static get STORAGE_PROVIDER(): 'minio' | 's3' | 'local' {
     return this.env.STORAGE_PROVIDER;
   }
 }

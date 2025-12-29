@@ -8,6 +8,7 @@
 import logger from '../config/logger';
 import { MinIOStorage } from './storage/MinIOStorage';
 import { S3Storage } from './storage/S3Storage';
+import { LocalFileStorage } from './storage/LocalFileStorage';
 import { StorageInterface } from './storage/StorageInterface';
 import { validateEnv } from '../config/env';
 
@@ -17,6 +18,7 @@ const env = validateEnv();
 export const STORAGE_TYPES = {
   MINIO: 'minio',
   S3: 's3',
+  LOCAL: 'local',
 } as const;
 
 // Get storage provider type from environment (internal function)
@@ -25,8 +27,8 @@ function getStorageTypeInternal(): string {
   if (provider && Object.values(STORAGE_TYPES).includes(provider as any)) {
     return provider;
   }
-  // Default to MinIO
-  return STORAGE_TYPES.MINIO;
+  // Default to local for development
+  return STORAGE_TYPES.LOCAL;
 }
 
 // Initialize storage provider based on configuration
@@ -44,6 +46,11 @@ function getStorage(): StorageInterface {
   logger.info(`📦 Initializing storage provider: ${storageType}`);
 
   switch (storageType) {
+    case STORAGE_TYPES.LOCAL:
+      logger.info('✅ Using Local File Storage (development mode)');
+      storageInstance = new LocalFileStorage();
+      break;
+
     case STORAGE_TYPES.MINIO:
       logger.info('✅ Using CapRover MinIO storage (S3-compatible, uses AWS SDK for S3 API)');
       storageInstance = new MinIOStorage();
@@ -55,8 +62,8 @@ function getStorage(): StorageInterface {
       break;
     
     default:
-      logger.warn(`⚠️ Unknown storage provider: ${storageType}. Falling back to MinIO.`);
-      storageInstance = new MinIOStorage();
+      logger.warn(`⚠️ Unknown storage provider: ${storageType}. Falling back to Local File Storage.`);
+      storageInstance = new LocalFileStorage();
   }
 
   // Perform health check

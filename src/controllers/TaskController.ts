@@ -169,5 +169,20 @@ export class TaskController {
 
     ApiResponse.success(res, task, 'Task status updated successfully');
   }
+
+  /**
+   * POST /api/v1/tasks/:id/submit-proof
+   * Submit completion proof for review
+   */
+  static async submitCompletionProof(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { notes } = req.body;
+    const task = await TaskService.submitCompletionProof(
+      req.params.id,
+      req.user!.uid,
+      notes
+    );
+
+    ApiResponse.success(res, task, 'Completion proof submitted for review');
+  }
 }
 
