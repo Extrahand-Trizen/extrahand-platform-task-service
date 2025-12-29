@@ -1,42 +1,41 @@
 import { Router } from 'express';
 import { TaskController } from '../controllers/TaskController';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth';
 import { asyncHandler } from '../middleware/errorHandler';
 
 const router = Router();
 
-// All task routes require authentication
-router.use(authMiddleware);
+// ✅ PUBLIC routes (with optional auth for personalization)
+// GET /api/v1/tasks - Get all tasks (public, but can show personalized data if authenticated)
+router.get('/', optionalAuthMiddleware, asyncHandler(TaskController.getTasks));
 
-// GET /api/v1/tasks - Get all tasks
-router.get('/', asyncHandler(TaskController.getTasks));
+// GET /api/v1/tasks/:id - Get a single task (public, but can show additional info if authenticated)
+router.get('/:id', optionalAuthMiddleware, asyncHandler(TaskController.getTask));
 
-// GET /api/v1/tasks/nearby - Get nearby tasks
-router.get('/nearby', asyncHandler(TaskController.getNearbyTasks));
+// ✅ PROTECTED routes (require authentication)
+// GET /api/v1/tasks/nearby - Get nearby tasks (requires user location from profile)
+router.get('/nearby', authMiddleware, asyncHandler(TaskController.getNearbyTasks));
 
 // GET /api/v1/tasks/my-tasks - Get tasks posted by current user
-router.get('/my-tasks', asyncHandler(TaskController.getMyTasks));
+router.get('/my-tasks', authMiddleware, asyncHandler(TaskController.getMyTasks));
 
-// GET /api/v1/tasks/:id/applications - Get applications for a task (must come before /:id route)
-router.get('/:id/applications', asyncHandler(TaskController.getTaskApplications));
-
-// GET /api/v1/tasks/:id - Get a single task
-router.get('/:id', asyncHandler(TaskController.getTask));
+// GET /api/v1/tasks/:id/applications - Get applications for a task
+router.get('/:id/applications', authMiddleware, asyncHandler(TaskController.getTaskApplications));
 
 // POST /api/v1/tasks - Create a new task
-router.post('/', asyncHandler(TaskController.createTask));
+router.post('/', authMiddleware, asyncHandler(TaskController.createTask));
 
 // PUT /api/v1/tasks/:id - Update a task
-router.put('/:id', asyncHandler(TaskController.updateTask));
+router.put('/:id', authMiddleware, asyncHandler(TaskController.updateTask));
 
 // DELETE /api/v1/tasks/:id - Delete a task
-router.delete('/:id', asyncHandler(TaskController.deleteTask));
+router.delete('/:id', authMiddleware, asyncHandler(TaskController.deleteTask));
 
 // PATCH /api/v1/tasks/:id/status - Update task status
-router.patch('/:id/status', asyncHandler(TaskController.updateTaskStatus));
+router.patch('/:id/status', authMiddleware, asyncHandler(TaskController.updateTaskStatus));
 
 // POST /api/v1/tasks/:id/submit-proof - Submit completion proof for review
-router.post('/:id/submit-proof', asyncHandler(TaskController.submitCompletionProof));
+router.post('/:id/submit-proof', authMiddleware, asyncHandler(TaskController.submitCompletionProof));
 
 export default router;
 
