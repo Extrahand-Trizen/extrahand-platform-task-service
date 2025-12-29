@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { CompletionService } from '../services/CompletionService';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class CompletionController {
   /**
@@ -14,12 +15,7 @@ export class CompletionController {
       req.body
     );
 
-    // Old format: return with success, message, and data
-    res.json({
-      success: true,
-      message: 'Completion proof submitted. Waiting for poster approval.',
-      data: task
-    });
+    ApiResponse.success(res, task, 'Completion proof submitted. Waiting for poster approval.');
   }
 
   /**
@@ -32,12 +28,7 @@ export class CompletionController {
       req.user!.uid
     );
 
-    // Old format: return with success, message, and data
-    res.json({
-      success: true,
-      message: 'Task completion approved. Payment will be released.',
-      data: task
-    });
+    ApiResponse.success(res, task, 'Task completion approved. Payment will be released.');
   }
 
   /**
@@ -51,12 +42,7 @@ export class CompletionController {
       req.body.reason || 'Completion proof not satisfactory'
     );
 
-    // Old format: return with success, message, and data
-    res.json({
-      success: true,
-      message: 'Completion rejected. Performer can resubmit proof.',
-      data: task
-    });
+    ApiResponse.success(res, task, 'Completion rejected. Performer can resubmit proof.');
   }
 }
 

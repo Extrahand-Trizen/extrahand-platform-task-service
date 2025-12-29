@@ -3,6 +3,10 @@ import mongoose from 'mongoose';
 import { auth } from '../config/firebase';
 import { AuthenticatedRequest } from '../types';
 
+/**
+ * Auth middleware - requires user to be authenticated via gateway
+ * gatewayAuthMiddleware must run before this (sets req.user from gateway headers)
+ */
 export async function authMiddleware(
   req: AuthenticatedRequest,
   res: Response,
@@ -42,11 +46,15 @@ export async function authMiddleware(
     res.status(401).json({ error: 'Invalid token' });
     return;
   }
+  next();
 }
 
-// Optional auth middleware - sets req.user if token is present, but doesn't require it
+/**
+ * Optional auth middleware - allows unauthenticated requests
+ * req.user will be set if authenticated, undefined otherwise
+ */
 export async function optionalAuthMiddleware(
-  req: AuthenticatedRequest,
+  _req: AuthenticatedRequest,
   _res: Response,
   next: NextFunction
 ): Promise<void> {

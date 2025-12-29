@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { FollowService } from '../services/FollowService';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class FollowController {
   /**
@@ -13,12 +14,7 @@ export class FollowController {
       req.user!.uid
     );
 
-    // Old format: return with success, message, and data
-    res.status(201).json({
-      success: true,
-      message: 'Task followed successfully',
-      data: follow
-    });
+    ApiResponse.created(res, follow, 'Task followed successfully');
   }
 
   /**
@@ -31,11 +27,7 @@ export class FollowController {
       req.user!.uid
     );
 
-    // Old format: return with success and message
-    res.json({
-      success: true,
-      message: 'Task unfollowed successfully'
-    });
+    ApiResponse.success(res, null, 'Task unfollowed successfully');
   }
 
   /**
@@ -48,8 +40,7 @@ export class FollowController {
       req.user!.uid
     );
 
-    // Old format: return { isFollowing: boolean, follow: ... }
-    res.json(result);
+    ApiResponse.success(res, result, 'Follow status retrieved successfully');
   }
 
   /**
@@ -64,11 +55,7 @@ export class FollowController {
       parseInt(limit as string)
     );
 
-    // Old format: return with success and data
-    res.json({
-      success: true,
-      data: result
-    });
+    ApiResponse.success(res, result, 'Followed tasks retrieved successfully');
   }
 }
 

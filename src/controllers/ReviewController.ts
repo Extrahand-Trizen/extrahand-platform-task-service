@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { ReviewService } from '../services/ReviewService';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class ReviewController {
   /**
@@ -14,12 +15,7 @@ export class ReviewController {
       req.body
     );
 
-    // Old format: return review with id at root
-    res.json({
-      id: String(review._id),
-      ...review,
-      message: 'Review submitted successfully'
-    });
+    ApiResponse.created(res, review, 'Review submitted successfully');
   }
   
   /**
@@ -32,8 +28,7 @@ export class ReviewController {
       req.user!.uid
     );
 
-    // Old format: return { review: null } or { review: {...} }
-    res.json({ review });
+    ApiResponse.success(res, review, 'Review retrieved successfully');
   }
 
   /**
@@ -49,8 +44,7 @@ export class ReviewController {
       rating: rating ? parseInt(rating as string) : undefined,
     });
 
-    // Old format: return { reviews: [...] }
-    res.json({ reviews: result.reviews });
+    ApiResponse.success(res, result.reviews, 'Reviews retrieved successfully');
   }
 }
 

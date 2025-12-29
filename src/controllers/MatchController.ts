@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { MatchService } from '../services/MatchService';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class MatchController {
   /**
@@ -16,8 +17,7 @@ export class MatchController {
       radiusKm ? parseFloat(radiusKm as string) : undefined
     );
 
-    // Old format: return array directly
-    res.json(candidates);
+    ApiResponse.success(res, candidates, 'Candidates retrieved successfully');
   }
 }
 

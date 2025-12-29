@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { ReportService } from '../services/ReportService';
+import { ApiResponse } from '../utils/ApiResponse';
 
 export class ReportController {
   /**
@@ -16,12 +17,7 @@ export class ReportController {
       description
     );
 
-    // Old format: return with success, message, and data
-    res.status(201).json({
-      success: true,
-      message: 'Task reported successfully. Our team will review it.',
-      data: report
-    });
+    ApiResponse.created(res, report, 'Task reported successfully. Our team will review it.');
   }
 
   /**
@@ -34,11 +30,7 @@ export class ReportController {
       req.user!.uid
     );
 
-    // Old format: return with success and data
-    res.json({
-      success: true,
-      data: reports
-    });
+    ApiResponse.success(res, reports, 'Reports retrieved successfully');
   }
 }
 
