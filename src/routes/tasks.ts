@@ -35,5 +35,8 @@ router.delete('/:id', asyncHandler(TaskController.deleteTask));
 // PATCH /api/v1/tasks/:id/status - Update task status
 router.patch('/:id/status', asyncHandler(TaskController.updateTaskStatus));
 
+// POST /api/v1/tasks/:id/submit-proof - Submit completion proof for review
+router.post('/:id/submit-proof', asyncHandler(TaskController.submitCompletionProof));
+
 export default router;
 

@@ -105,6 +105,22 @@ export class UploadService {
       provider: getStorageType()
     });
 
+    // Update task with completion proof URL
+    await Task.findByIdAndUpdate(
+      taskId,
+      {
+        $push: {
+          completionProof: {
+            url: result.url,
+            key: result.key,
+            uploadedAt: new Date(),
+            uploadedBy: performerUid
+          }
+        },
+        updatedAt: new Date()
+      }
+    );
+
     return {
       url: result.url,
       key: result.key
@@ -164,7 +180,23 @@ export class UploadService {
 
     const results = await Promise.all(uploadPromises);
 
-    logger.info('Multiple completion proof images uploaded', {
+    // Update task with completion proof URLs
+    const proofEntries = results.map(result => ({
+      url: result.url,
+      key: result.key,
+      uploadedAt: new Date(),
+      uploadedBy: performerUid
+    }));
+
+    await Task.findByIdAndUpdate(
+      taskId,
+      {
+        $push: { completionProof: { $each: proofEntries } },
+        updatedAt: new Date()
+      }
+    );
+
+    logger.info('Multiple completion proof images uploaded and saved to task', {
       taskId,
       performerUid,
       count: results.length,

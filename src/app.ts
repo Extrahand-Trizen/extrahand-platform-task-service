@@ -40,6 +40,12 @@ export function createApp(): Application {
   // Sanitize data
   app.use(mongoSanitize());
 
+  // Serve uploaded files (for local file storage)
+  // This allows files to be accessed via http://localhost:4002/uploads/...
+  const uploadsPath = process.env.LOCAL_STORAGE_DIR || 'uploads';
+  app.use('/uploads', express.static(uploadsPath));
+  logger.info(`📁 Serving static files from: ${uploadsPath} at /uploads`);
+
   // Rate limiting
   const limiter = rateLimit({
     windowMs: env.RATE_LIMIT_WINDOW_MS,
