@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import mongoose from 'mongoose';
 import { auth } from '../config/firebase';
 import { AuthenticatedRequest } from '../types';
 
@@ -18,7 +19,24 @@ export async function authMiddleware(
     
     const idToken = match[1];
     const token = await auth.verifyIdToken(idToken);
-    req.user = { uid: token.uid, token };
+    
+    // Extract profileId from X-Profile-Id header (set by API Gateway)
+    const profileIdHeader = req.headers['x-profile-id'] as string;
+    let profileId: mongoose.Types.ObjectId | undefined;
+    
+    if (profileIdHeader) {
+      try {
+        profileId = new mongoose.Types.ObjectId(profileIdHeader);
+      } catch (error) {
+        // Invalid ObjectId format - continue without profileId
+      }
+    }
+    
+    req.user = { 
+      uid: token.uid, 
+      token,
+      profileId, // ✅ ObjectId reference for database operations
+    };
     next();
   } catch (e) {
     res.status(401).json({ error: 'Invalid token' });
@@ -39,7 +57,24 @@ export async function optionalAuthMiddleware(
     try {
       const idToken = match[1];
       const token = await auth.verifyIdToken(idToken);
-      req.user = { uid: token.uid, token };
+      
+      // Extract profileId from X-Profile-Id header if present
+      const profileIdHeader = req.headers['x-profile-id'] as string;
+      let profileId: mongoose.Types.ObjectId | undefined;
+      
+      if (profileIdHeader) {
+        try {
+          profileId = new mongoose.Types.ObjectId(profileIdHeader);
+        } catch (error) {
+          // Invalid ObjectId format - continue without profileId
+        }
+      }
+      
+      req.user = { 
+        uid: token.uid, 
+        token,
+        profileId,
+      };
     } catch (e) {
       req.user = undefined;
     }

@@ -1,71 +1,83 @@
-import mongoose, { Schema, Model, Document } from 'mongoose';
-
-export type ReportReason = 'spam' | 'inappropriate_content' | 'fraudulent' | 'duplicate' | 'wrong_category' | 'other';
-export type ReportStatus = 'pending' | 'reviewed' | 'resolved' | 'dismissed';
+import mongoose, { Schema, Model, Document } from "mongoose";
 
 export interface ITaskReport extends Document {
-  userId: string;
+  userId: mongoose.Types.ObjectId; // ObjectId reference to Profile
   taskId: mongoose.Types.ObjectId;
-  reason: ReportReason;
+  reason: string;
   description?: string;
-  status: ReportStatus;
-  reviewedBy?: string;
+  status: string;
+  reviewedById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   reviewedAt?: Date;
   resolutionNotes?: string;
+  taskSnapshot: {
+    title: string;
+    description: string;
+    category: string;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
 
-const TaskReportSchema = new Schema<ITaskReport>({
-  userId: {
-    type: String,
-    required: true,
-    index: true
-  },
-  taskId: {
-    type: Schema.Types.ObjectId,
-    ref: 'Task',
-    required: true,
-    index: true
-  },
-  reason: {
-    type: String,
-    required: true,
-    enum: ['spam', 'inappropriate_content', 'fraudulent', 'duplicate', 'wrong_category', 'other'],
-    index: true
-  },
-  description: {
-    type: String,
-    maxlength: 1000,
-    trim: true
-  },
-  status: {
-    type: String,
-    enum: ['pending', 'reviewed', 'resolved', 'dismissed'],
-    default: 'pending',
-    index: true
-  },
-  reviewedBy: {
-    type: String,
-    index: true
-  },
-  reviewedAt: Date,
-  resolutionNotes: String
-}, {
-  versionKey: false,
-  timestamps: true
-});
+const TaskReportSchema = new Schema<ITaskReport>(
+  {
+    userId: {
+      type: Schema.Types.ObjectId,
+      ref: "Profile",
+      required: true,
+      index: true,
+    },
+    taskId: {
+      type: Schema.Types.ObjectId,
+      ref: "Task",
+      required: true,
+      index: true,
+    },
 
-// Compound index to prevent duplicate reports
-TaskReportSchema.index({ userId: 1, taskId: 1 });
+    reason: {
+      type: String,
+      enum: [
+        "spam",
+        "inappropriate_content",
+        "fraudulent",
+        "duplicate",
+        "wrong_category",
+        "other",
+      ],
+      required: true,
+      index: true,
+    },
 
-// Index for finding all reports for a task
-TaskReportSchema.index({ taskId: 1, status: 1, createdAt: -1 });
+    description: { type: String, maxlength: 1000, trim: true },
 
-// Index for finding all reports by a user
-TaskReportSchema.index({ userId: 1, createdAt: -1 });
+    status: {
+      type: String,
+      enum: ["pending", "reviewed", "resolved", "dismissed"],
+      default: "pending",
+      index: true,
+    },
 
-const TaskReport: Model<ITaskReport> = mongoose.models.TaskReport || mongoose.model<ITaskReport>('TaskReport', TaskReportSchema);
+    reviewedById: {
+      type: Schema.Types.ObjectId,
+      ref: "Profile",
+      index: true,
+    },
+    reviewedAt: Date,
+    resolutionNotes: String,
+
+    taskSnapshot: {
+      title: { type: String, required: true },
+      description: { type: String, required: true },
+      category: { type: String, required: true },
+    },
+  },
+  { timestamps: true }
+);
+
+// 🔒 Prevent duplicate reports
+TaskReportSchema.index({ userId: 1, taskId: 1 }, { unique: true });
+
+const TaskReport: Model<ITaskReport> =
+  mongoose.models.TaskReport ||
+  mongoose.model<ITaskReport>("TaskReport", TaskReportSchema);
 
 export default TaskReport;
-

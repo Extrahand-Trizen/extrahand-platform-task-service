@@ -2,10 +2,10 @@ import mongoose, { Schema, Model, Document } from 'mongoose';
 
 export interface ITaskQuestion extends Document {
   taskId: mongoose.Types.ObjectId;
-  askedByUid: string;
+  askedById: mongoose.Types.ObjectId; // ObjectId reference to Profile
   question: string;
   answer?: string;
-  answeredByUid?: string;
+  answeredById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   answeredAt?: Date;
   isPublic: boolean;
   createdAt: Date;
@@ -19,8 +19,9 @@ const TaskQuestionSchema = new Schema<ITaskQuestion>({
     required: true,
     index: true
   },
-  askedByUid: {
-    type: String,
+  askedById: {
+    type: Schema.Types.ObjectId,
+    ref: 'Profile',
     required: true,
     index: true
   },
@@ -35,8 +36,9 @@ const TaskQuestionSchema = new Schema<ITaskQuestion>({
     trim: true,
     maxlength: 1000
   },
-  answeredByUid: {
-    type: String,
+  answeredById: {
+    type: Schema.Types.ObjectId,
+    ref: 'Profile',
     index: true
   },
   answeredAt: {
@@ -52,8 +54,8 @@ const TaskQuestionSchema = new Schema<ITaskQuestion>({
 
 // Indexes for common queries
 TaskQuestionSchema.index({ taskId: 1, createdAt: -1 });
-TaskQuestionSchema.index({ askedByUid: 1 });
-TaskQuestionSchema.index({ taskId: 1, askedByUid: 1 });
+TaskQuestionSchema.index({ askedById: 1 }); // ✅ Updated from askedByUid
+TaskQuestionSchema.index({ taskId: 1, askedById: 1 }); // ✅ Updated from askedByUid
 
 const TaskQuestion: Model<ITaskQuestion> = mongoose.models.TaskQuestion || mongoose.model<ITaskQuestion>('TaskQuestion', TaskQuestionSchema);
 

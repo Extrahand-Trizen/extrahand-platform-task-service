@@ -1,11 +1,13 @@
 import { Request } from 'express';
 import { DecodedIdToken } from 'firebase-admin/auth';
+import mongoose from 'mongoose';
 
 // Extended Express Request with user
 export interface AuthenticatedRequest extends Request {
   user?: {
     uid: string;
     token: DecodedIdToken;
+    profileId?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   };
   rateLimitUserId?: string;
 }

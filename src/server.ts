@@ -2,6 +2,9 @@ import { createApp } from './app';
 import { Database } from './config/database';
 import { config } from './config/env';
 import logger from './config/logger';
+import { NotificationClient } from './services/NotificationClient';
+import { UserServiceClient } from './clients/UserServiceClient';
+import { ReminderScheduler } from './schedulers/ReminderScheduler';
 
 async function startServer() {
   try {
@@ -11,6 +14,13 @@ async function startServer() {
     } else {
       logger.warn('⚠️ MONGODB_URI not provided, some features may not work');
     }
+
+    // Initialize clients
+    NotificationClient.initialize('task-service');
+    UserServiceClient.initialize();
+
+    // Initialize schedulers
+    await ReminderScheduler.initialize('task-service');
 
     // Create Express app
     const app = createApp();

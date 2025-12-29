@@ -1,9 +1,9 @@
-import mongoose, { Schema, Model, Document } from 'mongoose';
-import { ApplicationStatus } from '../types';
+import mongoose, { Schema, Model, Document } from "mongoose";
+import { ApplicationStatus } from "../types";
 
 export interface ITaskApplication extends Document {
   taskId: mongoose.Types.ObjectId;
-  applicantUid: string;
+  applicantId: mongoose.Types.ObjectId; // ObjectId reference to Profile
   proposedBudget: {
     amount: number;
     currency: string;
@@ -20,7 +20,7 @@ export interface ITaskApplication extends Document {
   portfolio?: string[];
   status: ApplicationStatus;
   messages?: Array<{
-    senderUid: string;
+    senderId: mongoose.Types.ObjectId; // ObjectId reference to Profile
     message: string;
     timestamp: Date;
     isRead: boolean;
@@ -28,91 +28,82 @@ export interface ITaskApplication extends Document {
   createdAt: Date;
   updatedAt: Date;
   respondedAt?: Date;
-  isUrgent: boolean;
-  priority: 'low' | 'medium' | 'high';
 }
 
-const TaskApplicationSchema = new Schema<ITaskApplication>({
-  taskId: {
-    type: Schema.Types.ObjectId,
-    ref: 'Task',
-    required: true,
-    index: true
-  },
-  applicantUid: {
-    type: String,
-    required: true,
-    index: true
-  },
-  proposedBudget: {
-    amount: { type: Number, required: true, min: 0 },
-    currency: { type: String, default: 'INR' },
-    isNegotiable: { type: Boolean, default: true }
-  },
-  proposedTime: {
-    startDate: Date,
-    endDate: Date,
-    estimatedDuration: Number,
-    flexible: { type: Boolean, default: true }
-  },
-  coverLetter: {
-    type: String,
-    maxlength: 1000
-  },
-  relevantExperience: [String],
-  portfolio: [String],
-  status: {
-    type: String,
-    enum: ['pending', 'accepted', 'rejected', 'withdrawn'],
-    default: 'pending',
-    index: true
-  },
-  messages: [{
-    senderUid: { type: String, required: true },
-    message: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now },
-    isRead: { type: Boolean, default: false }
-  }],
-  createdAt: {
-    type: Date,
-    default: Date.now,
-    index: true
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now
-  },
-  respondedAt: Date,
-  isUrgent: {
-    type: Boolean,
-    default: false
-  },
-  priority: {
-    type: String,
-    enum: ['low', 'medium', 'high'],
-    default: 'medium'
-  }
-}, {
-  versionKey: false,
-  timestamps: true
-});
+const TaskApplicationSchema = new Schema<ITaskApplication>(
+  {
+    taskId: {
+      type: Schema.Types.ObjectId,
+      ref: "Task",
+      required: true,
+      index: true,
+    },
+    applicantId: {
+      type: Schema.Types.ObjectId,
+      ref: "Profile",
+      required: true,
+      index: true,
+    },
 
-// Compound indexes
+    proposedBudget: {
+      amount: { type: Number, required: true, min: 0 },
+      currency: { type: String, default: "INR" },
+      isNegotiable: { type: Boolean, default: true },
+    },
+
+    proposedTime: {
+      startDate: Date,
+      endDate: Date,
+      estimatedDuration: Number,
+      flexible: { type: Boolean, default: true },
+    },
+
+    coverLetter: { type: String, maxlength: 1000 },
+    relevantExperience: [String],
+    portfolio: [String],
+
+    status: {
+      type: String,
+      enum: ["pending", "accepted", "rejected", "withdrawn"],
+      default: "pending",
+      index: true,
+    },
+
+    messages: {
+      type: [
+        {
+          senderId: {
+            type: Schema.Types.ObjectId,
+            ref: "Profile",
+            required: true,
+          },
+          message: { type: String, required: true },
+          timestamp: { type: Date, default: Date.now },
+          isRead: { type: Boolean, default: false },
+        },
+      ],
+      default: [],
+      maxlength: 50, // prevents document bloat
+    },
+  },
+  { timestamps: true }
+);
+
+// Indexes
 TaskApplicationSchema.index({ taskId: 1, status: 1 });
-TaskApplicationSchema.index({ applicantUid: 1, status: 1 });
-TaskApplicationSchema.index({ taskId: 1, applicantUid: 1 }, { unique: true });
-TaskApplicationSchema.index({ createdAt: -1, status: 1 });
+TaskApplicationSchema.index({ applicantId: 1, status: 1 }); // ✅ Updated from applicantUid
+TaskApplicationSchema.index({ taskId: 1, applicantId: 1 }, { unique: true }); // ✅ Updated from applicantUid
 
-// Pre-save middleware
-TaskApplicationSchema.pre('save', function(next) {
-  this.updatedAt = new Date();
-  if (this.isModified('status') && this.status !== 'pending') {
+// Auto-set respondedAt
+TaskApplicationSchema.pre("save", function (next) {
+  if (this.isModified("status") && this.status !== "pending") {
     this.respondedAt = new Date();
   }
   next();
 });
 
-const TaskApplication: Model<ITaskApplication> = mongoose.models.TaskApplication || mongoose.model<ITaskApplication>('TaskApplication', TaskApplicationSchema);
+const TaskApplication: Model<ITaskApplication> =
+  mongoose.models.TaskApplication ||
+  mongoose.model<ITaskApplication>("TaskApplication", TaskApplicationSchema);
 
 export default TaskApplication;
-

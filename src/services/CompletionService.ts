@@ -2,6 +2,8 @@ import Task from '../models/Task';
 import TaskApplication from '../models/TaskApplication';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
+import { PaymentClient } from './PaymentClient';
+import { NotificationClient } from './NotificationClient';
 
 export class CompletionService {
   /**
@@ -103,17 +105,91 @@ export class CompletionService {
 
     logger.info(`Task ${taskId} completion approved by poster ${taskOwnerUid}`);
 
-    // Trigger payment release workflow (placeholder - will call Payment Service)
+    // EMIT: TASK_COMPLETED and REVIEW_REQUEST notifications
     try {
-      if (task.assigneeUid && task.budget) {
-        // TODO: Call Payment Service to release payment
-        // await releasePayment(taskId, task.assigneeUid, task.budget, 'INR');
-        logger.info(`Payment release initiated for task ${taskId}`);
+      // Get assignee info for context
+      const assigneeUid = updatedTask.assigneeUid;
+      const taskTitle = updatedTask.title;
+
+      // TASK_COMPLETED - Notify requester that task is done
+      await NotificationClient.send(
+        {
+          eventKey: 'TASK_COMPLETED',
+          category: 'taskUpdates',
+          actorId: taskOwnerUid,
+          recipients: [taskOwnerUid],
+          entity: { type: 'task', id: taskId },
+          title: `Task Completed: ${taskTitle}`,
+          body: `Your task has been completed successfully. Thank you for using ExtraHand!`,
+          data: {
+            taskId,
+            status: 'completed'
+          }
+        }
+      );
+
+      // REVIEW_REQUEST - Prompt requester to review the tasker
+      await NotificationClient.send(
+        {
+          eventKey: 'REVIEW_REQUEST',
+          category: 'taskUpdates',
+          actorId: taskOwnerUid,
+          recipients: [taskOwnerUid],
+          entity: { type: 'task', id: taskId },
+          title: `Please review your tasker`,
+          body: `Share your experience with the tasker who completed "${taskTitle}". Your review helps the community!`,
+          data: {
+            taskId,
+            assigneeUid,
+            actionUrl: `/tasks/${taskId}/review`
+          }
+        }
+      );
+    } catch (error) {
+      logger.error('Error sending completion notifications', {
+        taskId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+
+    // Trigger payment auto-release workflow - Set auto-release date with grace period
+    // This allows for revisions before automatic payout
+    try {
+      // First, check if there's an escrow for this task
+      const escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      
+      if (escrow && escrow.razorpayOrderId) {
+        // Calculate auto-release date (grace period: 1 minute for testing, ideally 12 hours)
+        // TODO: Make grace period configurable via environment variable
+        const gracePeriodMinutes = 1; // For testing - should be 720 (12 hours) in production
+        const autoReleaseDate = new Date();
+        autoReleaseDate.setMinutes(autoReleaseDate.getMinutes() + gracePeriodMinutes);
+
+        // Set auto-release date instead of immediate release
+        const autoReleaseResult = await PaymentClient.setAutoReleaseDate(
+          escrow.razorpayOrderId,
+          autoReleaseDate
+        );
+
+        if (autoReleaseResult.success) {
+          logger.info(`✅ Escrow auto-release date set successfully for task ${taskId}`, {
+            escrowId: escrow.escrowId,
+            razorpayOrderId: escrow.razorpayOrderId,
+            amount: escrow.amountInRupees,
+            autoReleaseDate: autoReleaseDate.toISOString(),
+            gracePeriodMinutes,
+          });
+        } else {
+          logger.warn(`⚠️ Failed to set auto-release date for task ${taskId}:`, autoReleaseResult.error);
+          // Don't fail the request - task is still marked as completed
+        }
+      } else {
+        logger.info(`No escrow found for task ${taskId} - skipping payment auto-release setup`);
       }
     } catch (paymentError) {
       // Log payment error but don't fail the request
       // Task is still marked as completed
-      logger.error(`Error releasing payment for task ${taskId}:`, paymentError);
+      logger.error(`Error setting auto-release date for task ${taskId}:`, paymentError);
     }
 
     return updatedTask;

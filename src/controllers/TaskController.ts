@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
@@ -52,7 +53,11 @@ export class TaskController {
   static async getMyTasks(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { status, limit, page } = req.query;
 
-    const result = await TaskService.getMyTasks(req.user!.uid, {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await TaskService.getMyTasks(req.user!.profileId, {
       status: status as any,
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
@@ -79,10 +84,11 @@ export class TaskController {
    * Create a new task
    */
   static async createTask(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const uid = req.user!.uid;
-    const requesterName = req.body.requesterName || req.body.creatorName; // Fallback will be handled in service
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
 
-    const task = await TaskService.createTask(uid, requesterName, req.body);
+    const task = await TaskService.createTask(req.user!.profileId, req.body);
 
     // Old format: return task directly
     res.status(201).json(task);
@@ -93,7 +99,11 @@ export class TaskController {
    * Update a task
    */
   static async updateTask(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const task = await TaskService.updateTask(req.params.id, req.user!.uid, req.body);
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const task = await TaskService.updateTask(req.params.id, req.user!.profileId, req.body);
 
     // Old format: return task directly
     res.json(task);
@@ -104,7 +114,11 @@ export class TaskController {
    * Delete a task
    */
   static async deleteTask(req: AuthenticatedRequest, res: Response): Promise<void> {
-    await TaskService.deleteTask(req.params.id, req.user!.uid);
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    await TaskService.deleteTask(req.params.id, req.user!.profileId);
 
     // Old format: return message object
     res.json({ message: 'Task deleted successfully' });
@@ -141,9 +155,14 @@ export class TaskController {
    */
   static async updateTaskStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { status, cancellationReason } = req.body;
+    
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const task = await TaskService.updateTaskStatus(
       req.params.id,
-      req.user!.uid,
+      req.user!.profileId,
       status,
       { cancellationReason }
     );
