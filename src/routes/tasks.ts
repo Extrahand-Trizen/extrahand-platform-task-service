@@ -1,14 +1,14 @@
 import { Router } from "express";
 import { TaskController } from "../controllers/TaskController";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { serviceAuthMiddleware } from "../middleware/serviceAuth";
 import { asyncHandler } from "../middleware/errorHandler";
 
 const router = Router();
 
-// ✅ All routes require service auth (verify request is from API Gateway) AND user auth
-// GET /api/v1/tasks - Get all tasks
-router.get("/", serviceAuthMiddleware, asyncHandler(TaskController.getTasks));
+// ✅ PUBLIC routes (service auth required, user auth optional)
+// GET /api/v1/tasks - Get all tasks (public route)
+router.get("/", serviceAuthMiddleware, optionalAuthMiddleware, asyncHandler(TaskController.getTasks));
 
 // POST /api/v1/tasks - Create a new task (must come before /:id route)
 router.post(
@@ -34,10 +34,11 @@ router.get(
   asyncHandler(TaskController.getMyTasks)
 );
 
-// GET /api/v1/tasks/:id - Get a single task
+// GET /api/v1/tasks/:id - Get a single task (public route)
 router.get(
   "/:id",
   serviceAuthMiddleware,
+  optionalAuthMiddleware,
   asyncHandler(TaskController.getTask)
 );
 
