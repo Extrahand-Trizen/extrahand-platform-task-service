@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { AppError } from '../errors/AppError';
 import logger from '../config/logger';
+import { AuthenticatedRequest } from '../types';
 
 export function errorHandler(
   err: Error | AppError,
@@ -52,11 +53,12 @@ export function errorHandler(
 }
 
 // Async handler wrapper to catch errors in async route handlers
+// Supports both standard Request and AuthenticatedRequest
 export function asyncHandler(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<any>
+  fn: (req: AuthenticatedRequest, res: Response) => Promise<any>
 ) {
   return (req: Request, res: Response, next: NextFunction) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
+    Promise.resolve(fn(req as AuthenticatedRequest, res)).catch(next);
   };
 }
 
