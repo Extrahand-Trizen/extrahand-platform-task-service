@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { ApplicationService } from '../services/ApplicationService';
 import { ApiResponse } from '../utils/ApiResponse';
+import { BadRequestError } from '../errors/AppError';
 
 export class ApplicationController {
   /**
@@ -12,9 +13,14 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const application = await ApplicationService.submitApplication(
       req.body.taskId,
-      req.user!.uid,
+       req.user!.profileId,
+       req.user!.uid,
       req.body
     );
 
@@ -29,6 +35,10 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const { taskId, status, mine, limit, page } = req.query;
 
     const filters: any = {
@@ -46,7 +56,7 @@ export class ApplicationController {
     }
 
     const result = await ApplicationService.getApplications(
-      req.user!.uid,
+      req.user!.profileId,
       filters
     );
 
@@ -61,9 +71,13 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const application = await ApplicationService.getApplicationById(
       req.params.id,
-      req.user!.uid
+      req.user!.profileId
     );
     res.json(application);
   }
@@ -76,9 +90,14 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const { status, message } = req.body;
     const application = await ApplicationService.updateApplication(
       req.params.id,
+      req.user!.profileId,
       req.user!.uid,
       { status, message }
     );
@@ -94,8 +113,13 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const application = await ApplicationService.acceptApplication(
       req.params.id,
+      req.user!.profileId,
       req.user!.uid
     );
 
@@ -110,8 +134,13 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const application = await ApplicationService.rejectApplication(
       req.params.id,
+      req.user!.profileId,
       req.user!.uid
     );
 
@@ -126,9 +155,13 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     await ApplicationService.withdrawPendingApplication(
       req.params.id,
-      req.user!.uid
+      req.user!.profileId
     );
     res.json({ message: "Pending application withdrawn successfully" });
   }
@@ -141,11 +174,14 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
-    const { reason } = req.body;
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+
     await ApplicationService.withdrawAcceptedApplication(
       req.params.id,
-      req.user!.uid,
-      reason
+      req.user!.profileId
     );
     res.json({ message: "Accepted application withdrawn successfully" });
   }
@@ -155,7 +191,11 @@ export class ApplicationController {
    * Withdraw an application (alias for withdrawPendingApplication)
    */
   static async withdrawApplication(req: AuthenticatedRequest, res: Response): Promise<void> {
-    await ApplicationService.withdrawApplication(req.params.id, req.user!.uid);
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    await ApplicationService.withdrawApplication(req.params.id, req.user!.profileId);
 
     ApiResponse.success(res, null, 'Application withdrawn successfully');
   }

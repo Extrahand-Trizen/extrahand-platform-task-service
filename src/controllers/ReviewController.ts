@@ -2,6 +2,8 @@ import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { ReviewService } from '../services/ReviewService';
 import { ApiResponse } from '../utils/ApiResponse';
+import { BadRequestError } from '../errors/AppError';
+import mongoose from 'mongoose';
 
 export class ReviewController {
   /**
@@ -9,8 +11,13 @@ export class ReviewController {
    * Create a review
    */
   static async createReview(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const review = await ReviewService.createReview(
       req.body.taskId,
+      new mongoose.Types.ObjectId(req.user!.profileId),
       req.user!.uid,
       req.body
     );
@@ -23,8 +30,13 @@ export class ReviewController {
    * Get review for a specific task
    */
   static async getTaskReview(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const review = await ReviewService.getTaskReview(
       req.params.taskId,
+      new mongoose.Types.ObjectId(req.user!.profileId),
       req.user!.uid
     );
 

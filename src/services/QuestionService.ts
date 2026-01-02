@@ -10,6 +10,7 @@ export class QuestionService {
    */
   static async askQuestion(
     taskId: string,
+    askedById: mongoose.Types.ObjectId,
     askedByUid: string,
     question: string
   ): Promise<ITaskQuestion> {
@@ -28,14 +29,14 @@ export class QuestionService {
     }
 
     // Check if user is trying to ask question on their own task
-    if (task.requesterId === askedByUid) {
+    if (task.requesterId.equals(askedById)) {
       throw new BadRequestError('Cannot ask questions on your own task');
     }
 
     // Check if user already asked the same question
     const existingQuestion = await TaskQuestion.findOne({
       taskId,
-      askedByUid,
+      askedById,
       question: question.trim()
     });
 
@@ -43,10 +44,11 @@ export class QuestionService {
       throw new BadRequestError('You have already asked this question');
     }
 
+    //@ts-ignore
     // Create question
     const taskQuestion = await TaskQuestion.create({
       taskId,
-      askedByUid,
+      askedById,
       question: question.trim(),
       isPublic: true
     });
@@ -75,7 +77,7 @@ export class QuestionService {
   /**
    * Get all questions for a task
    */
-  static async getTaskQuestions(taskId: string, _uid: string): Promise<any[]> {
+  static async getTaskQuestions(taskId: string, _profileId: mongoose.Types.ObjectId, _uid: string): Promise<any[]> {
     // Check if task exists
     const task = await Task.findById(taskId);
     if (!task) {
@@ -90,24 +92,24 @@ export class QuestionService {
       .sort({ createdAt: -1 })
       .lean();
 
-    // Enrich questions with asker and answerer profiles
+    // Enrich questions with asker and answerer profiles using _id lookup
     const Profile = mongoose.connection.collection('profiles');
     const enrichedQuestions = await Promise.all(
-      questions.map(async (q) => {
+      questions.map(async (q: any) => {
         let askerProfile = null;
         let answererProfile = null;
 
         try {
-          askerProfile = await Profile.findOne({ uid: q.askedByUid });
+          askerProfile = await Profile.findOne({ _id: q.askedById });
         } catch (error) {
-          logger.warn('Could not fetch asker profile for', q.askedByUid);
+          logger.warn('Could not fetch asker profile for', q.askedById);
         }
 
-        if (q.answeredByUid) {
+        if (q.answeredById) {
           try {
-            answererProfile = await Profile.findOne({ uid: q.answeredByUid });
+            answererProfile = await Profile.findOne({ _id: q.answeredById });
           } catch (error) {
-            logger.warn('Could not fetch answerer profile for', q.answeredByUid);
+            logger.warn('Could not fetch answerer profile for', q.answeredById);
           }
         }
 
@@ -115,10 +117,10 @@ export class QuestionService {
           id: String(q._id),
           _id: String(q._id),
           taskId: String(q.taskId),
-          askedByUid: q.askedByUid,
+          askedById: String(q.askedById),
           question: q.question,
           answer: q.answer,
-          answeredByUid: q.answeredByUid,
+          answeredById: q.answeredById ? String(q.answeredById) : null,
           answeredAt: q.answeredAt,
           isPublic: q.isPublic,
           createdAt: q.createdAt,
@@ -146,7 +148,7 @@ export class QuestionService {
   static async answerQuestion(
     taskId: string,
     questionId: string,
-    answeredByUid: string,
+    answeredById: mongoose.Types.ObjectId,
     answer: string
   ): Promise<ITaskQuestion> {
     if (!answer || answer.trim().length === 0) {
@@ -164,7 +166,7 @@ export class QuestionService {
     }
 
     // Only task creator can answer questions
-    if (task.requesterId !== answeredByUid) {
+    if (!task.requesterId.equals(answeredById)) {
       throw new ForbiddenError('Only task creator can answer questions');
     }
 
@@ -179,27 +181,33 @@ export class QuestionService {
     }
 
     // Update question with answer
+    //@ts-ignore
     question.answer = answer.trim();
-    question.answeredByUid = answeredByUid;
+    //@ts-ignore
+    question.answeredById = answeredById;
+    //@ts-ignore
     question.answeredAt = new Date();
+    //@ts-ignore
     question.updatedAt = new Date();
     await question.save();
 
-    // Fetch profiles for response
+    // Fetch profiles for response using _id
     const Profile = mongoose.connection.collection('profiles');
     let askerProfile = null;
     let answererProfile = null;
 
     try {
-      askerProfile = await Profile.findOne({ uid: question.askedByUid });
+      //@ts-ignore
+      askerProfile = await Profile.findOne({ _id: question.askedById });
     } catch (error) {
-      logger.warn('Could not fetch asker profile for', question.askedByUid);
+      //@ts-ignore
+      logger.warn('Could not fetch asker profile for', question.askedById);
     }
 
     try {
-      answererProfile = await Profile.findOne({ uid: answeredByUid });
+      answererProfile = await Profile.findOne({ _id: answeredById });
     } catch (error) {
-      logger.warn('Could not fetch answerer profile for', answeredByUid);
+      logger.warn('Could not fetch answerer profile for', answeredById);
     }
 
     const result = question.toObject();
@@ -224,6 +232,7 @@ export class QuestionService {
   static async deleteQuestion(
     taskId: string,
     questionId: string,
+    profileId: mongoose.Types.ObjectId,
     uid: string
   ): Promise<void> {
     // Find the question
@@ -243,8 +252,9 @@ export class QuestionService {
     }
 
     // Only question asker or task creator can delete
-    const isAsker = question.askedByUid === uid;
-    const isTaskCreator = task.requesterId === uid;
+    //@ts-ignore
+    const isAsker = question.askedById.equals(profileId);
+    const isTaskCreator = task.requesterId.equals(profileId);
 
     if (!isAsker && !isTaskCreator) {
       throw new ForbiddenError('Not authorized to delete this question');

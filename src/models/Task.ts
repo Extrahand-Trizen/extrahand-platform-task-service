@@ -66,6 +66,12 @@ export interface ITask extends Document {
   isFeatured: boolean;
   expiresAt?: Date;
 
+  completionProof?: Array<{
+    url: string;
+    filename?: string;
+    uploadedAt?: Date;
+    uploadedBy?: string;
+  }>;
   completionStatus?: "pending_approval" | "approved" | "rejected";
   completionNotes?: string;
   completionRejectedReason?: string;
@@ -188,6 +194,12 @@ const TaskSchema = new Schema<ITask>(
 
     expiresAt: { type: Date, index: true },
 
+    completionProof: [{
+      url: { type: String, required: true },
+      filename: String,
+      uploadedAt: Date,
+      uploadedBy: String,
+    }],
     completionStatus: {
       type: String,
       enum: ["pending_approval", "approved", "rejected"],

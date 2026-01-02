@@ -16,6 +16,7 @@ export class ApplicationService {
    */
   static async submitApplication(
     taskId: string,
+    applicantProfileId: mongoose.Types.ObjectId,
     applicantUid: string,
     applicationData: {
       proposedBudget: {
@@ -39,14 +40,15 @@ export class ApplicationService {
       throw new BadRequestError("Task is not open for applications");
     }
 
-    if (task.requesterId === applicantUid) {
+    // Compare ObjectIds
+    if (task.requesterId.equals(applicantProfileId)) {
       throw new BadRequestError("Cannot apply to your own task");
     }
 
     // Check if user has already applied
     const existingApplication = await TaskApplication.findOne({
       taskId,
-      applicantUid,
+      applicantId: applicantProfileId,
     });
 
     if (existingApplication) {
@@ -56,7 +58,7 @@ export class ApplicationService {
     // Create application
     const application = await TaskApplication.create({
       taskId,
-      applicantUid,
+      applicantId: applicantProfileId,
       proposedBudget: {
         amount: Number(
           applicationData.proposedBudget?.amount ||
@@ -84,22 +86,26 @@ export class ApplicationService {
 
     // EMIT: APPLICATION_SUBMITTED notification to task requester
     try {
-      await NotificationClient.send(
-        {
-          eventKey: 'APPLICATION_SUBMITTED',
-          category: 'taskUpdates',
-          actorId: applicantUid,
-          recipients: [task.requesterId],
-          entity: { type: 'application', id: application._id.toString() },
-          title: `New application for: ${task.title}`,
-          body: `Someone has applied to your task. Review their application to accept or reject.`,
-          data: {
-            taskId,
-            applicationId: application._id.toString(),
-            applicantUid
+      const Profile = mongoose.connection.collection("profiles");
+      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+      if (requesterProfile?.uid) {
+        await NotificationClient.send(
+          {
+            eventKey: 'APPLICATION_SUBMITTED',
+            category: 'taskUpdates',
+            actorId: applicantUid,
+            recipients: [requesterProfile.uid],
+            entity: { type: 'application', id: application._id.toString() },
+            title: `New application for: ${task.title}`,
+            body: `Someone has applied to your task. Review their application to accept or reject.`,
+            data: {
+              taskId,
+              applicationId: application._id.toString(),
+              applicantUid
+            }
           }
-        }
-      );
+        );
+      }
     } catch (error) {
       logger.error('Error sending APPLICATION_SUBMITTED notification', {
         taskId,
@@ -115,7 +121,7 @@ export class ApplicationService {
    * Get applications with authorization checks
    */
   static async getApplications(
-    currentUserUid: string,
+    currentUserProfileId: mongoose.Types.ObjectId,
     filters: {
       taskId?: string;
       mine?: boolean;
@@ -131,26 +137,28 @@ export class ApplicationService {
 
     const query: any = {};
 
-    // Get applications for a specific task (task creator only)
+    // Get applications for a specific task
     if (taskId) {
       const task = await Task.findById(taskId);
       if (!task) {
         throw new NotFoundError("Task not found");
       }
 
-      // Only task owner can view applications for their task
-      if (task.requesterId !== currentUserUid) {
-        throw new ForbiddenError(
-          "Not authorized to view applications for this task"
-        );
+      const isOwner = task.requesterId.equals(currentUserProfileId);
+      
+      if (isOwner) {
+        // Owner sees all applications for their task
+        query.taskId = taskId;
+      } else {
+        // Non-owner sees only their own application for this task
+        query.taskId = taskId;
+        query.applicantId = currentUserProfileId;
       }
-
-      query.taskId = taskId;
     }
 
-    // Get my applications
+    // Get my applications across all tasks
     if (mine) {
-      query.applicantUid = currentUserUid;
+      query.applicantId = currentUserProfileId;
     }
 
     // Status filter
@@ -172,13 +180,12 @@ export class ApplicationService {
       .limit(pageSize)
       .lean();
 
-    // Manually fetch applicant profiles using UID
     const Profile = mongoose.connection.collection("profiles");
     const enrichedApplications = await Promise.all(
       applications.map(async (app) => {
         try {
           const applicantProfile = await Profile.findOne({
-            uid: app.applicantUid,
+            _id: app.applicantId,
           });
           return {
             ...app,
@@ -195,7 +202,7 @@ export class ApplicationService {
         } catch (error) {
           logger.warn(
             "Could not fetch applicant profile for",
-            app.applicantUid
+            app.applicantId
           );
           return app;
         }
@@ -226,7 +233,7 @@ export class ApplicationService {
    */
   static async getApplicationById(
     applicationId: string,
-    currentUserUid: string
+    currentUserProfileId: mongoose.Types.ObjectId
   ): Promise<any> {
     const application = await TaskApplication.findById(applicationId)
       .populate(
@@ -241,9 +248,13 @@ export class ApplicationService {
 
     // Authorization: User must be applicant or task creator
     const task = application.taskId as any;
+    const applicantIdStr = application.applicantId?.toString();
+    const currentUserIdStr = currentUserProfileId.toString();
+    const requesterIdStr = task.requesterId?.toString();
+    
     if (
-      application.applicantUid !== currentUserUid &&
-      task.requesterId !== currentUserUid
+      applicantIdStr !== currentUserIdStr &&
+      requesterIdStr !== currentUserIdStr
     ) {
       throw new ForbiddenError("Not authorized to view this application");
     }
@@ -251,7 +262,7 @@ export class ApplicationService {
     // Manually fetch applicant profile
     const Profile = mongoose.connection.collection("profiles");
     const applicantProfile = await Profile.findOne({
-      uid: application.applicantUid,
+      _id: application.applicantId,
     });
 
     return {
@@ -274,6 +285,7 @@ export class ApplicationService {
    */
   static async updateApplication(
     applicationId: string,
+    taskOwnerProfileId: mongoose.Types.ObjectId,
     taskOwnerUid: string,
     updateData: { status?: ApplicationStatus; message?: string }
   ): Promise<ITaskApplication> {
@@ -290,7 +302,7 @@ export class ApplicationService {
 
     // Only task creator can update application status
     const task = application.taskId as any;
-    if (task.requesterId !== taskOwnerUid) {
+    if (!task.requesterId.equals(taskOwnerProfileId)) {
       throw new ForbiddenError("Not authorized to update this application");
     }
 
@@ -313,15 +325,21 @@ export class ApplicationService {
         { status: "rejected" }
       );
 
-      // Update task status to assigned
-      await Task.updateOne(
-        { _id: task._id },
-        {
-          status: "assigned",
-          assigneeUid: application.applicantUid,
-          updatedAt: new Date(),
-        }
-      );
+      // Get applicant profile to set assigneeId and assigneeUid
+      const Profile = mongoose.connection.collection("profiles");
+      const applicantProfile = await Profile.findOne({ _id: application.applicantId });
+
+      // Update task status to 'assigned' and set assignee
+      await Task.findByIdAndUpdate(task._id, {
+        status: "assigned",
+        assigneeId: application.applicantId,
+        assigneeUid: applicantProfile?.uid || null,
+        assignedToName: applicantProfile?.name || applicantProfile?.fullName || "Assigned User",
+        assignedAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      logger.info(`✅ Task ${task._id} assigned to ${application.applicantId}`);
     }
 
     // STEP 2: Update application status
@@ -334,7 +352,7 @@ export class ApplicationService {
         application.messages = [];
       }
       application.messages.push({
-        senderUid: taskOwnerUid,
+        senderId: taskOwnerProfileId,
         message,
         timestamp: new Date(),
         isRead: false,
@@ -347,7 +365,12 @@ export class ApplicationService {
     const statusChanged = oldStatus !== application.status;
     
     if (statusChanged) {
-      if (application.status === 'accepted') {
+      // Fetch applicant UID for notifications
+      const Profile = mongoose.connection.collection("profiles");
+      const applicantProfile = await Profile.findOne({ _id: application.applicantId });
+      const applicantUid = applicantProfile?.uid;
+
+      if (application.status === 'accepted' && applicantUid) {
         // Emit APPLICATION_ACCEPTED to applicant
         try {
           await NotificationClient.send(
@@ -355,7 +378,7 @@ export class ApplicationService {
               eventKey: 'APPLICATION_ACCEPTED',
               category: 'taskUpdates',
               actorId: taskOwnerUid,
-              recipients: [application.applicantUid],
+              recipients: [applicantUid],
               entity: { type: 'application', id: applicationId },
               title: `Your application was accepted!`,
               body: `Great news! Your application for "${task.title}" has been accepted.`,
@@ -373,7 +396,7 @@ export class ApplicationService {
             error: error instanceof Error ? error.message : 'Unknown error'
           });
         }
-      } else if (application.status === 'rejected') {
+      } else if (application.status === 'rejected' && applicantUid) {
         // Emit APPLICATION_REJECTED to applicant
         try {
           await NotificationClient.send(
@@ -381,7 +404,7 @@ export class ApplicationService {
               eventKey: 'APPLICATION_REJECTED',
               category: 'taskUpdates',
               actorId: taskOwnerUid,
-              recipients: [application.applicantUid],
+              recipients: [applicantUid],
               entity: { type: 'application', id: applicationId },
               title: `Application Update: "${task.title}"`,
               body: `Unfortunately, your application for this task was not selected. Keep applying!`,
@@ -410,9 +433,10 @@ export class ApplicationService {
    */
   static async acceptApplication(
     applicationId: string,
+    taskOwnerProfileId: mongoose.Types.ObjectId,
     taskOwnerUid: string
   ): Promise<ITaskApplication> {
-    return this.updateApplication(applicationId, taskOwnerUid, {
+    return this.updateApplication(applicationId, taskOwnerProfileId, taskOwnerUid, {
       status: "accepted",
     });
   }
@@ -422,26 +446,37 @@ export class ApplicationService {
    */
   static async rejectApplication(
     applicationId: string,
+    taskOwnerProfileId: mongoose.Types.ObjectId,
     taskOwnerUid: string
   ): Promise<ITaskApplication> {
-    return this.updateApplication(applicationId, taskOwnerUid, {
+    return this.updateApplication(applicationId, taskOwnerProfileId, taskOwnerUid, {
       status: "rejected",
     });
   }
 
   /**
-   * Withdraw an application
+   * Withdraw an application (alias for withdrawPendingApplication)
+   */
+  static async withdrawApplication(
+    applicationId: string,
+    applicantProfileId: mongoose.Types.ObjectId
+  ): Promise<void> {
+    return this.withdrawPendingApplication(applicationId, applicantProfileId);
+  }
+
+  /**
+   * Withdraw a pending application
    */
   static async withdrawPendingApplication(
     applicationId: string,
-    applicantUid: string
+    applicantProfileId: mongoose.Types.ObjectId
   ): Promise<void> {
     const application = await TaskApplication.findById(applicationId);
     if (!application) {
       throw new NotFoundError("Application not found");
     }
 
-    if (application.applicantUid !== applicantUid) {
+    if (!application.applicantId.equals(applicantProfileId)) {
       throw new ForbiddenError(
         "Only the applicant can withdraw the application"
       );
@@ -456,21 +491,20 @@ export class ApplicationService {
     await application.save();
 
     logger.info(
-      `Application withdrawn: ${applicationId} by user ${applicantUid}`
+      `Application withdrawn: ${applicationId} by user ${applicantProfileId.toString()}`
     );
   }
 
   static async withdrawAcceptedApplication(
     applicationId: string,
-    applicantUid: string,
-    reason?: string
+    applicantProfileId: mongoose.Types.ObjectId
   ): Promise<void> {
     const application = await TaskApplication.findById(applicationId);
     if (!application) {
       throw new NotFoundError("Application not found");
     }
 
-    if (application.applicantUid !== applicantUid) {
+    if (!application.applicantId.equals(applicantProfileId)) {
       throw new ForbiddenError("Only the applicant can withdraw");
     }
 
@@ -488,8 +522,7 @@ export class ApplicationService {
       { _id: application.taskId },
       {
         status: "open",
-        assigneeUid: null,
-        assignedTo: null,
+        assigneeId: null,
         assignedAt: null,
         updatedAt: new Date(),
       }

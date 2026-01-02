@@ -12,12 +12,14 @@ export class ReviewService {
    */
   static async createReview(
     taskId: string,
+    reviewerId: mongoose.Types.ObjectId,
     reviewerUid: string,
     reviewData: {
       rating: number;
       title?: string;
       comment?: string;
       ratings?: ReviewRatings;
+      performerUid: string;
     }
   ): Promise<IReview> {
     const { rating, title, comment, ratings } = reviewData;
@@ -38,44 +40,35 @@ export class ReviewService {
     }
 
     // Check if user is the task requester (poster)
-    if (task.requesterId !== reviewerUid) {
+    if (!task.requesterId.equals(reviewerId)) {
       throw new ForbiddenError('Only task requesters can review tasks');
     }
 
-    // Get the performer's UID
-    let performerUid = task.assigneeUid;
+    // Get the performer's ID from task
+    //@ts-ignore
+    const performerId = task.assigneeId;
 
-    // If no direct assigneeUid, check for accepted applications
-    if (!performerUid) {
-      const acceptedApplication = await TaskApplication.findOne({
-        taskId: taskId,
-        status: 'accepted',
-      });
-
-      if (acceptedApplication) {
-        performerUid = acceptedApplication.applicantUid;
-      }
-    }
-
-    if (!performerUid) {
+    // If no assignee, can't review
+    if (!performerId) {
       throw new BadRequestError('Task has no assigned performer');
     }
 
     // Check if review already exists
     const existingReview = await Review.findOne({
       taskId: taskId,
-      reviewerUid: reviewerUid,
+      reviewerId: reviewerId,
     });
 
     if (existingReview) {
       throw new BadRequestError('You have already reviewed this task');
     }
 
-    // Create review
+    // Create review using ObjectIds
     const review = await Review.create({
       taskId: taskId,
-      reviewerUid: reviewerUid,
-      reviewedUid: performerUid,
+      reviewerId: reviewerId,
+      reviewedId: performerId,
+      reviewType: 'poster_to_performer', // Poster reviews the performer/tasker
       rating: rating,
       title: title || '',
       comment: comment || '',
@@ -91,7 +84,7 @@ export class ReviewService {
     // Update task with review and complete it
     await Task.findByIdAndUpdate(taskId, {
       status: 'completed',
-      assigneeUid: performerUid, // Ensure assigneeUid is set
+      assigneeId: performerId, // Ensure assigneeId is set
       rating: rating,
       review: comment || '',
       completedAt: new Date(),
@@ -102,7 +95,7 @@ export class ReviewService {
     try {
       const Profile = mongoose.connection.collection('profiles');
       const avgRatingResult = await Review.aggregate([
-        { $match: { reviewedUid: performerUid } },
+        { $match: { reviewedId: performerId } },
         {
           $group: {
             _id: null,
@@ -115,7 +108,7 @@ export class ReviewService {
       if (avgRatingResult.length > 0) {
         const { avgRating, count } = avgRatingResult[0];
         await Profile.updateOne(
-          { uid: performerUid },
+          { _id: performerId },
           { 
             $set: { 
               rating: Math.round(avgRating * 10) / 10, // Round to 1 decimal place
@@ -136,15 +129,19 @@ export class ReviewService {
   /**
    * Get review for a specific task
    */
-  static async getTaskReview(taskId: string, uid: string): Promise<IReview | null> {
+  static async getTaskReview(taskId: string, profileId: mongoose.Types.ObjectId, uid: string): Promise<IReview | null> {
     // Check if task exists
     const task = await Task.findById(taskId);
     if (!task) {
       throw new NotFoundError('Task not found');
     }
 
-    // Check if user is involved in the task
-    if (task.requesterId !== uid && task.assigneeUid !== uid) {
+    // Check if user is involved in the task (using ObjectId comparison)
+    const isRequester = task.requesterId.equals(profileId);
+    //@ts-ignore
+    const isAssignee = task.assigneeId && task.assigneeId.equals(profileId);
+    
+    if (!isRequester && !isAssignee) {
       throw new ForbiddenError('Not authorized to view this review');
     }
 
@@ -160,8 +157,8 @@ export class ReviewService {
       const Profile = mongoose.connection.collection('profiles');
       
       const [reviewerProfile, reviewedProfile] = await Promise.all([
-        Profile.findOne({ uid: review.reviewerUid }),
-        Profile.findOne({ uid: review.reviewedUid })
+        Profile.findOne({ _id: review.reviewerId }),
+        Profile.findOne({ _id: review.reviewedId })
       ]);
 
       // Attach profile data to review

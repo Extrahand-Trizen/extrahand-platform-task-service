@@ -11,7 +11,7 @@ export class CompletionService {
    */
   static async submitCompletionProof(
     taskId: string,
-    performerUid: string,
+    performerProfileId: string,
     proofData: {
       proofUrls: string[];
       notes?: string;
@@ -24,15 +24,15 @@ export class CompletionService {
       throw new NotFoundError('Task not found');
     }
 
-    // Check if user is the assigned performer
-    const isAssignedPerformer = task.assigneeUid === performerUid;
+    // Check if user is the assigned performer - compare using profile IDs (MongoDB ObjectIds)
+    const isAssignedPerformer = task.assigneeId?.toString() === performerProfileId;
     let hasAcceptedApplication = false;
 
     if (!isAssignedPerformer) {
-      // Check if user has an accepted application
+      // Check if user has an accepted application (using profile ID)
       const acceptedApplication = await TaskApplication.findOne({
         taskId: task._id,
-        applicantUid: performerUid,
+        applicantId: performerProfileId,
         status: 'accepted',
       });
       hasAcceptedApplication = !!acceptedApplication;
@@ -52,7 +52,7 @@ export class CompletionService {
       url,
       filename: url.split('/').pop() || 'proof.jpg',
       uploadedAt: new Date(),
-      uploadedBy: performerUid,
+      uploadedBy: performerProfileId,
     }));
 
     const updatedTask = await Task.findByIdAndUpdate(
@@ -67,21 +67,21 @@ export class CompletionService {
       { new: true, runValidators: true }
     ).lean();
 
-    logger.info(`Task ${taskId} completion proof submitted by user ${performerUid}`);
+    logger.info(`Task ${taskId} completion proof submitted by profile ${performerProfileId}`);
     return updatedTask;
   }
 
   /**
    * Approve completion
    */
-  static async approveCompletion(taskId: string, taskOwnerUid: string): Promise<any> {
+  static async approveCompletion(taskId: string, taskOwnerProfileId: string): Promise<any> {
     const task = await Task.findById(taskId);
     if (!task) {
       throw new NotFoundError('Task not found');
     }
 
     // Check if user is the task owner
-    if (task.requesterId !== taskOwnerUid) {
+    if (task.requesterId?.toString() !== taskOwnerProfileId) {
       throw new ForbiddenError('Only the task owner can approve completion');
     }
 
@@ -103,21 +103,21 @@ export class CompletionService {
       { new: true, runValidators: true }
     ).lean();
 
-    logger.info(`Task ${taskId} completion approved by poster ${taskOwnerUid}`);
+    logger.info(`Task ${taskId} completion approved by poster ${taskOwnerProfileId}`);
 
     // EMIT: TASK_COMPLETED and REVIEW_REQUEST notifications
     try {
       // Get assignee info for context
-      const assigneeUid = updatedTask.assigneeUid;
-      const taskTitle = updatedTask.title;
+      const assigneeUid = updatedTask?.assigneeId?.toString();
+      const taskTitle = updatedTask?.title;
 
       // TASK_COMPLETED - Notify requester that task is done
       await NotificationClient.send(
         {
           eventKey: 'TASK_COMPLETED',
           category: 'taskUpdates',
-          actorId: taskOwnerUid,
-          recipients: [taskOwnerUid],
+          actorId: taskOwnerProfileId,
+          recipients: [taskOwnerProfileId],
           entity: { type: 'task', id: taskId },
           title: `Task Completed: ${taskTitle}`,
           body: `Your task has been completed successfully. Thank you for using ExtraHand!`,
@@ -133,8 +133,8 @@ export class CompletionService {
         {
           eventKey: 'REVIEW_REQUEST',
           category: 'taskUpdates',
-          actorId: taskOwnerUid,
-          recipients: [taskOwnerUid],
+          actorId: taskOwnerProfileId,
+          recipients: [taskOwnerProfileId],
           entity: { type: 'task', id: taskId },
           title: `Please review your tasker`,
           body: `Share your experience with the tasker who completed "${taskTitle}". Your review helps the community!`,
@@ -200,7 +200,7 @@ export class CompletionService {
    */
   static async rejectCompletion(
     taskId: string,
-    taskOwnerUid: string,
+    taskOwnerProfileId: string,
     reason: string
   ): Promise<any> {
     const task = await Task.findById(taskId);
@@ -209,7 +209,7 @@ export class CompletionService {
     }
 
     // Check if user is the task owner
-    if (task.requesterId !== taskOwnerUid) {
+    if (task.requesterId?.toString() !== taskOwnerProfileId) {
       throw new ForbiddenError('Only the task owner can reject completion');
     }
 
@@ -236,7 +236,7 @@ export class CompletionService {
       { new: true, runValidators: true }
     ).lean();
 
-    logger.warn(`Task ${taskId} completion rejected by poster ${taskOwnerUid}. Reason: ${reason}`);
+    logger.warn(`Task ${taskId} completion rejected by poster ${taskOwnerProfileId}. Reason: ${reason}`);
     return updatedTask;
   }
 }

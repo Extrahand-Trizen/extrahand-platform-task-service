@@ -2,6 +2,8 @@ import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { QuestionService } from '../services/QuestionService';
 import { ApiResponse } from '../utils/ApiResponse';
+import { BadRequestError } from '../errors/AppError';
+import mongoose from 'mongoose';
 
 export class QuestionController {
   /**
@@ -9,8 +11,13 @@ export class QuestionController {
    * Ask a question
    */
   static async askQuestion(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const question = await QuestionService.askQuestion(
       req.params.taskId,
+      new mongoose.Types.ObjectId(req.user!.profileId),
       req.user!.uid,
       req.body.question
     );
@@ -23,8 +30,13 @@ export class QuestionController {
    * Get all questions for a task
    */
   static async getTaskQuestions(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const questions = await QuestionService.getTaskQuestions(
       req.params.taskId,
+      new mongoose.Types.ObjectId(req.user!.profileId),
       req.user!.uid
     );
 
@@ -36,10 +48,14 @@ export class QuestionController {
    * Answer a question
    */
   static async answerQuestion(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     const question = await QuestionService.answerQuestion(
       req.params.taskId,
       req.params.questionId,
-      req.user!.uid,
+      req.user!.profileId,
       req.body.answer
     );
 
@@ -51,9 +67,14 @@ export class QuestionController {
    * Delete a question
    */
   static async deleteQuestion(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
     await QuestionService.deleteQuestion(
       req.params.taskId,
       req.params.questionId,
+      req.user!.profileId,
       req.user!.uid
     );
 

@@ -1,4 +1,3 @@
-import mongoose from 'mongoose';
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
@@ -140,7 +139,11 @@ export class TaskController {
       throw new BadRequestError('Task ID is required');
     }
 
-    const result = await ApplicationService.getApplications(req.user!.uid, {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await ApplicationService.getApplications(req.user!.profileId, {
       taskId,
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
@@ -175,11 +178,19 @@ export class TaskController {
    * Submit completion proof for review
    */
   static async submitCompletionProof(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { notes } = req.body;
-    const task = await TaskService.submitCompletionProof(
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { proofUrls, notes } = req.body;
+    
+    // Import CompletionService for proper proof submission
+    const { CompletionService } = await import('../services/CompletionService');
+    
+    const task = await CompletionService.submitCompletionProof(
       req.params.id,
-      req.user!.uid,
-      notes
+      req.user!.profileId.toString(),
+      { proofUrls, notes }
     );
 
     ApiResponse.success(res, task, 'Completion proof submitted for review');
