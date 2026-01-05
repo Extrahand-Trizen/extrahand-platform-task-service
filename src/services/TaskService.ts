@@ -9,6 +9,7 @@ import logger from "../config/logger";
 import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
+import { emitTaskStatusChanged, emitTaskAssigned } from '../socket/socketHandlers'; // New import
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -594,6 +595,10 @@ export class TaskService {
     }
 
     logger.info(`Task ${taskId} status updated to ${status} by ${profileId.toString()}`);
+    
+    // Emit real-time status update
+    emitTaskStatusChanged(taskId, updatedTask);
+    
     return updatedTask as ITask;
   }
 

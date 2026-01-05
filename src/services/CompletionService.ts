@@ -1,9 +1,10 @@
-import Task from '../models/Task';
-import TaskApplication from '../models/TaskApplication';
-import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
+import  Task  from '../models/Task';
+import  TaskApplication  from '../models/TaskApplication';
+import { NotFoundError, BadRequestError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
-import { PaymentClient } from './PaymentClient';
 import { NotificationClient } from './NotificationClient';
+import  { PaymentClient }  from '../services/PaymentClient';
+import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
 
 export class CompletionService {
   /**
@@ -68,6 +69,10 @@ export class CompletionService {
     ).lean();
 
     logger.info(`Task ${taskId} completion proof submitted by profile ${performerProfileId}`);
+    
+    // Emit real-time proof submission
+    emitProofSubmitted(taskId, updatedTask);
+    
     return updatedTask;
   }
 
@@ -192,6 +197,9 @@ export class CompletionService {
       logger.error(`Error setting auto-release date for task ${taskId}:`, paymentError);
     }
 
+    // Emit real-time proof approval
+    emitProofApproved(taskId, updatedTask);
+
     return updatedTask;
   }
 
@@ -237,7 +245,10 @@ export class CompletionService {
     ).lean();
 
     logger.warn(`Task ${taskId} completion rejected by poster ${taskOwnerProfileId}. Reason: ${reason}`);
+    
+    // Emit real-time proof rejection
+    emitProofRejected(taskId, { task: updatedTask, reason });
+    
     return updatedTask;
   }
 }
-

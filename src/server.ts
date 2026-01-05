@@ -5,6 +5,8 @@ import logger from './config/logger';
 import { NotificationClient } from './services/NotificationClient';
 import { UserServiceClient } from './clients/UserServiceClient';
 import { ReminderScheduler } from './schedulers/ReminderScheduler';
+import { createSocketServer } from './config/socket.config';
+import { initializeSocketHandlers } from './socket/socketHandlers';
 
 async function startServer() {
   try {
@@ -22,29 +24,46 @@ async function startServer() {
     // Initialize schedulers
     await ReminderScheduler.initialize('task-service');
 
-    // Create Express app
-    const app = createApp();
+    // Create Express app and HTTP server
+    const { httpServer } = createApp();
+
+    // Initialize Socket.IO
+    const io = createSocketServer(httpServer);
+    initializeSocketHandlers(io);
 
     // Start server
     const port = config.PORT;
-    app.listen(port, () => {
+    httpServer.listen(port, () => {
       logger.info(`🚀 Task Service running on port ${port}`);
+      logger.info(`🔌 Socket.IO enabled`);
       logger.info(`📝 Environment: ${config.NODE_ENV}`);
       logger.info(`🔗 Health check: http://localhost:${port}/api/v1/health`);
     });
 
     // Graceful shutdown
-    process.on('SIGTERM', async () => {
-      logger.info('SIGTERM signal received: closing HTTP server');
-      await Database.disconnectFromDb();
-      process.exit(0);
-    });
+    const gracefulShutdown = async (signal: string) => {
+      logger.info(`${signal} signal received: closing HTTP server`);
+      
+      // Close Socket.IO connections
+      io.close(() => {
+        logger.info("Socket.IO connections closed");
+      });
 
-    process.on('SIGINT', async () => {
-      logger.info('SIGINT signal received: closing HTTP server');
-      await Database.disconnectFromDb();
-      process.exit(0);
-    });
+      httpServer.close(async () => {
+        logger.info("HTTP server closed");
+        await Database.disconnectFromDb();
+        process.exit(0);
+      });
+
+      // Force shutdown after 10 seconds
+      setTimeout(() => {
+        logger.error("Could not close connections in time, forcefully shutting down");
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   } catch (error) {
     logger.error('Failed to start server:', error);

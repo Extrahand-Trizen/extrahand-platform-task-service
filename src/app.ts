@@ -5,6 +5,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 import mongoSanitize from 'express-mongo-sanitize';
 import rateLimit from 'express-rate-limit';
+import { createServer, Server as HTTPServer } from 'http';
 import { validateEnv, getCorsConfig } from './config/env';
 import { errorHandler } from './middleware/errorHandler';
 import routes from './routes';
@@ -12,7 +13,7 @@ import logger from './config/logger';
 
 const env = validateEnv();
 
-export function createApp(): Application {
+export function createApp(): { app: Application; httpServer: HTTPServer } {
   const app = express();
 
   // Security middleware
@@ -74,6 +75,9 @@ export function createApp(): Application {
   // Error handler (must be last)
   app.use(errorHandler);
 
-  return app;
+  // Create HTTP server for Socket.IO
+  const httpServer = createServer(app);
+
+  return { app, httpServer };
 }
 
