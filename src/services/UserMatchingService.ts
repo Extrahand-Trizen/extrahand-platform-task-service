@@ -1,5 +1,3 @@
-import Task from '../models/Task';
-import { NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
 import mongoose from 'mongoose';
 

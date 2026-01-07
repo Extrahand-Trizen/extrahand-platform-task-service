@@ -9,7 +9,7 @@ import logger from "../config/logger";
 import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
-import { emitTaskStatusChanged, emitTaskAssigned } from '../socket/socketHandlers'; // New import
+import { emitTaskStatusChanged } from '../socket/socketHandlers';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -599,7 +599,7 @@ export class TaskService {
     // Emit real-time status update
     emitTaskStatusChanged(taskId, updatedTask);
     
-    return updatedTask as ITask;
+    return updatedTask as unknown as ITask;
   }
 
   /**
@@ -616,7 +616,7 @@ export class TaskService {
     }
 
     // Check if user is the assigned performer
-    const isAssignedPerformer = task.assigneeUid === uid;
+    const isAssignedPerformer = task.assigneeId?.toString() === uid;
     let hasAcceptedApplication = false;
 
     if (!isAssignedPerformer) {

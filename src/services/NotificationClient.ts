@@ -4,7 +4,6 @@ import { validateEnv } from '../config/env';
 import {
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_ENTITY_TYPES,
-  EVENT_KEY_TO_CATEGORY,
   validateEventKeyCategory,
   type NotificationCategory,
   type NotificationEntityType
@@ -58,7 +57,6 @@ export class NotificationClient {
   private static baseURL: string = '';
   private static serviceAuthToken: string = '';
   private static serviceName: string = 'unknown';
-  private static isInitialized: boolean = false;
 
   /**
    * Initialize NotificationClient with required config
@@ -75,7 +73,6 @@ export class NotificationClient {
     this.baseURL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:4005';
     this.serviceAuthToken = env.SERVICE_AUTH_TOKEN || '';
     this.serviceName = serviceName;
-    this.isInitialized = true;
 
     logger.info('NotificationClient initialized', {
       serviceName,

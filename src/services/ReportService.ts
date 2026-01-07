@@ -62,7 +62,7 @@ export class ReportService {
     }
 
     // Only task owner can see reports (admin check can be added later)
-    if (task.requesterId !== userId) {
+    if (task.requesterId.toString() !== userId) {
       throw new ForbiddenError('Not authorized to view reports');
     }
 

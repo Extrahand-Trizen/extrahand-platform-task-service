@@ -49,9 +49,9 @@ export class LocalFileStorage extends BaseStorage {
   async uploadFile(
     fileBuffer: Buffer,
     fileName: string,
-    contentType: string,
+    _contentType: string,
     folder: string = 'uploads',
-    metadata: any = {}
+    _metadata: any = {}
   ): Promise<{ url: string; key: string }> {
     try {
       // Create folder path
@@ -126,8 +126,8 @@ export class LocalFileStorage extends BaseStorage {
    */
   async getPresignedUploadUrl(
     key: string,
-    contentType: string,
-    expiresIn: number = 3600
+    _contentType: string,
+    _expiresIn: number = 3600
   ): Promise<string> {
     // For local storage, just return the public URL
     // In a real implementation, you might add a token or similar

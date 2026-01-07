@@ -1,13 +1,12 @@
 import { Request } from 'express';
 import mongoose from 'mongoose';
-import { DecodedIdToken } from 'firebase-admin/auth';
 
 // Extended Express Request with user (set by gatewayAuthMiddleware)
 export interface AuthenticatedRequest extends Request {
   user?: {
     uid: string;
     sessionId?: string;
-    token?: DecodedIdToken;
+    token?: string;  // Token string from Authorization header
     profileId?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   };
   rateLimitUserId?: string;

@@ -73,7 +73,7 @@ export class ReminderScheduler {
         status: { $in: ['assigned', 'started'] },
         // Exclude tasks that already had reminder sent (optional - use eventId dedup in notification-service)
       })
-        .select('_id scheduledDate requesterId assigneeUid title')
+        .select('_id scheduledDate requesterId assigneeId title')
         .lean();
 
       logger.info('ReminderScheduler: Found tasks needing reminders', {
@@ -85,11 +85,11 @@ export class ReminderScheduler {
       // Send reminders for each task
       for (const task of tasksNeedingReminders) {
         try {
-          const recipients: string[] = [task.requesterId];
+          const recipients: string[] = [task.requesterId.toString()];
           
           // Add assignee if different from requester
-          if (task.assigneeUid && task.assigneeUid !== task.requesterId) {
-            recipients.push(task.assigneeUid);
+          if (task.assigneeId && task.assigneeId.toString() !== task.requesterId.toString()) {
+            recipients.push(task.assigneeId.toString());
           }
 
           await NotificationClient.send(
@@ -153,14 +153,14 @@ export class ReminderScheduler {
         },
         status: { $in: ['assigned', 'started'] }
       })
-        .select('_id scheduledDate requesterId assigneeUid title')
+        .select('_id scheduledDate requesterId assigneeId title')
         .lean();
 
       for (const task of tasksNeedingReminders) {
         try {
-          const recipients: string[] = [task.requesterId];
-          if (task.assigneeUid && task.assigneeUid !== task.requesterId) {
-            recipients.push(task.assigneeUid);
+          const recipients: string[] = [task.requesterId.toString()];
+          if (task.assigneeId && task.assigneeId.toString() !== task.requesterId.toString()) {
+            recipients.push(task.assigneeId.toString());
           }
 
           await NotificationClient.send({

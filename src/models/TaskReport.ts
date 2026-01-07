@@ -18,6 +18,9 @@ export interface ITaskReport extends Document {
   updatedAt: Date;
 }
 
+// Export ReportReason type for use in services
+export type ReportReason = 'spam' | 'inappropriate_content' | 'fraudulent' | 'duplicate' | 'wrong_category' | 'other';
+
 const TaskReportSchema = new Schema<ITaskReport>(
   {
     userId: {

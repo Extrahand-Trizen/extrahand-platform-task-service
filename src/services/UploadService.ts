@@ -67,7 +67,7 @@ export class UploadService {
     }
 
     // Check if user is the assigned performer
-    const isAssignedPerformer = task.assigneeUid === performerUid;
+    const isAssignedPerformer = task.assigneeId?.toString() === performerUid;
     let hasAcceptedApplication = false;
 
     if (!isAssignedPerformer) {
@@ -146,7 +146,7 @@ export class UploadService {
     }
 
     // Check if user is the assigned performer
-    const isAssignedPerformer = task.assigneeUid === performerUid;
+    const isAssignedPerformer = task.assigneeId?.toString() === performerUid;
     let hasAcceptedApplication = false;
 
     if (!isAssignedPerformer) {
@@ -221,7 +221,7 @@ export class UploadService {
     }
 
     // Check if user is the assigned performer
-    const isAssignedPerformer = task.assigneeUid === performerUid;
+    const isAssignedPerformer = task.assigneeId?.toString() === performerUid;
     let hasAcceptedApplication = false;
 
     if (!isAssignedPerformer) {

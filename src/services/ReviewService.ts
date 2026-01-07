@@ -1,6 +1,5 @@
 import Review, { IReview } from '../models/Review';
 import Task from '../models/Task';
-import TaskApplication from '../models/TaskApplication';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
 import { ReviewRatings } from '../types';
@@ -13,7 +12,7 @@ export class ReviewService {
   static async createReview(
     taskId: string,
     reviewerId: mongoose.Types.ObjectId,
-    reviewerUid: string,
+    _reviewerUid: string,
     reviewData: {
       rating: number;
       title?: string;
@@ -129,7 +128,7 @@ export class ReviewService {
   /**
    * Get review for a specific task
    */
-  static async getTaskReview(taskId: string, profileId: mongoose.Types.ObjectId, uid: string): Promise<IReview | null> {
+  static async getTaskReview(taskId: string, profileId: mongoose.Types.ObjectId, _uid: string): Promise<IReview | null> {
     // Check if task exists
     const task = await Task.findById(taskId);
     if (!task) {
