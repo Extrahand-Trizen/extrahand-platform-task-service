@@ -4,6 +4,7 @@ import { ReviewService } from '../services/ReviewService';
 import { ApiResponse } from '../utils/ApiResponse';
 import { BadRequestError } from '../errors/AppError';
 import mongoose from 'mongoose';
+import { onReviewSubmitted } from '../utils/profileStatsHooks';
 
 export class ReviewController {
   /**
@@ -21,6 +22,11 @@ export class ReviewController {
       req.user!.uid,
       req.body
     );
+
+    // Trigger profile stats update for the reviewed user
+    onReviewSubmitted({ reviewedId: review.reviewedId.toString() }).catch(err => {
+      console.error('Failed to update profile stats after review:', err);
+    });
 
     ApiResponse.created(res, review, 'Review submitted successfully');
   }

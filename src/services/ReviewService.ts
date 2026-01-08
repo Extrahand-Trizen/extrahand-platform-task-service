@@ -190,29 +190,116 @@ export class ReviewService {
   ): Promise<{ reviews: IReview[] }> {
     const { limit = 20, skip = 0, rating } = filters;
 
-    // Use static method if available, otherwise use direct query
-    let reviews;
-    if ((Review as any).getUserReviews) {
-      reviews = await (Review as any).getUserReviews(userId, {
-        limit,
-        skip,
-        rating: rating || null
-      }).lean();
-    } else {
-      const query: any = { reviewedUid: userId, isPublic: true };
-      if (rating !== null && rating !== undefined) {
-        query.rating = rating;
-      }
+    // Build query to find reviews where user is reviewed
+    // Support both old format (reviewedUid) and new format (reviewedId)
+    const query: any = {
+      isPublic: true
+    };
 
-      reviews = await Review.find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean();
+    // Check if userId is a valid ObjectId (24 char hex string)
+    const isObjectId = /^[0-9a-fA-F]{24}$/.test(userId);
+    
+    if (isObjectId) {
+      // Query by ObjectId for new format + UID for old format
+      query.$or = [
+        { reviewedUid: userId },
+        { reviewedId: new mongoose.Types.ObjectId(userId) }
+      ];
+    } else {
+      // Firebase UID - need to lookup profile ObjectId AND query old UID format
+      try {
+        const Profile = mongoose.connection.collection('profiles');
+        const profile = await Profile.findOne({ uid: userId });
+        
+        if (profile) {
+          // Query by both old format (UID) and new format (ObjectId)
+          query.$or = [
+            { reviewedUid: userId },
+            { reviewedId: profile._id }
+          ];
+        } else {
+          // No profile found, just query by UID (old format only)
+          query.reviewedUid = userId;
+        }
+      } catch (error) {
+        logger.warn('Could not lookup profile for UID:', error);
+        // Fallback to UID query only
+        query.reviewedUid = userId;
+      }
+    }
+    
+    if (rating !== null && rating !== undefined) {
+      query.rating = rating;
     }
 
-    // Old format: just return reviews array
-    return { reviews };
+    const reviews = await Review.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // Enrich reviews with reviewer profile data
+    try {
+      const Profile = mongoose.connection.collection('profiles');
+      
+      // Get unique reviewer IDs (could be ObjectIds or UIDs)
+      const reviewerIds = (reviews as any[])
+        .map((r: any) => r.reviewerId || r.reviewerUid)
+        .filter((id, index, self) => id && self.indexOf(id) === index);
+
+      // Separate ObjectIds from UIDs
+      const objectIds: mongoose.Types.ObjectId[] = [];
+      const uids: string[] = [];
+      
+      reviewerIds.forEach(id => {
+        if (/^[0-9a-fA-F]{24}$/.test(id.toString())) {
+          // Valid ObjectId format
+          objectIds.push(new mongoose.Types.ObjectId(id));
+        } else {
+          // Firebase UID
+          uids.push(id.toString());
+        }
+      });
+
+      // Fetch all reviewer profiles (query by both _id and uid)
+      const reviewerProfiles = await Profile.find({
+        $or: [
+          { _id: { $in: objectIds } },
+          { uid: { $in: uids } }
+        ]
+      }).toArray();
+
+      // Create a map for quick lookup (index by both _id and uid)
+      const profileMap = new Map();
+      reviewerProfiles.forEach((profile: any) => {
+        // Index by ObjectId
+        if (profile._id) {
+          profileMap.set(profile._id.toString(), profile);
+        }
+        // Index by UID for old format
+        if (profile.uid) {
+          profileMap.set(profile.uid, profile);
+        }
+      });
+
+      // Enrich each review with reviewer data
+      const enrichedReviews = reviews.map((review: any) => {
+        const reviewerId = review.reviewerId || review.reviewerUid;
+        const reviewerProfile = profileMap.get(reviewerId?.toString());
+
+        return {
+          ...review,
+          reviewerName: reviewerProfile?.name || 'Anonymous',
+          reviewerPhoto: reviewerProfile?.photoURL || null,
+        };
+      });
+
+      return { reviews: enrichedReviews as unknown as IReview[] };
+    } catch (error) {
+      logger.warn('Could not fetch reviewer profile data:', error);
+      // Return reviews without enrichment as fallback
+      return { reviews: reviews as unknown as IReview[] };
+    }
   }
 }
 

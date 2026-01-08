@@ -9,7 +9,8 @@ import logger from "../config/logger";
 import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
-import { emitTaskStatusChanged } from '../socket/socketHandlers';
+import { emitTaskStatusChanged } from '../socket/socketHandlers'; 
+import { onTaskCompleted } from '../utils/profileStatsHooks';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -598,8 +599,18 @@ export class TaskService {
     
     // Emit real-time status update
     emitTaskStatusChanged(taskId, updatedTask);
+
+    // Trigger profile stats update when task is completed
+    if (status === 'completed' && updatedTask.assigneeId && updatedTask.requesterId) {
+      onTaskCompleted({
+        assigneeId: updatedTask.assigneeId.toString(),
+        requesterId: updatedTask.requesterId.toString(),
+      }).catch(err => {
+        console.error('Failed to update profile stats after task completion:', err);
+      });
+    }
     
-    return updatedTask as unknown as ITask;
+    return updatedTask as ITask;
   }
 
   /**
@@ -618,22 +629,20 @@ export class TaskService {
     // Check if user is the assigned performer
     const isAssignedPerformer = task.assigneeId?.toString() === uid;
     let hasAcceptedApplication = false;
-
-    if (!isAssignedPerformer) {
-      try {
-        const TaskApplication = (await import('../models/TaskApplication')).default;
-        const acceptedApplication = await TaskApplication.findOne({
-          taskId: task._id,
-          applicantUid: uid,
-          status: 'accepted'
-        });
-        hasAcceptedApplication = !!acceptedApplication;
-      } catch (error) {
-        logger.warn('Could not check applications for performer status:', error);
-      }
+    
+    try {
+      const TaskApplication = (await import('../models/TaskApplication')).default;
+      const acceptedApplication = await TaskApplication.findOne({
+        taskId: task._id,
+        applicantUid: uid,
+        status: 'accepted'
+      });
+      hasAcceptedApplication = !!acceptedApplication;
+    } catch (error) {
+      logger.warn('Could not check applications for performer status:', error);
     }
 
-    if (!isAssignedPerformer && !hasAcceptedApplication) {
+    if (!hasAcceptedApplication) {
       throw new ForbiddenError('Only the assigned performer can submit completion proof');
     }
 
