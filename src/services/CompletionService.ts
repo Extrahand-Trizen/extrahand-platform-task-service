@@ -5,6 +5,8 @@ import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
 import  { PaymentClient }  from '../services/PaymentClient';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
+import { EmailServiceClient } from '../clients/EmailServiceClient';
+import mongoose from 'mongoose';
 
 export class CompletionService {
   /**
@@ -150,6 +152,53 @@ export class CompletionService {
           }
         }
       );
+
+      // EMAIL: Task completed and review request
+      // Fetch requester and tasker profiles for email
+      const Profile = mongoose.connection.collection('profiles');
+      const requesterProfile = await Profile.findOne({ _id: new mongoose.Types.ObjectId(taskOwnerProfileId) });
+      const taskerProfile = assigneeUid ? await Profile.findOne({ _id: new mongoose.Types.ObjectId(assigneeUid) }) : null;
+
+      // Email to requester: Task completed + review request
+      if (requesterProfile?.email) {
+        EmailServiceClient.sendTaskCompleted(
+          requesterProfile.email,
+          requesterProfile.name || 'User',
+          false, // isTasker
+          {
+            taskId,
+            taskTitle: taskTitle || 'Task',
+            completedDate: new Date().toLocaleDateString(),
+          }
+        ).catch(err => logger.error('Failed to send task completed email to requester', { error: err.message }));
+
+        // Review request email
+        EmailServiceClient.sendReviewRequest(
+          requesterProfile.email,
+          requesterProfile.name || 'User',
+          taskerProfile?.name || 'Tasker',
+          true, // isRequester
+          {
+            taskId,
+            taskTitle: taskTitle || 'Task',
+            completedDate: new Date().toLocaleDateString(),
+          }
+        ).catch(err => logger.error('Failed to send review request email to requester', { error: err.message }));
+      }
+
+      // Email to tasker: Task completed
+      if (taskerProfile?.email) {
+        EmailServiceClient.sendTaskCompleted(
+          taskerProfile.email,
+          taskerProfile.name || 'Tasker',
+          true, // isTasker
+          {
+            taskId,
+            taskTitle: taskTitle || 'Task',
+            completedDate: new Date().toLocaleDateString(),
+          }
+        ).catch(err => logger.error('Failed to send task completed email to tasker', { error: err.message }));
+      }
     } catch (error) {
       logger.error('Error sending completion notifications', {
         taskId,

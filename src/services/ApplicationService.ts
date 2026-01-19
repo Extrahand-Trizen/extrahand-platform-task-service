@@ -9,6 +9,7 @@ import logger from "../config/logger";
 import { ApplicationStatus } from "../types";
 import mongoose from "mongoose";
 import { NotificationClient } from "./NotificationClient";
+import { EmailServiceClient } from "../clients/EmailServiceClient";
 
 export class ApplicationService {
   /**
@@ -105,6 +106,24 @@ export class ApplicationService {
             }
           }
         );
+
+        // Also send email notification (non-blocking)
+        if (requesterProfile.email) {
+          const applicantProfileData = await Profile.findOne({ _id: applicantProfileId });
+          EmailServiceClient.sendApplicationSubmitted(
+            requesterProfile.email,
+            requesterProfile.name || 'User',
+            taskId,
+            task.title,
+            {
+              applicantName: applicantProfileData?.name || 'Tasker',
+              applicantRating: applicantProfileData?.rating,
+              applicantCompletedTasks: applicantProfileData?.completedTasks,
+              proposedAmount: applicationData.proposedBudget?.amount,
+              applicantMessage: applicationData.coverLetter
+            }
+          ).catch(err => logger.error('Failed to send application submitted email', { error: err.message }));
+        }
       }
     } catch (error) {
       logger.error('Error sending APPLICATION_SUBMITTED notification', {
@@ -389,6 +408,20 @@ export class ApplicationService {
               }
             }
           );
+
+          // Also send email notification (non-blocking)
+          if (applicantProfile?.email) {
+            EmailServiceClient.sendApplicationAccepted(
+              applicantProfile.email,
+              applicantProfile.name || 'User',
+              'Requester', // TODO: fetch requester name
+              {
+                taskId: task._id.toString(),
+                taskTitle: task.title,
+                budget: application.proposedBudget?.amount,
+              }
+            ).catch(err => logger.error('Failed to send application accepted email', { error: err.message }));
+          }
         } catch (error) {
           logger.error('Error sending APPLICATION_ACCEPTED notification', {
             applicationId,
@@ -415,6 +448,15 @@ export class ApplicationService {
               }
             }
           );
+
+          // Also send email notification (non-blocking)
+          if (applicantProfile?.email) {
+            EmailServiceClient.sendApplicationRejected(
+              applicantProfile.email,
+              applicantProfile.name || 'User',
+              task.title
+            ).catch(err => logger.error('Failed to send application rejected email', { error: err.message }));
+          }
         } catch (error) {
           logger.error('Error sending APPLICATION_REJECTED notification', {
             applicationId,

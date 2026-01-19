@@ -42,6 +42,7 @@ const envSchema = z.object({
   MESSAGING_SERVICE_URL: z.string().url().default('http://localhost:4006'),
   NOTIFICATION_SERVICE_URL: z.string().url().default('http://localhost:4005'),
   PAYMENT_SERVICE_URL: z.string().url().default('http://localhost:4003'),
+  WEB_APP_URL: z.string().url().default('https://extrahand.in'),
   
   // Storage Configuration
   STORAGE_PROVIDER: z.enum(['minio', 's3', 'local']).default('local'),
