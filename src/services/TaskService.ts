@@ -89,21 +89,88 @@ export class TaskService {
    */
   static async getTasks(filters: {
     status?: TaskStatus;
-    category?: TaskCategory;
+    category?: TaskCategory | string | string[];
     city?: string;
+    minBudget?: number;
+    maxBudget?: number;
+    search?: string;
+    suburb?: string;
+    remotely?: boolean | null;
+    sortBy?: string;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, limit = 50, page = 1 } = filters;
+    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, limit = 50, page = 1 } = filters;
     const skip = (page - 1) * limit;
 
-    const query: any = {};
-    if (status) query.status = status;
-    if (category) query.category = category;
-    if (city) query["location.city"] = city;
+    // Build filters using $and to safely compose multiple $or filters
+    const andClauses: any[] = [];
+
+    if (status) andClauses.push({ status });
+
+    // Support multi-category (comma separated from query) or single category mapping
+    if (category) {
+      if (Array.isArray(category)) {
+        const mapped = category.map((c) => mapCategoryToEnum(c));
+        andClauses.push({ category: { $in: mapped } });
+      } else {
+        andClauses.push({ category: mapCategoryToEnum(category as string) });
+      }
+    }
+
+    if (city) andClauses.push({ 'location.city': city });
+
+    // Budget filters
+    if (typeof minBudget === 'number' || typeof maxBudget === 'number') {
+      const budgetFilter: any = {};
+      if (typeof minBudget === 'number') budgetFilter.$gte = minBudget;
+      if (typeof maxBudget === 'number') budgetFilter.$lte = maxBudget;
+      andClauses.push({ 'budget.amount': budgetFilter });
+    }
+
+    // Suburb filter (match address or city)
+    if (suburb) {
+      const escaped = suburb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(escaped, 'i');
+      andClauses.push({ $or: [{ 'location.address': re }, { 'location.city': re }] });
+    }
+
+    // Remotely / In-person filters
+    if (typeof remotely === 'boolean') {
+      if (remotely === true) {
+        // Remote tasks: tasks without coordinates/address
+        andClauses.push({ $or: [{ location: { $exists: false } }, { 'location.coordinates.0': { $exists: false } }, { 'location.address': { $exists: false } }] });
+      } else {
+        // In-person tasks: require coordinates to exist
+        andClauses.push({ 'location.coordinates.0': { $exists: true } });
+      }
+    }
+
+    // Search across title, description, city and category
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(escaped, 'i');
+      andClauses.push({ $or: [
+        { title: re },
+        { description: re },
+        { 'location.city': re },
+        { category: re },
+      ] });
+    }
+
+    const query = andClauses.length > 0 ? { $and: andClauses } : {};
+
+    // Sorting
+    let sortObj: any = { createdAt: -1 }; // default: recent
+    if (sortBy) {
+      if (sortBy === 'price-low') sortObj = { 'budget.amount': 1 };
+      else if (sortBy === 'price-high') sortObj = { 'budget.amount': -1 };
+      else if (sortBy === 'date') sortObj = { createdAt: 1 };
+      else sortObj = { createdAt: -1 };
+    }
 
     const tasks = await Task.find(query)
-      .sort({ createdAt: -1 })
+      .sort(sortObj)
       .skip(skip)
       .limit(limit)
       .lean();
