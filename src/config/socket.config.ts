@@ -4,6 +4,8 @@ import logger from "./logger";
 
 export function createSocketServer(httpServer: HTTPServer): SocketIOServer {
   const corsOrigins = process.env.CORS_ORIGINS?.split(",") || [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://localhost:4000",  // Frontend dev port
   ];
 
