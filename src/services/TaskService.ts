@@ -244,7 +244,7 @@ export class TaskService {
     profileId: mongoose.Types.ObjectId,
     filters: {
       status?: TaskStatus;
-      limit?: number;
+      limit?: number; 
       page?: number;
     }
   ): Promise<{ tasks: ITask[]; pagination: any }> {
