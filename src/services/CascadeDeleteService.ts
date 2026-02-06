@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Task from '../models/Task';
 import TaskApplication from '../models/TaskApplication';
 import Review from '../models/Review';
@@ -8,16 +9,11 @@ import logger from '../config/logger';
 
 export class CascadeDeleteService {
   /**
-   * Delete all data associated with a user ID
-   * This includes:
-   * - Tasks where user is requester (poster) or assignee (performer)
-   * - Task applications by the user
-   * - Reviews by or about the user
-   * - Task follows by the user
-   * - Task reports by the user
-   * - Task questions asked or answered by the user
+   * Delete all data associated with a user.
+   * Uses uid (Firebase UID) for TaskFollow; uses profileId (Profile ObjectId) for Task, TaskApplication,
+   * Review, TaskReport, TaskQuestion when provided.
    */
-  static async deleteUserData(uid: string): Promise<{
+  static async deleteUserData(uid: string, profileIdStr?: string): Promise<{
     tasksDeleted: number;
     applicationsDeleted: number;
     reviewsDeleted: number;
@@ -26,70 +22,44 @@ export class CascadeDeleteService {
     questionsDeleted: number;
     totalDeleted: number;
   }> {
-    logger.info(`🗑️ Starting cascading delete for user: ${uid}`);
+    const profileId = profileIdStr && mongoose.Types.ObjectId.isValid(profileIdStr)
+      ? new mongoose.Types.ObjectId(profileIdStr)
+      : null;
+
+    logger.info(`🗑️ Starting cascading delete for user: ${uid}, profileId: ${profileId?.toString() ?? 'not provided'}`);
 
     try {
-      // 1. Find all tasks where user is requester (poster) or assignee (performer)
-      const tasksToDelete = await Task.find({
-        $or: [
-          { requesterId: uid },
-          { assigneeUid: uid }
-        ]
-      }).select('_id').lean();
+      let taskIds: mongoose.Types.ObjectId[] = [];
+      let tasksDeleteResult = { deletedCount: 0 };
 
-      const taskIds = tasksToDelete.map(task => task._id);
-      const tasksDeleted = tasksToDelete.length;
+      if (profileId) {
+        // 1. Find tasks where user is requester (poster) or assignee (performer) by profile ObjectId
+        const tasksToDelete = await Task.find({
+          $or: [
+            { requesterId: profileId },
+            { assigneeId: profileId }
+          ]
+        }).select('_id').lean();
 
-      logger.info(`📋 Found ${tasksDeleted} tasks to delete for user ${uid}`);
+        taskIds = tasksToDelete.map(t => t._id);
+        logger.info(`📋 Found ${taskIds.length} tasks to delete for profileId ${profileId}`);
 
-      // 2. Delete tasks (this will cascade to related data via application deletion)
-      let tasksDeleteResult;
-      if (taskIds.length > 0) {
-        tasksDeleteResult = await Task.deleteMany({
-          _id: { $in: taskIds }
-        });
-        logger.info(`✅ Deleted ${tasksDeleteResult.deletedCount} tasks`);
+        if (taskIds.length > 0) {
+          tasksDeleteResult = await Task.deleteMany({ _id: { $in: taskIds } });
+          logger.info(`✅ Deleted ${tasksDeleteResult.deletedCount} tasks`);
+        }
       } else {
-        tasksDeleteResult = { deletedCount: 0 };
+        logger.warn(`⚠️ No profileId provided; skipping task deletion (tasks are keyed by profile ObjectId)`);
       }
 
-      // 3. Delete task applications by this user
-      const applicationsDeleteResult = await TaskApplication.deleteMany({
-        applicantUid: uid
-      });
-      logger.info(`✅ Deleted ${applicationsDeleteResult.deletedCount} task applications`);
-
-      // 4. Delete reviews by or about this user
-      const reviewsDeleteResult = await Review.deleteMany({
-        $or: [
-          { reviewerUid: uid },
-          { reviewedUid: uid }
-        ]
-      });
-      logger.info(`✅ Deleted ${reviewsDeleteResult.deletedCount} reviews`);
-
-      // 5. Delete task follows by this user
-      const followsDeleteResult = await TaskFollow.deleteMany({
-        userId: uid
-      });
-      logger.info(`✅ Deleted ${followsDeleteResult.deletedCount} task follows`);
-
-      // 6. Delete task reports by this user
-      const reportsDeleteResult = await TaskReport.deleteMany({
-        userId: uid
-      });
-      logger.info(`✅ Deleted ${reportsDeleteResult.deletedCount} task reports`);
-
-      // 7. Delete task questions asked or answered by this user
-      const questionsDeleteResult = await TaskQuestion.deleteMany({
-        $or: [
-          { askedByUid: uid },
-          { answeredByUid: uid }
-        ]
-      });
-      logger.info(`✅ Deleted ${questionsDeleteResult.deletedCount} task questions`);
-
-      // 8. Also delete applications for tasks that were deleted
+      // 2. Delete task applications by this user (applicantId = profileId) or orphaned by deleted tasks
+      let applicationsDeleteResult = { deletedCount: 0 };
+      if (profileId) {
+        applicationsDeleteResult = await TaskApplication.deleteMany({
+          applicantId: profileId
+        });
+        logger.info(`✅ Deleted ${applicationsDeleteResult.deletedCount} task applications (by applicantId)`);
+      }
       let orphanedApplicationsResult = { deletedCount: 0 };
       if (taskIds.length > 0) {
         orphanedApplicationsResult = await TaskApplication.deleteMany({
@@ -98,14 +68,49 @@ export class CascadeDeleteService {
         logger.info(`✅ Deleted ${orphanedApplicationsResult.deletedCount} orphaned applications`);
       }
 
-      const totalDeleted = 
+      // 3. Delete reviews by or about this user (reviewerId / reviewedId = profileId)
+      let reviewsDeleteResult = { deletedCount: 0 };
+      if (profileId) {
+        reviewsDeleteResult = await Review.deleteMany({
+          $or: [
+            { reviewerId: profileId },
+            { reviewedId: profileId }
+          ]
+        });
+        logger.info(`✅ Deleted ${reviewsDeleteResult.deletedCount} reviews`);
+      }
+
+      // 4. Task follows are keyed by uid (string)
+      const followsDeleteResult = await TaskFollow.deleteMany({ userId: uid });
+      logger.info(`✅ Deleted ${followsDeleteResult.deletedCount} task follows`);
+
+      // 5. Task reports: userId is profile ObjectId
+      let reportsDeleteResult = { deletedCount: 0 };
+      if (profileId) {
+        reportsDeleteResult = await TaskReport.deleteMany({ userId: profileId });
+        logger.info(`✅ Deleted ${reportsDeleteResult.deletedCount} task reports`);
+      }
+
+      // 6. Task questions: askedById / answeredById = profileId
+      let questionsDeleteResult = { deletedCount: 0 };
+      if (profileId) {
+        questionsDeleteResult = await TaskQuestion.deleteMany({
+          $or: [
+            { askedById: profileId },
+            { answeredById: profileId }
+          ]
+        });
+        logger.info(`✅ Deleted ${questionsDeleteResult.deletedCount} task questions`);
+      }
+
+      const totalDeleted =
         tasksDeleteResult.deletedCount +
         applicationsDeleteResult.deletedCount +
+        orphanedApplicationsResult.deletedCount +
         reviewsDeleteResult.deletedCount +
         followsDeleteResult.deletedCount +
         reportsDeleteResult.deletedCount +
-        questionsDeleteResult.deletedCount +
-        orphanedApplicationsResult.deletedCount;
+        questionsDeleteResult.deletedCount;
 
       logger.info(`✅ Cascading delete completed for user ${uid}. Total records deleted: ${totalDeleted}`);
 

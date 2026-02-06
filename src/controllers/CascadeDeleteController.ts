@@ -7,18 +7,20 @@ import logger from '../config/logger';
 export class CascadeDeleteController {
   /**
    * DELETE /api/v1/cascade-delete/user/:uid
-   * Service-to-service endpoint to delete all user-related data
+   * Service-to-service endpoint to delete all user-related data.
+   * Caller should send X-Profile-Id (profile ObjectId) so tasks and other profile-keyed data are deleted.
    */
   static async deleteUserData(req: Request, res: Response): Promise<void> {
     const { uid } = req.params;
+    const profileId = req.headers['x-profile-id'] as string | undefined;
 
     if (!uid) {
       throw new BadRequestError('User ID (uid) is required');
     }
 
-    logger.info(`🗑️ Received cascade delete request for user: ${uid}`);
+    logger.info(`🗑️ Received cascade delete request for user: ${uid}, profileId: ${profileId ?? 'not provided'}`);
 
-    const result = await CascadeDeleteService.deleteUserData(uid);
+    const result = await CascadeDeleteService.deleteUserData(uid, profileId);
 
     ApiResponse.success(res, result, 'User data deleted successfully');
   }
