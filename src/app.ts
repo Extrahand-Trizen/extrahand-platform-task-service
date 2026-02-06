@@ -17,7 +17,11 @@ export function createApp(): { app: Application; httpServer: HTTPServer } {
   const app = express();
 
   // Security middleware
-  app.use(helmet());
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: "cross-origin" },
+    })
+  );
   app.use(cors(getCorsConfig(env)));
 
   // Body parsing middleware
@@ -44,6 +48,10 @@ export function createApp(): { app: Application; httpServer: HTTPServer } {
   // Serve uploaded files (for local file storage)
   // This allows files to be accessed via http://localhost:4002/uploads/...
   const uploadsPath = process.env.LOCAL_STORAGE_DIR || 'uploads';
+  app.use('/uploads', (req, res, next) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    next();
+  });
   app.use('/uploads', express.static(uploadsPath));
   logger.info(`📁 Serving static files from: ${uploadsPath} at /uploads`);
 

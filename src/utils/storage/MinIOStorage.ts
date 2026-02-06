@@ -24,7 +24,32 @@ export class MinIOStorage extends BaseStorage {
     super();
     
     // CapRover MinIO configuration
-    this.endpoint = config.endpoint || process.env.MINIO_ENDPOINT || 'http://srv-captain--extrahand-minio-storage:9000';
+    const rawEndpoint = config.endpoint || process.env.MINIO_ENDPOINT || '';
+    const rawPort = process.env.MINIO_PORT || '';
+    const useSSL = (process.env.MINIO_USE_SSL || '').toLowerCase() === 'true';
+
+    let protocol = useSSL ? 'https' : 'http';
+    let host = 'srv-captain--extrahand-minio-storage';
+    let port = rawPort || '9000';
+
+    if (rawEndpoint) {
+      try {
+        if (rawEndpoint.includes('://')) {
+          const url = new URL(rawEndpoint);
+          host = url.hostname || host;
+          // If the URL does not include an explicit port, do not force 9000.
+          // This avoids hitting :9000 on domains served via 443/80.
+          port = url.port || rawPort || '';
+          protocol = url.protocol.replace(':', '') || protocol;
+        } else {
+          host = rawEndpoint;
+        }
+      } catch (e) {
+        logger.warn('⚠️ Could not parse MINIO_ENDPOINT, using defaults', { rawEndpoint, error: (e as Error).message });
+      }
+    }
+
+    this.endpoint = `${protocol}://${host}${port ? `:${port}` : ''}`;
     
     // Support both MINIO_ACCESS_KEY and MINIO_ROOT_USER (CapRover uses MINIO_ROOT_USER)
     this.accessKeyId = config.accessKeyId || process.env.MINIO_ACCESS_KEY || process.env.MINIO_ROOT_USER || '';

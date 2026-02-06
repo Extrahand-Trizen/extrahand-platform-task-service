@@ -97,16 +97,21 @@ export class TaskService {
     suburb?: string;
     remotely?: boolean | null;
     sortBy?: string;
+    excludeRequesterId?: string;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, limit = 50, page = 1 } = filters;
+    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, limit = 50, page = 1 } = filters;
     const skip = (page - 1) * limit;
 
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
 
     if (status) andClauses.push({ status });
+
+    if (excludeRequesterId && mongoose.Types.ObjectId.isValid(excludeRequesterId)) {
+      andClauses.push({ requesterId: { $ne: new mongoose.Types.ObjectId(excludeRequesterId) } });
+    }
 
     // Support multi-category (comma separated from query) or single category mapping
     if (category) {
