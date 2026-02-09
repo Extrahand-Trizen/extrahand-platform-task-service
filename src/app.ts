@@ -49,6 +49,8 @@ export function createApp(): { app: Application; httpServer: HTTPServer } {
   // This allows files to be accessed via http://localhost:4002/uploads/...
   const uploadsPath = process.env.LOCAL_STORAGE_DIR || 'uploads';
   app.use('/uploads', (req, res, next) => {
+    // Mark req as intentionally unused to satisfy TypeScript's noUnusedParameters rule
+    void req;
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     next();
   });
