@@ -45,11 +45,14 @@ RUN if [ -f package-lock.json ]; then \
 # Copy TypeScript configuration
 COPY tsconfig.json ./
 
+# ✨ CRITICAL: Use cache buster to invalidate cache for source copy
+# This ARG must be passed at build time with a new value to bust cache
+ARG CACHE_BUST
+RUN echo "Build cache bust: ${CACHE_BUST:-$(date +%s)}" && \
+    echo "${CACHE_BUST:-$(date +%s)}" > /tmp/build-id.txt
+
 # Copy source code
 COPY src ./src
-
-# ✨ CRITICAL: Add cache buster to force fresh code copy
-RUN echo "Cache bust: ${CACHE_BUST}" > /tmp/cache-bust.txt
 
 # Build TypeScript to JavaScript
 RUN npm run build
