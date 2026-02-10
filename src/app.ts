@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import compression from 'compression';
 import morgan from 'morgan';
 import mongoSanitize from 'express-mongo-sanitize';
-import rateLimit from 'express-rate-limit';
+// import rateLimit from 'express-rate-limit';
 import { createServer, Server as HTTPServer } from 'http';
 import { validateEnv, getCorsConfig } from './config/env';
 import { errorHandler } from './middleware/errorHandler';
