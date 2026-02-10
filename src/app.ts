@@ -58,14 +58,14 @@ export function createApp(): { app: Application; httpServer: HTTPServer } {
   logger.info(`📁 Serving static files from: ${uploadsPath} at /uploads`);
 
   // Rate limiting
-  const limiter = rateLimit({
-    windowMs: env.RATE_LIMIT_WINDOW_MS,
-    max: env.RATE_LIMIT_MAX_REQUESTS,
-    message: 'Too many requests from this IP, please try again later.',
-    standardHeaders: true,
-    legacyHeaders: false,
-  });
-  app.use('/api/', limiter);
+  // const limiter = rateLimit({
+  //   windowMs: env.RATE_LIMIT_WINDOW_MS,
+  //   max: env.RATE_LIMIT_MAX_REQUESTS,
+  //   message: 'Too many requests from this IP, please try again later.',
+  //   standardHeaders: true,
+  //   legacyHeaders: false,
+  // });
+  // app.use('/api/', limiter);
 
   // Routes
   app.use('/api/v1', routes);

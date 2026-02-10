@@ -29,7 +29,7 @@ RUN if [ -f package-lock.json ]; then \
 # Build stage
 FROM base AS build
 
-# Accept build cache buster argument
+# Accept build cache buster argument (pass new value to bust cache: --build-arg CACHE_BUST=$(date +%s))
 ARG CACHE_BUST=1
 
 # Copy package files
@@ -45,11 +45,9 @@ RUN if [ -f package-lock.json ]; then \
 # Copy TypeScript configuration
 COPY tsconfig.json ./
 
-# ✨ CRITICAL: Use cache buster to invalidate cache for source copy
-# This ARG must be passed at build time with a new value to bust cache
-ARG CACHE_BUST
-RUN echo "Build cache bust: ${CACHE_BUST:-$(date +%s)}" && \
-    echo "${CACHE_BUST:-$(date +%s)}" > /tmp/build-id.txt
+# ✨ CRITICAL: Use cache buster BEFORE copying src
+# This ensures that when CACHE_BUST changes, Docker will rebuild from this point
+RUN echo "Cache bust value: ${CACHE_BUST}" > /dev/null
 
 # Copy source code
 COPY src ./src
