@@ -44,6 +44,15 @@ export function errorHandler(
   const statusCode = (err as any).statusCode || 500;
   const errMessage = err.message || 'Internal Server Error';
   
+  // Always log the full error for debugging
+  logger.error('Unhandled error details:', {
+    message: errMessage,
+    name: err.name,
+    stack: err.stack,
+    url: req.url,
+    method: req.method
+  });
+  
   res.status(statusCode).json({
     success: false,
     error: 'Internal Server Error',

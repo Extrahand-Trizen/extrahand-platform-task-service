@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../types';
 import { UploadService } from '../services/UploadService';
 import { ApiResponse } from '../utils/ApiResponse';
 import { BadRequestError } from '../errors/AppError';
+import logger from '../config/logger';
 
 export class UploadController {
   /**
@@ -63,7 +64,11 @@ export class UploadController {
    * Upload task image (for task creation/editing)
    */
   static async uploadTaskImage(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { uid } = req.user!;
+    const uid = req.user?.uid;
+    if (!uid) {
+      throw new BadRequestError('Authentication required - user not found');
+    }
+
     const file = (req as any).file;
     const { taskId } = req.body;
 
@@ -71,15 +76,35 @@ export class UploadController {
       throw new BadRequestError('No image file provided');
     }
 
-    const result = await UploadService.uploadTaskImage(
-      uid,
-      file.buffer,
-      file.originalname || 'task.jpg',
-      file.mimetype,
-      taskId
-    );
+    if (!file.buffer || !Buffer.isBuffer(file.buffer)) {
+      logger.error('Task image upload: invalid file buffer', {
+        hasFile: !!file,
+        hasBuffer: !!file?.buffer,
+        uid
+      });
+      throw new BadRequestError('Invalid file data received');
+    }
 
-    ApiResponse.success(res, { url: result.url, key: result.key }, 'Task image uploaded successfully');
+    try {
+      const result = await UploadService.uploadTaskImage(
+        uid,
+        file.buffer,
+        file.originalname || 'task.jpg',
+        file.mimetype,
+        taskId
+      );
+
+      ApiResponse.success(res, { url: result.url, key: result.key }, 'Task image uploaded successfully');
+    } catch (uploadError: unknown) {
+      const err = uploadError as Error;
+      logger.error('Task image upload failed', {
+        error: err?.message,
+        stack: err?.stack,
+        uid,
+        filename: file?.originalname
+      });
+      throw uploadError;
+    }
   }
 
   /**
