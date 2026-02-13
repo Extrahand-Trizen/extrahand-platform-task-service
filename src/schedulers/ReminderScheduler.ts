@@ -1,7 +1,10 @@
 import cron from 'node-cron';
+import mongoose from 'mongoose';
 import Task from '../models/Task';
 import logger from '../config/logger';
+import { config } from '../config/env';
 import { NotificationClient } from '../services/NotificationClient';
+import { EmailServiceClient } from '../clients/EmailServiceClient';
 
 /**
  * ReminderScheduler
@@ -73,7 +76,7 @@ export class ReminderScheduler {
         status: { $in: ['assigned', 'started'] },
         // Exclude tasks that already had reminder sent (optional - use eventId dedup in notification-service)
       })
-        .select('_id scheduledDate requesterId assigneeId title')
+        .select('_id scheduledDate scheduledTimeStart scheduledTimeEnd requesterId assigneeId title location')
         .lean();
 
       logger.info('ReminderScheduler: Found tasks needing reminders', {
@@ -107,6 +110,64 @@ export class ReminderScheduler {
               }
             }
           );
+
+          // Email: task_reminder → requester + assignee
+          try {
+            const Profile = mongoose.connection.collection('profiles');
+            const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+            const assigneeProfile = task.assigneeId
+              ? await Profile.findOne({ _id: task.assigneeId })
+              : null;
+            const scheduledDateStr = task.scheduledDate
+              ? new Date(task.scheduledDate).toLocaleDateString()
+              : undefined;
+            const scheduledTimeStr =
+              task.scheduledTimeStart || task.scheduledTimeEnd
+                ? [task.scheduledTimeStart, task.scheduledTimeEnd].filter(Boolean).join(' – ')
+                : undefined;
+            const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+            const locationStr = task.location?.city || task.location?.address;
+
+            if (requesterProfile?.email) {
+              EmailServiceClient.sendTaskReminder(requesterProfile.email, {
+                recipientName: requesterProfile.name || requesterProfile.fullName || 'There',
+                taskTitle: task.title,
+                scheduledDate: scheduledDateStr,
+                scheduledTime: scheduledTimeStr,
+                location: locationStr,
+                isTasker: false,
+                otherPartyName: assigneeProfile?.name || assigneeProfile?.fullName,
+                taskUrl,
+              }).catch((err) =>
+                logger.error('ReminderScheduler: Error sending task_reminder email to requester', {
+                  taskId: task._id,
+                  error: err instanceof Error ? err.message : 'Unknown error',
+                })
+              );
+            }
+            if (assigneeProfile?.email) {
+              EmailServiceClient.sendTaskReminder(assigneeProfile.email, {
+                recipientName: assigneeProfile.name || assigneeProfile.fullName || 'There',
+                taskTitle: task.title,
+                scheduledDate: scheduledDateStr,
+                scheduledTime: scheduledTimeStr,
+                location: locationStr,
+                isTasker: true,
+                otherPartyName: requesterProfile?.name || requesterProfile?.fullName,
+                taskUrl,
+              }).catch((err) =>
+                logger.error('ReminderScheduler: Error sending task_reminder email to assignee', {
+                  taskId: task._id,
+                  error: err instanceof Error ? err.message : 'Unknown error',
+                })
+              );
+            }
+          } catch (emailErr) {
+            logger.error('ReminderScheduler: Error sending task_reminder emails', {
+              taskId: task._id,
+              error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+            });
+          }
 
           logger.info('ReminderScheduler: Reminder sent', {
             taskId: task._id,
@@ -153,7 +214,7 @@ export class ReminderScheduler {
         },
         status: { $in: ['assigned', 'started'] }
       })
-        .select('_id scheduledDate requesterId assigneeId title')
+        .select('_id scheduledDate scheduledTimeStart scheduledTimeEnd requesterId assigneeId title location')
         .lean();
 
       for (const task of tasksNeedingReminders) {

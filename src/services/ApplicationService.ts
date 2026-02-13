@@ -9,6 +9,8 @@ import logger from "../config/logger";
 import { ApplicationStatus } from "../types";
 import mongoose from "mongoose";
 import { NotificationClient } from "./NotificationClient";
+import { EmailServiceClient } from "../clients/EmailServiceClient";
+import { config } from "../config/env";
 
 export class ApplicationService {
   /**
@@ -55,10 +57,35 @@ export class ApplicationService {
       throw new BadRequestError("You have already applied to this task");
     }
 
+    // Snapshot applicant profile at time of application
+    const Profile = mongoose.connection.collection("profiles");
+    let applicantProfileSnapshot: any | undefined;
+    try {
+      const applicantProfile = await Profile.findOne({
+        _id: applicantProfileId,
+      });
+      if (applicantProfile) {
+        applicantProfileSnapshot = {
+          name: applicantProfile.name,
+          photoURL: applicantProfile.photoURL,
+          rating: applicantProfile.rating,
+          totalReviews: applicantProfile.totalReviews,
+          skills: applicantProfile.skills,
+        };
+      }
+    } catch (error) {
+      logger.warn("Could not snapshot applicant profile", {
+        applicantProfileId,
+        error:
+          error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+
     // Create application
     const application = await TaskApplication.create({
       taskId,
       applicantId: applicantProfileId,
+      applicantProfile: applicantProfileSnapshot,
       proposedBudget: {
         amount: Number(
           applicationData.proposedBudget?.amount ||
@@ -104,6 +131,27 @@ export class ApplicationService {
               applicantUid
             }
           }
+        );
+      }
+      // Email: application submitted → requester
+      if (requesterProfile?.email) {
+        const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
+        EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
+          requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
+          applicantName: applicantProfileSnapshot?.name || 'An applicant',
+          taskTitle: task.title,
+          proposedAmount: application.proposedBudget?.amount,
+          applicantMessage: application.coverLetter || undefined,
+          applicantRating: applicantProfileSnapshot?.rating,
+          applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
+          applicationUrl,
+          taskUrl: applicationUrl,
+        }).catch((err) =>
+          logger.error('Error sending application_submitted email', {
+            taskId,
+            applicationId: application._id,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          })
         );
       }
     } catch (error) {
@@ -183,6 +231,11 @@ export class ApplicationService {
     const Profile = mongoose.connection.collection("profiles");
     const enrichedApplications = await Promise.all(
       applications.map(async (app) => {
+        // Prefer stored snapshot if present
+        if (app.applicantProfile) {
+          return app;
+        }
+
         try {
           const applicantProfile = await Profile.findOne({
             _id: app.applicantId,
@@ -293,7 +346,7 @@ export class ApplicationService {
 
     const application = await TaskApplication.findById(applicationId).populate(
       "taskId",
-      "requesterId status title"
+      "requesterId status title budget location scheduledDate scheduledTimeStart scheduledTimeEnd"
     );
 
     if (!application) {
@@ -396,6 +449,47 @@ export class ApplicationService {
             error: error instanceof Error ? error.message : 'Unknown error'
           });
         }
+        // Email: application accepted → applicant; task assigned → requester
+        const taskUrl = `${config.WEB_APP_URL}/my-tasks`;
+        const requesterProfileForEmail = await Profile.findOne({ _id: task.requesterId });
+        const scheduledDateStr = task.scheduledDate
+          ? new Date(task.scheduledDate).toLocaleDateString()
+          : undefined;
+        const scheduledTimeStr = task.scheduledTimeStart || task.scheduledTimeEnd
+          ? [task.scheduledTimeStart, task.scheduledTimeEnd].filter(Boolean).join(' – ')
+          : undefined;
+        if (applicantProfile?.email) {
+          EmailServiceClient.sendApplicationAccepted(applicantProfile.email, {
+            applicantName: applicantProfile.name || applicantProfile.fullName || 'There',
+            requesterName: requesterProfileForEmail?.name || requesterProfileForEmail?.fullName || 'The requester',
+            taskTitle: task.title,
+            budget: task.budget?.amount,
+            location: task.location?.city || task.location?.address,
+            scheduledDate: scheduledDateStr,
+            scheduledTime: scheduledTimeStr,
+            taskUrl,
+          }).catch((err) =>
+            logger.error('Error sending application_accepted email', {
+              applicationId,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
+        }
+        if (requesterProfileForEmail?.email) {
+          EmailServiceClient.sendTaskAssignedRequester(requesterProfileForEmail.email, {
+            requesterName: requesterProfileForEmail.name || requesterProfileForEmail.fullName || 'There',
+            assigneeName: applicantProfile?.name || applicantProfile?.fullName || 'Tasker',
+            taskTitle: task.title,
+            budget: task.budget?.amount,
+            scheduledDate: scheduledDateStr,
+            taskUrl,
+          }).catch((err) =>
+            logger.error('Error sending task_assigned_requester email', {
+              applicationId,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
+        }
       } else if (application.status === 'rejected' && applicantUid) {
         // Emit APPLICATION_REJECTED to applicant
         try {
@@ -421,6 +515,19 @@ export class ApplicationService {
             taskId: task._id,
             error: error instanceof Error ? error.message : 'Unknown error'
           });
+        }
+        // Email: application rejected → applicant
+        if (applicantProfile?.email) {
+          EmailServiceClient.sendApplicationRejected(applicantProfile.email, {
+            applicantName: applicantProfile.name || applicantProfile.fullName || 'There',
+            taskTitle: task.title,
+            taskUrl: `${config.WEB_APP_URL}/my-tasks`,
+          }).catch((err) =>
+            logger.error('Error sending application_rejected email', {
+              applicationId,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
         }
       }
     }
@@ -493,6 +600,35 @@ export class ApplicationService {
     logger.info(
       `Application withdrawn: ${applicationId} by user ${applicantProfileId.toString()}`
     );
+
+    // Email: application withdrawn → requester
+    try {
+      const task = await Task.findById(application.taskId);
+      if (task) {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        const applicantProfile = await Profile.findOne({ _id: application.applicantId });
+        if (requesterProfile?.email) {
+          EmailServiceClient.sendApplicationWithdrawn(requesterProfile.email, {
+            requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
+            applicantName: applicantProfile?.name || applicantProfile?.fullName || 'An applicant',
+            taskTitle: task.title,
+            taskUrl: `${config.WEB_APP_URL}/tasks/${task._id}/applications`,
+            applicationUrl: `${config.WEB_APP_URL}/my-tasks`,
+          }).catch((err) =>
+            logger.error('Error sending application_withdrawn email', {
+              applicationId,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
+        }
+      }
+    } catch (error) {
+      logger.error('Error sending application_withdrawn email', {
+        applicationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
 
   static async withdrawAcceptedApplication(

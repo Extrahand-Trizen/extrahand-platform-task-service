@@ -4,6 +4,7 @@ import { config } from './config/env';
 import logger from './config/logger';
 import { NotificationClient } from './services/NotificationClient';
 import { UserServiceClient } from './clients/UserServiceClient';
+import { EmailServiceClient } from './clients/EmailServiceClient';
 import { ReminderScheduler } from './schedulers/ReminderScheduler';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
@@ -20,6 +21,7 @@ async function startServer() {
     // Initialize clients
     NotificationClient.initialize('task-service');
     UserServiceClient.initialize();
+    EmailServiceClient.initialize();
 
     // Initialize schedulers
     await ReminderScheduler.initialize('task-service');

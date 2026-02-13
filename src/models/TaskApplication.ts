@@ -4,6 +4,15 @@ import { ApplicationStatus } from "../types";
 export interface ITaskApplication extends Document {
   taskId: mongoose.Types.ObjectId;
   applicantId: mongoose.Types.ObjectId; // ObjectId reference to Profile
+  applicantProfile?: {
+    name: string;
+    photoURL?: string;
+    rating?: number;
+    totalReviews?: number;
+    skills?: {
+      list: string[];
+    };
+  };
   proposedBudget: {
     amount: number;
     currency: string;
@@ -43,6 +52,16 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
       ref: "Profile",
       required: true,
       index: true,
+    },
+
+    applicantProfile: {
+      name: { type: String, required: false },
+      photoURL: { type: String, required: false },
+      rating: { type: Number, required: false },
+      totalReviews: { type: Number, required: false },
+      skills: {
+        list: { type: [String], required: false },
+      },
     },
 
     proposedBudget: {

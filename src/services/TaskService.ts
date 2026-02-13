@@ -9,6 +9,8 @@ import logger from "../config/logger";
 import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
+import { EmailServiceClient } from "../clients/EmailServiceClient";
+import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 
 // Helper function to map frontend category values to backend enum values
@@ -375,6 +377,33 @@ export class TaskService {
 
     logger.info(`✅ Task created successfully: ${task._id}`);
 
+    // Email: task posted confirmation → requester
+    try {
+      const Profile = mongoose.connection.collection("profiles");
+      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+      if (requesterProfile?.email) {
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+        EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
+          requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
+          taskTitle: task.title,
+          taskUrl,
+          budget: task.budget?.amount,
+          category: mappedCategory,
+          location: task.location?.city || task.location?.address,
+        }).catch((err) =>
+          logger.error('Error sending task_posted_confirmation email', {
+            taskId: task._id,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          })
+        );
+      }
+    } catch (error) {
+      logger.error('Error fetching requester profile for task_posted_confirmation email', {
+        taskId: task._id,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+
     // STEP 1: Emit TASK_CREATED_RECOMMENDED notification
     // Find taskers with matching skill category
     if (uid) {
@@ -399,6 +428,39 @@ export class TaskService {
             },
             recommendedTaskers
           );
+          // Email: task_created_recommended → matched taskers
+          try {
+            const Profile = mongoose.connection.collection('profiles');
+            const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
+            const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+            const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
+            for (const p of recommendedProfiles) {
+              if (p.email) {
+                EmailServiceClient.sendTaskCreatedRecommended(p.email, {
+                  taskerName: p.name || p.fullName || 'There',
+                  taskTitle: task.title,
+                  skillCategory: mappedCategory,
+                  taskDescription: task.description?.substring(0, 200),
+                  budget: task.budget?.amount,
+                  location: task.location?.city || task.location?.address,
+                  scheduledDate: scheduledDateStr,
+                  category: mappedCategory,
+                  taskUrl,
+                }).catch((err) =>
+                  logger.error('Error sending task_created_recommended email', {
+                    taskId: task._id,
+                    email: p.email,
+                    error: err instanceof Error ? err.message : 'Unknown error',
+                  })
+                );
+              }
+            }
+          } catch (emailErr) {
+            logger.error('Error sending task_created_recommended emails', {
+              taskId: task._id,
+              error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+            });
+          }
         }
       } catch (error) {
         logger.error('Error sending TASK_CREATED_RECOMMENDED notification', {
@@ -438,6 +500,39 @@ export class TaskService {
               },
               keywordMatchedUsers
             );
+            // Email: task_created_keyword → keyword-matched users
+            try {
+              const Profile = mongoose.connection.collection('profiles');
+              const keywordProfiles = await Profile.find({ uid: { $in: keywordMatchedUsers } }).toArray();
+              const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+              const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
+              const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
+              for (const p of keywordProfiles) {
+                if (p.email) {
+                  EmailServiceClient.sendTaskCreatedKeyword(p.email, {
+                    userName: p.name || p.fullName || 'There',
+                    taskTitle: task.title,
+                    matchedKeyword: matchedKeywordStr,
+                    taskDescription: task.description?.substring(0, 200),
+                    budget: task.budget?.amount,
+                    location: task.location?.city || task.location?.address,
+                    scheduledDate: scheduledDateStr,
+                    taskUrl,
+                  }).catch((err) =>
+                    logger.error('Error sending task_created_keyword email', {
+                      taskId: task._id,
+                      email: p.email,
+                      error: err instanceof Error ? err.message : 'Unknown error',
+                    })
+                  );
+                }
+              }
+            } catch (emailErr) {
+              logger.error('Error sending task_created_keyword emails', {
+                taskId: task._id,
+                error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+              });
+            }
           }
         }
       } catch (error) {
@@ -556,6 +651,61 @@ export class TaskService {
           error: error instanceof Error ? error.message : 'Unknown error'
         });
       }
+
+      // Email: task_updated → requester + assignee
+      try {
+        const changes: Array<{ field: string; oldValue?: string; newValue: string }> = [];
+        if (statusChanged) {
+          changes.push({ field: 'Status', oldValue: oldStatus, newValue: updatedTask.status });
+        }
+        if (scheduledDateChanged) {
+          changes.push({
+            field: 'Scheduled date',
+            oldValue: task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined,
+            newValue: updatedTask.scheduledDate ? new Date(updatedTask.scheduledDate).toLocaleDateString() : 'Updated',
+          });
+        }
+        if (assigneeChanged) {
+          changes.push({ field: 'Assignment', newValue: 'Updated' });
+        }
+        const Profile = mongoose.connection.collection('profiles');
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}`;
+        const requesterProfile = await Profile.findOne({ _id: updatedTask.requesterId });
+        if (requesterProfile?.email) {
+          EmailServiceClient.sendTaskUpdated(requesterProfile.email, {
+            recipientName: requesterProfile.name || requesterProfile.fullName || 'There',
+            taskTitle: updatedTask.title,
+            changes,
+            taskUrl,
+          }).catch((err) =>
+            logger.error('Error sending task_updated email to requester', {
+              taskId,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
+        }
+        if (updatedTask.assigneeId) {
+          const assigneeProfile = await Profile.findOne({ _id: updatedTask.assigneeId });
+          if (assigneeProfile?.email) {
+            EmailServiceClient.sendTaskUpdated(assigneeProfile.email, {
+              recipientName: assigneeProfile.name || assigneeProfile.fullName || 'There',
+              taskTitle: updatedTask.title,
+              changes,
+              taskUrl,
+            }).catch((err) =>
+              logger.error('Error sending task_updated email to assignee', {
+                taskId,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              })
+            );
+          }
+        }
+      } catch (error) {
+        logger.error('Error sending task_updated emails', {
+          taskId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
     }
 
     return updatedTask as unknown as ITask;
@@ -670,6 +820,66 @@ export class TaskService {
     
     // Emit real-time status update
     emitTaskStatusChanged(taskId, updatedTask);
+
+    // Email: task cancelled → notify the other party
+    if (status === "cancelled") {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const isRequesterCancelled = task.requesterId.equals(profileId);
+        const otherPartyId = isRequesterCancelled ? task.assigneeId : task.requesterId;
+        const cancellerProfile = await Profile.findOne({ _id: profileId });
+        if (otherPartyId) {
+          const otherProfile = await Profile.findOne({ _id: otherPartyId });
+          if (otherProfile?.email) {
+            EmailServiceClient.sendTaskCancelled(otherProfile.email, {
+              recipientName: otherProfile.name || otherProfile.fullName || "There",
+              taskTitle: task.title,
+              cancelledByName: cancellerProfile?.name || cancellerProfile?.fullName,
+              reason: options?.cancellationReason,
+              browseUrl: `${config.WEB_APP_URL}/tasks`,
+            }).catch((err) =>
+              logger.error("Error sending task_cancelled email", {
+                taskId,
+                error: err instanceof Error ? err.message : "Unknown error",
+              })
+            );
+          }
+        }
+      } catch (error) {
+        logger.error("Error sending task_cancelled email", {
+          taskId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
+
+    // Email: task started / in_progress → notify requester
+    if ((status === "started" || status === "in_progress") && task.status === "assigned") {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        const assigneeProfile = await Profile.findOne({ _id: task.assigneeId });
+        if (requesterProfile?.email) {
+          EmailServiceClient.sendTaskStarted(requesterProfile.email, {
+            requesterName: requesterProfile.name || requesterProfile.fullName || "There",
+            assigneeName: assigneeProfile?.name || assigneeProfile?.fullName || "Your tasker",
+            taskTitle: task.title,
+            startedAt: new Date().toLocaleString(),
+            taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}`,
+          }).catch((err) =>
+            logger.error("Error sending task_started email", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+        }
+      } catch (error) {
+        logger.error("Error sending task_started email", {
+          taskId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
     
     return updatedTask as unknown as ITask;
   }
