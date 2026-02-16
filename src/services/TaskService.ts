@@ -864,7 +864,9 @@ export class TaskService {
       try {
         const Profile = mongoose.connection.collection("profiles");
         const requesterProfile = await Profile.findOne({ _id: task.requesterId });
-        const assigneeProfile = await Profile.findOne({ _id: task.assigneeId });
+        const assigneeProfile = task.assigneeId
+          ? await Profile.findOne({ _id: task.assigneeId })
+          : null;
         if (requesterProfile?.email) {
           EmailServiceClient.sendTaskStarted(requesterProfile.email, {
             requesterName: requesterProfile.name || requesterProfile.fullName || "There",
