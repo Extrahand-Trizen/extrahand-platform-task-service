@@ -94,6 +94,7 @@ export class EmailServiceClient {
     category?: string;
     location?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'task_posted_confirmation', {
@@ -113,6 +114,7 @@ export class EmailServiceClient {
     applicationUrl?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const applicationUrl = data.applicationUrl || data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'application_submitted', {
@@ -132,6 +134,7 @@ export class EmailServiceClient {
     scheduledTime?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'application_accepted', { ...data, taskUrl });
@@ -143,6 +146,7 @@ export class EmailServiceClient {
     taskDescription?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'application_rejected', { ...data, taskUrl });
@@ -157,6 +161,7 @@ export class EmailServiceClient {
     taskUrl?: string;
     chatUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || data.chatUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'task_assigned_requester', { ...data, taskUrl, chatUrl: taskUrl });
@@ -169,6 +174,7 @@ export class EmailServiceClient {
     reason?: string;
     browseUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const browseUrl = data.browseUrl || `${this.webAppUrl || 'https://extrahand.in'}/tasks`;
     return this.sendTemplate(to, 'task_cancelled', { ...data, browseUrl });
@@ -181,6 +187,7 @@ export class EmailServiceClient {
     startedAt?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'task_started', { ...data, taskUrl });
@@ -193,6 +200,7 @@ export class EmailServiceClient {
     submittedAt?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'completion_proof_submitted', { ...data, taskUrl });
@@ -205,6 +213,7 @@ export class EmailServiceClient {
     taskUrl?: string;
     applicationUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || data.applicationUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'application_withdrawn', { ...data, taskUrl, applicationUrl: taskUrl });
@@ -220,6 +229,7 @@ export class EmailServiceClient {
     reviewUrl?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || data.reviewUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'task_completed', { ...data, taskUrl, reviewUrl: data.reviewUrl || taskUrl });
@@ -233,6 +243,7 @@ export class EmailServiceClient {
     completedDate?: string;
     reviewUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const reviewUrl = data.reviewUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'review_request', { ...data, reviewUrl });
@@ -245,6 +256,7 @@ export class EmailServiceClient {
     updateNote?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'task_updated', { ...data, taskUrl });
@@ -260,6 +272,7 @@ export class EmailServiceClient {
     otherPartyName?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'task_reminder', { ...data, taskUrl });
@@ -276,6 +289,7 @@ export class EmailServiceClient {
     category?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/tasks`;
     return this.sendTemplate(to, 'task_created_recommended', { ...data, taskUrl });
@@ -291,6 +305,7 @@ export class EmailServiceClient {
     scheduledDate?: string;
     taskUrl?: string;
     platformName?: string;
+    userId?: string;
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/tasks`;
     return this.sendTemplate(to, 'task_created_keyword', { ...data, taskUrl });

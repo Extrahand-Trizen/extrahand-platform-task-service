@@ -146,6 +146,7 @@ export class ApplicationService {
           applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
           applicationUrl,
           taskUrl: applicationUrl,
+          userId: requesterProfile.uid,
         }).catch((err) =>
           logger.error('Error sending application_submitted email', {
             taskId,
@@ -468,6 +469,7 @@ export class ApplicationService {
             scheduledDate: scheduledDateStr,
             scheduledTime: scheduledTimeStr,
             taskUrl,
+            userId: applicantProfile.uid,
           }).catch((err) =>
             logger.error('Error sending application_accepted email', {
               applicationId,
@@ -483,6 +485,7 @@ export class ApplicationService {
             budget: task.budget?.amount,
             scheduledDate: scheduledDateStr,
             taskUrl,
+            userId: requesterProfileForEmail.uid,
           }).catch((err) =>
             logger.error('Error sending task_assigned_requester email', {
               applicationId,
@@ -522,6 +525,7 @@ export class ApplicationService {
             applicantName: applicantProfile.name || applicantProfile.fullName || 'There',
             taskTitle: task.title,
             taskUrl: `${config.WEB_APP_URL}/my-tasks`,
+            userId: applicantProfile.uid,
           }).catch((err) =>
             logger.error('Error sending application_rejected email', {
               applicationId,
@@ -615,6 +619,7 @@ export class ApplicationService {
             taskTitle: task.title,
             taskUrl: `${config.WEB_APP_URL}/tasks/${task._id}/applications`,
             applicationUrl: `${config.WEB_APP_URL}/my-tasks`,
+            userId: requesterProfile.uid,
           }).catch((err) =>
             logger.error('Error sending application_withdrawn email', {
               applicationId,

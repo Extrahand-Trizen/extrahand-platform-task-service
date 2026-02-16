@@ -72,7 +72,7 @@ export class CompletionService {
     ).lean();
 
     logger.info(`Task ${taskId} completion proof submitted by profile ${performerProfileId}`);
-    
+
     // Emit real-time proof submission
     emitProofSubmitted(taskId, updatedTask);
 
@@ -85,11 +85,12 @@ export class CompletionService {
         : null;
       if (requesterProfile?.email) {
         EmailServiceClient.sendCompletionProofSubmitted(requesterProfile.email, {
-          requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
-          assigneeName: assigneeProfile?.name || assigneeProfile?.fullName || 'Your tasker',
+          requesterName: requesterProfile.name || 'There',
+          assigneeName: assigneeProfile?.name || 'Your tasker',
           taskTitle: task.title,
           submittedAt: new Date().toLocaleString(),
           taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}`,
+          userId: requesterProfile.uid,
         }).catch((err) =>
           logger.error('Error sending completion_proof_submitted email', {
             taskId,
@@ -103,7 +104,7 @@ export class CompletionService {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     }
-    
+
     return updatedTask;
   }
 
@@ -203,12 +204,13 @@ export class CompletionService {
 
       if (requesterProfile?.email) {
         EmailServiceClient.sendTaskCompleted(requesterProfile.email, {
-          recipientName: requesterProfile.name || requesterProfile.fullName || 'There',
+          recipientName: requesterProfile.name || 'There',
           taskTitle: updatedTask?.title || task.title,
           isTasker: false,
           completedDate: completedDateStr,
           reviewUrl,
           taskUrl,
+          userId: requesterProfile.uid,
         }).catch((err) =>
           logger.error('Error sending task_completed email to requester', {
             taskId,
@@ -216,12 +218,13 @@ export class CompletionService {
           })
         );
         EmailServiceClient.sendReviewRequest(requesterProfile.email, {
-          reviewerName: requesterProfile.name || requesterProfile.fullName || 'There',
-          revieweeName: assigneeProfile?.name || assigneeProfile?.fullName || 'Your tasker',
+          reviewerName: requesterProfile.name || 'There',
+          revieweeName: assigneeProfile?.name || 'Your tasker',
           taskTitle: updatedTask?.title || task.title,
           isRequester: true,
           completedDate: completedDateStr,
           reviewUrl,
+          userId: requesterProfile.uid,
         }).catch((err) =>
           logger.error('Error sending review_request email', {
             taskId,
@@ -231,13 +234,14 @@ export class CompletionService {
       }
       if (assigneeProfile?.email) {
         EmailServiceClient.sendTaskCompleted(assigneeProfile.email, {
-          recipientName: assigneeProfile.name || assigneeProfile.fullName || 'There',
+          recipientName: assigneeProfile.name || 'There',
           taskTitle: updatedTask?.title || task.title,
           isTasker: true,
           completedDate: completedDateStr,
           amount: task.budget?.amount,
           reviewUrl,
           taskUrl,
+          userId: assigneeProfile.uid,
         }).catch((err) =>
           logger.error('Error sending task_completed email to assignee', {
             taskId,
@@ -257,7 +261,7 @@ export class CompletionService {
     try {
       // First, check if there's an escrow for this task
       const escrow = await PaymentClient.getEscrowByTaskId(taskId);
-      
+
       if (escrow && escrow.razorpayOrderId) {
         // Calculate auto-release date (grace period: 1 minute for testing, ideally 12 hours)
         // TODO: Make grace period configurable via environment variable
@@ -330,7 +334,7 @@ export class CompletionService {
         completionRejectedReason: reason,
         completionRejectedAt: new Date(),
         // Clear completion proof and notes so performer can resubmit
-        $unset: { 
+        $unset: {
           completionProof: '',
           completionNotes: ''
         },
@@ -340,10 +344,10 @@ export class CompletionService {
     ).lean();
 
     logger.warn(`Task ${taskId} completion rejected by poster ${taskOwnerProfileId}. Reason: ${reason}`);
-    
+
     // Emit real-time proof rejection
     emitProofRejected(taskId, { task: updatedTask, reason });
-    
+
     return updatedTask;
   }
 }

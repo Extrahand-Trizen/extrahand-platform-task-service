@@ -390,6 +390,7 @@ export class TaskService {
           budget: task.budget?.amount,
           category: mappedCategory,
           location: task.location?.city || task.location?.address,
+          userId: requesterProfile.uid,
         }).catch((err) =>
           logger.error('Error sending task_posted_confirmation email', {
             taskId: task._id,
@@ -446,6 +447,7 @@ export class TaskService {
                   scheduledDate: scheduledDateStr,
                   category: mappedCategory,
                   taskUrl,
+                  userId: p.uid,
                 }).catch((err) =>
                   logger.error('Error sending task_created_recommended email', {
                     taskId: task._id,
@@ -518,6 +520,7 @@ export class TaskService {
                     location: task.location?.city || task.location?.address,
                     scheduledDate: scheduledDateStr,
                     taskUrl,
+                    userId: p.uid,
                   }).catch((err) =>
                     logger.error('Error sending task_created_keyword email', {
                       taskId: task._id,
@@ -677,6 +680,7 @@ export class TaskService {
             taskTitle: updatedTask.title,
             changes,
             taskUrl,
+            userId: requesterProfile.uid,
           }).catch((err) =>
             logger.error('Error sending task_updated email to requester', {
               taskId,
@@ -692,6 +696,7 @@ export class TaskService {
               taskTitle: updatedTask.title,
               changes,
               taskUrl,
+              userId: assigneeProfile.uid,
             }).catch((err) =>
               logger.error('Error sending task_updated email to assignee', {
                 taskId,
@@ -837,6 +842,7 @@ export class TaskService {
               cancelledByName: cancellerProfile?.name || cancellerProfile?.fullName,
               reason: options?.cancellationReason,
               browseUrl: `${config.WEB_APP_URL}/tasks`,
+              userId: otherProfile.uid,
             }).catch((err) =>
               logger.error("Error sending task_cancelled email", {
                 taskId,
@@ -866,6 +872,7 @@ export class TaskService {
             taskTitle: task.title,
             startedAt: new Date().toLocaleString(),
             taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}`,
+            userId: requesterProfile.uid,
           }).catch((err) =>
             logger.error("Error sending task_started email", {
               taskId,

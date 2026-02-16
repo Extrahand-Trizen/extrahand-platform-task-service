@@ -108,8 +108,8 @@ export class ReviewService {
         const { avgRating, count } = avgRatingResult[0];
         await Profile.updateOne(
           { _id: performerId },
-          { 
-            $set: { 
+          {
+            $set: {
               rating: Math.round(avgRating * 10) / 10, // Round to 1 decimal place
               totalReviews: count,
               updatedAt: new Date()
@@ -139,14 +139,14 @@ export class ReviewService {
     const isRequester = task.requesterId.equals(profileId);
     //@ts-ignore
     const isAssignee = task.assigneeId && task.assigneeId.equals(profileId);
-    
+
     if (!isRequester && !isAssignee) {
       throw new ForbiddenError('Not authorized to view this review');
     }
 
     // Find review for this task
     const review = await Review.findOne({ taskId: taskId }).lean();
-    
+
     if (!review) {
       return null;
     }
@@ -154,7 +154,7 @@ export class ReviewService {
     // Manually fetch reviewer and reviewed user profiles
     try {
       const Profile = mongoose.connection.collection('profiles');
-      
+
       const [reviewerProfile, reviewedProfile] = await Promise.all([
         Profile.findOne({ _id: review.reviewerId }),
         Profile.findOne({ _id: review.reviewedId })
@@ -163,10 +163,10 @@ export class ReviewService {
       // Attach profile data to review
       const enrichedReview: any = {
         ...review,
-        reviewerName: reviewerProfile?.fullName || reviewerProfile?.displayName || 'Anonymous',
-        reviewerAvatar: reviewerProfile?.avatar || null,
-        reviewedName: reviewedProfile?.fullName || reviewedProfile?.displayName || 'User',
-        reviewedAvatar: reviewedProfile?.avatar || null,
+        reviewerName: reviewerProfile?.name || 'Anonymous',
+        reviewerAvatar: reviewerProfile?.photoURL || reviewerProfile?.avatar || null,
+        reviewedName: reviewedProfile?.name || 'User',
+        reviewedAvatar: reviewedProfile?.photoURL || reviewedProfile?.avatar || null,
       };
 
       return enrichedReview as IReview;

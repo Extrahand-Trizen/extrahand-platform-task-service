@@ -138,6 +138,7 @@ export class ReminderScheduler {
                 isTasker: false,
                 otherPartyName: assigneeProfile?.name || assigneeProfile?.fullName,
                 taskUrl,
+                userId: requesterProfile.uid,
               }).catch((err) =>
                 logger.error('ReminderScheduler: Error sending task_reminder email to requester', {
                   taskId: task._id,
@@ -155,6 +156,7 @@ export class ReminderScheduler {
                 isTasker: true,
                 otherPartyName: requesterProfile?.name || requesterProfile?.fullName,
                 taskUrl,
+                userId: assigneeProfile.uid,
               }).catch((err) =>
                 logger.error('ReminderScheduler: Error sending task_reminder email to assignee', {
                   taskId: task._id,
