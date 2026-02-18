@@ -32,138 +32,156 @@ export class ApplicationService {
       portfolio?: string[];
     }
   ): Promise<ITaskApplication> {
-    // Check if task exists and is open
-    const task = await Task.findById(taskId);
-    if (!task) {
-      throw new NotFoundError("Task not found");
-    }
-
-    if (task.status !== "open") {
-      throw new BadRequestError("Task is not open for applications");
-    }
-
-    // Compare ObjectIds
-    if (task.requesterId.equals(applicantProfileId)) {
-      throw new BadRequestError("Cannot apply to your own task");
-    }
-
-    // Check if user has already applied
-    const existingApplication = await TaskApplication.findOne({
-      taskId,
-      applicantId: applicantProfileId,
-    });
-
-    if (existingApplication) {
-      throw new BadRequestError("You have already applied to this task");
-    }
-
-    // Snapshot applicant profile at time of application
-    const Profile = mongoose.connection.collection("profiles");
-    let applicantProfileSnapshot: any | undefined;
     try {
-      const applicantProfile = await Profile.findOne({
-        _id: applicantProfileId,
-      });
-      if (applicantProfile) {
-        applicantProfileSnapshot = {
-          name: applicantProfile.name,
-          photoURL: applicantProfile.photoURL,
-          rating: applicantProfile.rating,
-          totalReviews: applicantProfile.totalReviews,
-          skills: applicantProfile.skills,
-        };
+      // Check if task exists and is open
+      logger.debug(`[ApplicationService.submitApplication] Searching for task: ${taskId}`);
+      const task = await Task.findById(taskId);
+      if (!task) {
+        throw new NotFoundError("Task not found");
       }
-    } catch (error) {
-      logger.warn("Could not snapshot applicant profile", {
-        applicantProfileId,
-        error:
-          error instanceof Error ? error.message : "Unknown error",
-      });
-    }
 
-    // Create application
-    const application = await TaskApplication.create({
-      taskId,
-      applicantId: applicantProfileId,
-      applicantProfile: applicantProfileSnapshot,
-      proposedBudget: {
-        amount: Number(
-          applicationData.proposedBudget?.amount ||
-            applicationData.proposedBudget
-        ),
-        currency: applicationData.proposedBudget?.currency || "INR",
-        isNegotiable: applicationData.proposedBudget?.isNegotiable !== false,
-      },
-      proposedTime: applicationData.proposedTime || { flexible: true },
-      coverLetter: applicationData.coverLetter || "",
-      relevantExperience: Array.isArray(applicationData.relevantExperience)
-        ? applicationData.relevantExperience
-        : [],
-      portfolio: Array.isArray(applicationData.portfolio)
-        ? applicationData.portfolio
-        : [],
-    });
-
-    // Increment task applications count (atomic operation)
-    await Task.updateOne({ _id: taskId }, { $inc: { applications: 1 } });
-
-    logger.info(
-      `Application submitted: ${application._id} for task ${taskId} by user ${applicantUid}`
-    );
-
-    // EMIT: APPLICATION_SUBMITTED notification to task requester
-    try {
-      const Profile = mongoose.connection.collection("profiles");
-      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
-      if (requesterProfile?.uid) {
-        await NotificationClient.send(
-          {
-            eventKey: 'APPLICATION_SUBMITTED',
-            category: 'taskUpdates',
-            actorId: applicantUid,
-            recipients: [requesterProfile.uid],
-            entity: { type: 'application', id: application._id.toString() },
-            title: `New application for: ${task.title}`,
-            body: `Someone has applied to your task. Review their application to accept or reject.`,
-            data: {
-              taskId,
-              applicationId: application._id.toString(),
-              applicantUid
-            }
-          }
-        );
+      if (task.status !== "open") {
+        throw new BadRequestError("Task is not open for applications");
       }
-      // Email: application submitted → requester
-      if (requesterProfile?.email) {
-        const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
-        EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
-          requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
-          applicantName: applicantProfileSnapshot?.name || 'An applicant',
-          taskTitle: task.title,
-          proposedAmount: application.proposedBudget?.amount,
-          applicantMessage: application.coverLetter || undefined,
-          applicantRating: applicantProfileSnapshot?.rating,
-          applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
-          applicationUrl,
-          taskUrl: applicationUrl,
-          userId: requesterProfile.uid,
-        }).catch((err) =>
-          logger.error('Error sending application_submitted email', {
-            taskId,
-            applicationId: application._id,
-            error: err instanceof Error ? err.message : 'Unknown error',
-          })
-        );
+
+      // Compare ObjectIds
+      if (task.requesterId.equals(applicantProfileId)) {
+        throw new BadRequestError("Cannot apply to your own task");
       }
-    } catch (error) {
-      logger.error('Error sending APPLICATION_SUBMITTED notification', {
+
+      // Check if user has already applied
+      logger.debug(`[ApplicationService.submitApplication] Checking for existing application: taskId=${taskId}, applicantId=${applicantProfileId}`);
+      const existingApplication = await TaskApplication.findOne({
         taskId,
-        applicationId: application._id,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        applicantId: applicantProfileId,
       });
-    }
 
-    return application;
+      if (existingApplication) {
+        throw new BadRequestError("You have already applied to this task");
+      }
+
+      // Snapshot applicant profile at time of application
+      logger.debug(`[ApplicationService.submitApplication] Creating profile snapshot for applicantId=${applicantProfileId}`);
+      const Profile = mongoose.connection.collection("profiles");
+      let applicantProfileSnapshot: any | undefined;
+      try {
+        const applicantProfile = await Profile.findOne({
+          _id: applicantProfileId,
+        });
+        if (applicantProfile) {
+          applicantProfileSnapshot = {
+            name: applicantProfile.name,
+            photoURL: applicantProfile.photoURL,
+            rating: applicantProfile.rating,
+            totalReviews: applicantProfile.totalReviews,
+            skills: applicantProfile.skills,
+          };
+        }
+      } catch (error) {
+        logger.warn("Could not snapshot applicant profile", {
+          applicantProfileId,
+          error:
+            error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+
+      // Create application
+      logger.debug(`[ApplicationService.submitApplication] Creating new application for taskId=${taskId}`);
+      const application = await TaskApplication.create({
+        taskId,
+        applicantId: applicantProfileId,
+        applicantProfile: applicantProfileSnapshot,
+        proposedBudget: {
+          amount: Number(
+            applicationData.proposedBudget?.amount ||
+              applicationData.proposedBudget
+          ),
+          currency: applicationData.proposedBudget?.currency || "INR",
+          isNegotiable: applicationData.proposedBudget?.isNegotiable !== false,
+        },
+        proposedTime: applicationData.proposedTime || { flexible: true },
+        coverLetter: applicationData.coverLetter || "",
+        relevantExperience: Array.isArray(applicationData.relevantExperience)
+          ? applicationData.relevantExperience
+          : [],
+        portfolio: Array.isArray(applicationData.portfolio)
+          ? applicationData.portfolio
+          : [],
+      });
+
+      // Increment task applications count (atomic operation)
+      logger.debug(`[ApplicationService.submitApplication] Incrementing application count for taskId=${taskId}`);
+      await Task.updateOne({ _id: taskId }, { $inc: { applications: 1 } });
+
+      logger.info(
+        `Application submitted: ${application._id} for task ${taskId} by user ${applicantUid}`
+      );
+
+      // EMIT: APPLICATION_SUBMITTED notification to task requester
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        if (requesterProfile?.uid) {
+          logger.debug(`[ApplicationService.submitApplication] Sending APPLICATION_SUBMITTED notification`);
+          await NotificationClient.send(
+            {
+              eventKey: 'APPLICATION_SUBMITTED',
+              category: 'taskUpdates',
+              actorId: applicantUid,
+              recipients: [requesterProfile.uid],
+              entity: { type: 'application', id: application._id.toString() },
+              title: `New application for: ${task.title}`,
+              body: `Someone has applied to your task. Review their application to accept or reject.`,
+              data: {
+                taskId,
+                applicationId: application._id.toString(),
+                applicantUid
+              }
+            }
+          );
+        }
+        // Email: application submitted → requester
+        if (requesterProfile?.email) {
+          logger.debug(`[ApplicationService.submitApplication] Sending email notification`);
+          const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
+          EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
+            requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
+            applicantName: applicantProfileSnapshot?.name || 'An applicant',
+            taskTitle: task.title,
+            proposedAmount: application.proposedBudget?.amount,
+            applicantMessage: application.coverLetter || undefined,
+            applicantRating: applicantProfileSnapshot?.rating,
+            applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
+            applicationUrl,
+            taskUrl: applicationUrl,
+            userId: requesterProfile.uid,
+          }).catch((err) =>
+            logger.error('Error sending application_submitted email', {
+              taskId,
+              applicationId: application._id,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
+        }
+      } catch (error) {
+        logger.error('Error sending APPLICATION_SUBMITTED notification', {
+          taskId,
+          applicationId: application._id,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+
+      return application;
+    } catch (error) {
+      logger.error('[ApplicationService.submitApplication] Error creating application:', {
+        taskId,
+        applicantProfileId: applicantProfileId.toString(),
+        applicantUid,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        errorStack: error instanceof Error ? error.stack : undefined
+      });
+      throw error;
+    }
   }
 
   /**

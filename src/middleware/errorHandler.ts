@@ -9,12 +9,13 @@ export function errorHandler(
   res: Response,
   _next: NextFunction
 ): void {
-  // Log error
+  // Log error with full context
   logger.error('Error:', {
     message: err.message,
     stack: err.stack,
     url: req.url,
-    method: req.method
+    method: req.method,
+    isAppError: err instanceof AppError
   });
 
   // Check if headers have already been sent to avoid "Cannot set headers" error
@@ -27,7 +28,7 @@ export function errorHandler(
     return;
   }
 
-  // If it's an AppError, use its status code
+  // If it's an AppError, use its status code and message
   if (err instanceof AppError) {
     const statusCode = err.statusCode || 500;
     const errMessage = err.message || 'Internal Server Error';
@@ -53,12 +54,27 @@ export function errorHandler(
     method: req.method
   });
   
-  res.status(statusCode).json({
+  // Return appropriate error message based on error type
+  let errorResponse: Record<string, any> = {
     success: false,
-    error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'development' ? errMessage : 'An unexpected error occurred',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  });
+    error: 'Internal Server Error'
+  };
+  
+  // In development or for specific errors, include the actual error message
+  if (process.env.NODE_ENV === 'development') {
+    errorResponse.message = errMessage;
+    errorResponse.stack = err.stack;
+  } else if (err.name === 'ValidationError' || err.name === 'CastError') {
+    // Include helpful message for validation/cast errors even in production
+    errorResponse.message = errMessage;
+  } else if (errMessage.includes('MONGODB') || errMessage.includes('MongoDB') || errMessage.includes('connect')) {
+    // Database connection errors
+    errorResponse.message = 'Database connection error. Please try again later.';
+  } else {
+    errorResponse.message = 'An unexpected error occurred';
+  }
+  
+  res.status(statusCode).json(errorResponse);
 }
 
 // Async handler wrapper to catch errors in async route handlers

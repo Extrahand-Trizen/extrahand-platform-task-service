@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../types';
 import { ApplicationService } from '../services/ApplicationService';
 import { ApiResponse } from '../utils/ApiResponse';
 import { BadRequestError } from '../errors/AppError';
+import logger from '../config/logger';
 
 export class ApplicationController {
   /**
@@ -13,18 +14,39 @@ export class ApplicationController {
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
+    logger.debug(`[ApplicationController.submitApplication] Starting application submission`, {
+      taskId: req.body.taskId,
+      userId: req.user?.uid,
+      profileId: req.user?.profileId
+    });
+
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    const application = await ApplicationService.submitApplication(
-      req.body.taskId,
-       req.user!.profileId,
-       req.user!.uid,
-      req.body
-    );
+    try {
+      const application = await ApplicationService.submitApplication(
+        req.body.taskId,
+         req.user!.profileId,
+         req.user!.uid,
+        req.body
+      );
 
-    ApiResponse.created(res, application, 'Application submitted successfully');
+      logger.info(`[ApplicationController.submitApplication] Application submitted successfully`, {
+        applicationId: application._id,
+        taskId: req.body.taskId
+      });
+
+      ApiResponse.created(res, application, 'Application submitted successfully');
+    } catch (error) {
+      logger.error(`[ApplicationController.submitApplication] Error occurred`, {
+        taskId: req.body.taskId,
+        userId: req.user?.uid,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        errorStack: error instanceof Error ? error.stack : undefined
+      });
+      throw error;
+    }
   }
 
   /**
