@@ -4,6 +4,7 @@ import { ApplicationStatus } from "../types";
 export interface ITaskApplication extends Document {
   taskId: mongoose.Types.ObjectId;
   applicantId: mongoose.Types.ObjectId; // ObjectId reference to Profile
+  applicantUid: string; // Firebase UID for the applicant
   applicantProfile?: {
     name: string;
     photoURL?: string;
@@ -50,6 +51,11 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
     applicantId: {
       type: Schema.Types.ObjectId,
       ref: "Profile",
+      required: true,
+      index: true,
+    },
+    applicantUid: {
+      type: String,
       required: true,
       index: true,
     },
@@ -110,8 +116,8 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
 
 // Indexes
 TaskApplicationSchema.index({ taskId: 1, status: 1 });
-TaskApplicationSchema.index({ applicantId: 1, status: 1 }); // ✅ Updated from applicantUid
-TaskApplicationSchema.index({ taskId: 1, applicantId: 1 }, { unique: true }); // ✅ Updated from applicantUid
+TaskApplicationSchema.index({ applicantId: 1, status: 1 });
+TaskApplicationSchema.index({ taskId: 1, applicantUid: 1 }, { unique: true }); // Prevent duplicate applications
 
 // Auto-set respondedAt
 TaskApplicationSchema.pre("save", function (next) {

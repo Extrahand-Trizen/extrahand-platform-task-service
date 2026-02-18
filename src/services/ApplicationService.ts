@@ -50,10 +50,10 @@ export class ApplicationService {
       }
 
       // Check if user has already applied
-      logger.debug(`[ApplicationService.submitApplication] Checking for existing application: taskId=${taskId}, applicantId=${applicantProfileId}`);
+      logger.debug(`[ApplicationService.submitApplication] Checking for existing application: taskId=${taskId}, applicantUid=${applicantUid}`);
       const existingApplication = await TaskApplication.findOne({
         taskId,
-        applicantId: applicantProfileId,
+        applicantUid: applicantUid,
       });
 
       if (existingApplication) {
@@ -90,6 +90,7 @@ export class ApplicationService {
       const application = await TaskApplication.create({
         taskId,
         applicantId: applicantProfileId,
+        applicantUid: applicantUid,
         applicantProfile: applicantProfileSnapshot,
         proposedBudget: {
           amount: Number(
