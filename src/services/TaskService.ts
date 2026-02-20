@@ -578,8 +578,8 @@ export class TaskService {
         ].filter(slug => slug && slug.length > 0);
 
         if (categorySlugs.length > 0) {
-          const categoryMatchedUsers = await UserServiceClient.matchUsers('categories', {
-            categorySlugs: categorySlugs
+          const categoryMatchedUsers = await UserServiceClient.matchUsers('skill', {
+            category: categorySlugs[0]
           });
 
           if (categoryMatchedUsers.length > 0) {
