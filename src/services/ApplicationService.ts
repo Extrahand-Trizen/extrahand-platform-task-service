@@ -10,6 +10,7 @@ import { ApplicationStatus } from "../types";
 import mongoose from "mongoose";
 import { NotificationClient } from "./NotificationClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
+import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 
 export class ApplicationService {
@@ -143,26 +144,34 @@ export class ApplicationService {
         }
         // Email: application submitted → requester
         if (requesterProfile?.email) {
-          logger.debug(`[ApplicationService.submitApplication] Sending email notification`);
-          const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
-          EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
-            requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
-            applicantName: applicantProfileSnapshot?.name || 'An applicant',
-            taskTitle: task.title,
-            proposedAmount: application.proposedBudget?.amount,
-            applicantMessage: application.coverLetter || undefined,
-            applicantRating: applicantProfileSnapshot?.rating,
-            applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
-            applicationUrl,
-            taskUrl: applicationUrl,
-            userId: requesterProfile.uid,
-          }).catch((err) =>
-            logger.error('Error sending application_submitted email', {
-              taskId,
-              applicationId: application._id,
-              error: err instanceof Error ? err.message : 'Unknown error',
-            })
+          logger.debug(`[ApplicationService.submitApplication] Checking email preferences`);
+          const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+            requesterProfile.uid,
+            'taskUpdates'
           );
+          
+          if (emailEnabled) {
+            logger.debug(`[ApplicationService.submitApplication] Sending email notification`);
+            const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
+            EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
+              requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
+              applicantName: applicantProfileSnapshot?.name || 'An applicant',
+              taskTitle: task.title,
+              proposedAmount: application.proposedBudget?.amount,
+              applicantMessage: application.coverLetter || undefined,
+              applicantRating: applicantProfileSnapshot?.rating,
+              applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
+              applicationUrl,
+              taskUrl: applicationUrl,
+              userId: requesterProfile.uid,
+            }).catch((err) =>
+              logger.error('Error sending application_submitted email', {
+                taskId,
+                applicationId: application._id,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              })
+            );
+          }
         }
       } catch (error) {
         logger.error('Error sending APPLICATION_SUBMITTED notification', {

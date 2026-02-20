@@ -10,6 +10,7 @@ import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
+import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 
@@ -100,10 +101,12 @@ export class TaskService {
     remotely?: boolean | null;
     sortBy?: string;
     excludeRequesterId?: string;
+    assigneeId?: string;
+    posterUid?: string;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, limit = 50, page = 1 } = filters;
+    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, limit = 50, page = 1 } = filters;
     const skip = (page - 1) * limit;
 
     // Build filters using $and to safely compose multiple $or filters
@@ -113,6 +116,16 @@ export class TaskService {
 
     if (excludeRequesterId && mongoose.Types.ObjectId.isValid(excludeRequesterId)) {
       andClauses.push({ requesterId: { $ne: new mongoose.Types.ObjectId(excludeRequesterId) } });
+    }
+
+    // Filter by assignee ID (for completed task stats)
+    if (assigneeId && mongoose.Types.ObjectId.isValid(assigneeId)) {
+      andClauses.push({ assigneeId: new mongoose.Types.ObjectId(assigneeId) });
+    }
+
+    // Filter by poster UID (for posted tasks)
+    if (posterUid) {
+      andClauses.push({ posterUid: posterUid });
     }
 
     // Support multi-category (comma separated from query) or single category mapping
@@ -509,25 +522,34 @@ export class TaskService {
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
+              
               for (const p of keywordProfiles) {
                 if (p.email) {
-                  EmailServiceClient.sendTaskCreatedKeyword(p.email, {
-                    userName: p.name || p.fullName || 'There',
-                    taskTitle: task.title,
-                    matchedKeyword: matchedKeywordStr,
-                    taskDescription: task.description?.substring(0, 200),
-                    budget: task.budget?.amount,
-                    location: task.location?.city || task.location?.address,
-                    scheduledDate: scheduledDateStr,
-                    taskUrl,
-                    userId: p.uid,
-                  }).catch((err) =>
-                    logger.error('Error sending task_created_keyword email', {
-                      taskId: task._id,
-                      email: p.email,
-                      error: err instanceof Error ? err.message : 'Unknown error',
-                    })
+                  // Check if user has enabled keyword alert emails
+                  const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+                    p.uid,
+                    'keywordTaskAlerts'
                   );
+                  
+                  if (emailEnabled) {
+                    EmailServiceClient.sendTaskCreatedKeyword(p.email, {
+                      userName: p.name || p.fullName || 'There',
+                      taskTitle: task.title,
+                      matchedKeyword: matchedKeywordStr,
+                      taskDescription: task.description?.substring(0, 200),
+                      budget: task.budget?.amount,
+                      location: task.location?.city || task.location?.address,
+                      scheduledDate: scheduledDateStr,
+                      taskUrl,
+                      userId: p.uid,
+                    }).catch((err) => {
+                      logger.error('Error sending task_created_keyword email', {
+                        taskId: task._id,
+                        email: p.email,
+                        error: err instanceof Error ? err.message : 'Unknown error',
+                      });
+                    });
+                }
                 }
               }
             } catch (emailErr) {
@@ -540,6 +562,89 @@ export class TaskService {
         }
       } catch (error) {
         logger.error('Error sending TASK_CREATED_KEYWORD notification', {
+          taskId: task._id,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+
+      // STEP 3: Emit TASK_CREATED_CATEGORY notification
+      // Find users who have saved category matching this task
+      try {
+        // Create category slugs based on task category
+        // Map simple backend categories to content-admin style slugs
+        const categorySlugs = [
+          task.category.toLowerCase(), // e.g., "cleaning" -> "cleaning"
+          ...((task.subcategory) ? [task.subcategory.toLowerCase()] : [])
+        ].filter(slug => slug && slug.length > 0);
+
+        if (categorySlugs.length > 0) {
+          const categoryMatchedUsers = await UserServiceClient.matchUsers('categories', {
+            categorySlugs: categorySlugs
+          });
+
+          if (categoryMatchedUsers.length > 0) {
+            await NotificationClient.sendBatch(
+              {
+                eventKey: 'TASK_CREATED_CATEGORY',
+                category: 'keywordTaskAlerts', // Using same category preference
+                actorId: uid,
+                entity: { type: 'task', id: task._id.toString() },
+                title: `New ${task.category} task posted!`,
+                body: `A new ${task.category} task has been posted: ${task.title.substring(0, 50)}${task.title.length > 50 ? '...' : ''}`,
+                data: {
+                  taskId: task._id.toString(),
+                  category: task.category
+                }
+              },
+              categoryMatchedUsers
+            );
+
+            // Email: task_created_category → category-matched users
+            try {
+              const Profile = mongoose.connection.collection('profiles');
+              const categoryProfiles = await Profile.find({ uid: { $in: categoryMatchedUsers } }).toArray();
+              const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+              const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
+              
+              for (const p of categoryProfiles) {
+                if (p.email) {
+                  // Check if user has enabled keyword alert emails
+                  const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+                    p.uid,
+                    'keywordTaskAlerts'
+                  );
+                  
+                  if (emailEnabled) {
+                    EmailServiceClient.sendTaskCreatedKeyword(p.email, {
+                      userName: p.name || p.fullName || 'There',
+                      taskTitle: task.title,
+                      matchedKeyword: task.category,
+                      taskDescription: task.description?.substring(0, 200),
+                      budget: task.budget?.amount,
+                      location: task.location?.city || task.location?.address,
+                      scheduledDate: scheduledDateStr,
+                      taskUrl,
+                      userId: p.uid,
+                    }).catch((err) => {
+                      logger.error('Error sending task_created_category email', {
+                        taskId: task._id,
+                        email: p.email,
+                        error: err instanceof Error ? err.message : 'Unknown error',
+                      });
+                    });
+                }
+                }
+              }
+            } catch (emailErr) {
+              logger.error('Error sending task_created_category emails', {
+                taskId: task._id,
+                error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+              });
+            }
+          }
+        }
+      } catch (error) {
+        logger.error('Error sending TASK_CREATED_CATEGORY notification', {
           taskId: task._id,
           error: error instanceof Error ? error.message : 'Unknown error'
         });

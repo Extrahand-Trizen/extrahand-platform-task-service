@@ -11,7 +11,7 @@ export class TaskController {
    * Get all tasks with optional filtering
    */
   static async getTasks(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { status, category, city, limit, page, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId } = req.query;
+    const { status, category, city, limit, page, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid } = req.query;
 
     // Allow comma-separated categories (frontend may send multiple)
     const categoriesParam = category ? (category as string) : undefined;
@@ -34,6 +34,8 @@ export class TaskController {
       remotely: remotelyBool,
       sortBy: sortBy ? (sortBy as string) : undefined,
       excludeRequesterId: excludeRequesterId ? (excludeRequesterId as string) : undefined,
+      assigneeId: assigneeId ? (assigneeId as string) : undefined,
+      posterUid: posterUid ? (posterUid as string) : undefined,
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
     });
