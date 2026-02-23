@@ -51,10 +51,11 @@ export class UserServiceClient {
    * For skill matching: Find taskers with a specific skill category
    * For keyword matching: Find users who have saved keywords
    * 
-   * @param type - Matching type: 'skill' or 'keywords'
-   * @param criteria - Criteria object:
-   *   - For 'skill': { category: string } (e.g., 'cleaning')
-   *   - For 'keywords': { keywords: string[] } (e.g., ['electrical', 'plumbing'])
+  * @param type - Matching type: 'skill', 'keywords', or 'categories'
+  * @param criteria - Criteria object:
+  *   - For 'skill': { category: string } (e.g., 'cleaning')
+  *   - For 'keywords': { keywords: string[] } (e.g., ['electrical', 'plumbing'])
+  *   - For 'categories': { categorySlugs: string[] }
    * 
    * @returns Promise<string[]> Array of user UIDs that match criteria
    * 
@@ -69,9 +70,9 @@ export class UserServiceClient {
    *   keywords: ['electrical', 'plumbing', 'repair']
    * });
    */
-  static async matchUsers(
-    type: 'skill' | 'keywords',
-    criteria: { category?: string; keywords?: string[] }
+   static async matchUsers(
+    type: 'skill' | 'keywords' | 'categories',
+    criteria: { category?: string; keywords?: string[]; categorySlugs?: string[] }
   ): Promise<string[]> {
     if (!this.isInitialized) {
       logger.warn('UserServiceClient: Not initialized, calling initialize with defaults');

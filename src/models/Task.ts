@@ -12,6 +12,8 @@ export interface ITask extends Document {
     | "gardening"
     | "petcare"
     | "other";
+  categorySlug?: string;
+  categoryLabel?: string;
   subcategory?: string;
 
   budget: {
@@ -122,6 +124,8 @@ const TaskSchema = new Schema<ITask>(
       required: true,
       index: true,
     },
+    categorySlug: { type: String, index: true },
+    categoryLabel: String,
     subcategory: String,
 
     budget: {

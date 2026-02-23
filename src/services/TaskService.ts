@@ -54,6 +54,34 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "Dog Walking": "petcare",
     General: "other",
     Miscellaneous: "other",
+
+    // Frontend category slugs
+    "home-cleaning": "cleaning",
+    "deep-cleaning": "cleaning",
+    plumbing: "repair",
+    "water-tanker-services": "delivery",
+    electrical: "repair",
+    carpenter: "repair",
+    painting: "repair",
+    "ac-repair": "repair",
+    "appliance-repair": "repair",
+    "pest-control": "repair",
+    "car-washing": "cleaning",
+    gardening: "gardening",
+    handyperson: "repair",
+    "furniture-assembly": "assembly",
+    "security-patrol": "other",
+    "beauty-services": "other",
+    "massage-spa": "other",
+    "fitness-trainers": "other",
+    tutors: "other",
+    "it-support": "repair",
+    "photographer-videographer": "other",
+    "event-services": "other",
+    "pet-services": "petcare",
+    "driver-chauffeur": "delivery",
+    "cooking-home-chef": "other",
+    "laundry-ironing": "cleaning",
   };
 
   // Try exact match first, then case-insensitive match
@@ -345,6 +373,8 @@ export class TaskService {
     // Map frontend category to backend enum
     const frontendCategory = taskData.category || taskData.type;
     const mappedCategory = mapCategoryToEnum(frontendCategory);
+    const categorySlug = taskData.categorySlug || frontendCategory;
+    const categoryLabel = taskData.categoryLabel;
 
     logger.info(
       `🔍 Category mapping: "${frontendCategory}" → "${mappedCategory}"`
@@ -385,6 +415,8 @@ export class TaskService {
       title: taskData.title,
       description: taskData.description,
       category: mappedCategory,
+      categorySlug: categorySlug,
+      categoryLabel: categoryLabel,
       subcategory: taskData.subcategory,
       budget: budget,
       isNegotiable: taskData.isNegotiable || false,
@@ -672,13 +704,16 @@ export class TaskService {
         // Create category slugs based on task category
         // Map simple backend categories to content-admin style slugs
         const categorySlugs = [
-          task.category.toLowerCase(), // e.g., "cleaning" -> "cleaning"
-          ...((task.subcategory) ? [task.subcategory.toLowerCase()] : [])
-        ].filter(slug => slug && slug.length > 0);
+          task.categorySlug,
+          task.category,
+          task.subcategory,
+        ]
+          .map((slug) => (slug ? slug.toString().toLowerCase().trim() : ""))
+          .filter((slug) => slug.length > 0);
 
         if (categorySlugs.length > 0) {
-          const categoryMatchedUsers = await UserServiceClient.matchUsers('skill', {
-            category: categorySlugs[0]
+          const categoryMatchedUsers = await UserServiceClient.matchUsers('categories', {
+            categorySlugs
           });
 
           if (categoryMatchedUsers.length > 0) {
@@ -688,11 +723,11 @@ export class TaskService {
                 category: 'keywordTaskAlerts', // Using same category preference
                 actorId: uid,
                 entity: { type: 'task', id: task._id.toString() },
-                title: `New ${task.category} task posted!`,
-                body: `A new ${task.category} task has been posted: ${task.title.substring(0, 50)}${task.title.length > 50 ? '...' : ''}`,
+                title: `New ${task.categoryLabel || task.category} task posted!`,
+                body: `A new ${task.categoryLabel || task.category} task has been posted: ${task.title.substring(0, 50)}${task.title.length > 50 ? '...' : ''}`,
                 data: {
                   taskId: task._id.toString(),
-                  category: task.category
+                  category: task.categoryLabel || task.category
                 }
               },
               categoryMatchedUsers
@@ -704,6 +739,7 @@ export class TaskService {
               const categoryProfiles = await Profile.find({ uid: { $in: categoryMatchedUsers } }).toArray();
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
+              const categoryLabel = task.categoryLabel || task.subcategory || task.category;
               
               for (const p of categoryProfiles) {
                 if (p.email) {
@@ -717,7 +753,7 @@ export class TaskService {
                     EmailServiceClient.sendTaskCreatedKeyword(p.email, {
                       userName: p.name || p.fullName || 'There',
                       taskTitle: task.title,
-                      matchedKeyword: task.category,
+                      matchedKeyword: categoryLabel,
                       taskDescription: task.description?.substring(0, 200),
                       budget: task.budget?.amount,
                       location: task.location?.city || task.location?.address,
@@ -797,6 +833,12 @@ export class TaskService {
     // Map category if provided
     if (updateData.category) {
       updateData.category = mapCategoryToEnum(updateData.category);
+    }
+    if (updateData.categorySlug) {
+      updateData.categorySlug = updateData.categorySlug.toString();
+    }
+    if (updateData.categoryLabel) {
+      updateData.categoryLabel = updateData.categoryLabel.toString();
     }
 
     logger.info("🔍 Update data after budget normalization:", updateData);
