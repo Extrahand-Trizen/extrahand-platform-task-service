@@ -670,10 +670,30 @@ export class TaskService {
           .filter(word => word.length > 3) // Filter short words
           .slice(0, 10); // Limit to top 10 keywords
 
+        logger.info(`[TaskService.createTask] KEYWORD ALERTS - Extracted keywords`, {
+          taskId: task._id,
+          keywords: taskKeywords,
+          keywordCount: taskKeywords.length,
+          taskTitle: task.title.substring(0, 50)
+        });
+
         if (taskKeywords.length > 0) {
+          logger.info(`[TaskService.createTask] KEYWORD ALERTS - Querying for matched users`, {
+            taskId: task._id,
+            keywords: taskKeywords
+          });
+
           const keywordMatchedUsers = await UserServiceClient.matchUsers('keywords', {
             keywords: taskKeywords
           });
+          
+          logger.info(`[TaskService.createTask] KEYWORD ALERTS - User matching result`, {
+            taskId: task._id,
+            matchedUserCount: keywordMatchedUsers.length,
+            matchedUsers: keywordMatchedUsers,
+            keywords: taskKeywords
+          });
+
           if (keywordMatchedUsers.length > 0) {
             await NotificationClient.sendBatch(
               {
@@ -694,21 +714,44 @@ export class TaskService {
             try {
               const Profile = mongoose.connection.collection('profiles');
               const keywordProfiles = await Profile.find({ uid: { $in: keywordMatchedUsers } }).toArray();
+              
+              logger.info(`[TaskService.createTask] KEYWORD ALERTS - Fetched profiles`, {
+                taskId: task._id,
+                fetchedProfileCount: keywordProfiles.length,
+                profilesWithEmail: keywordProfiles.filter(p => p.email).length
+              });
+
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
               
               for (const p of keywordProfiles) {
+                logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Processing profile`, {
+                  taskId: task._id,
+                  uid: p.uid,
+                  name: p.name,
+                  hasEmail: !!p.email,
+                  email: p.email?.substring(0, 10) + '***' // Mask email for logs
+                });
+
                 if (p.email) {
                   try {
-                    logger.debug(`[TaskService.createTask] Sending task_created_keyword email to ${p.email}`);
+                    logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Checking email preference`);
                     // Check if user has enabled keyword alert emails
                     const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
                       p.uid,
                       'keywordTaskAlerts'
                     );
                     
+                    logger.info(`[TaskService.createTask] KEYWORD ALERTS - Email preference check result`, {
+                      taskId: task._id,
+                      userId: p.uid,
+                      emailEnabled,
+                      email: p.email?.substring(0, 10) + '***'
+                    });
+
                     if (emailEnabled) {
+                      logger.info(`[TaskService.createTask] KEYWORD ALERTS - Sending email`);
                       await EmailServiceClient.sendTaskCreatedKeyword(p.email, {
                         userName: p.name || p.fullName || 'There',
                         taskTitle: task.title,
@@ -720,26 +763,34 @@ export class TaskService {
                         taskUrl,
                         userId: p.uid,
                       });
-                      logger.info(`[TaskService.createTask] task_created_keyword email sent successfully`, {
+                      logger.info(`[TaskService.createTask] KEYWORD ALERTS - Email sent successfully`, {
                         taskId: task._id,
-                        to: p.email,
+                        to: p.email?.substring(0, 10) + '***',
                         userId: p.uid,
                         keywords: taskKeywords.slice(0, 3)
                       });
                     } else {
-                      logger.info(`[TaskService.createTask] Email notifications disabled for keyword alerts`, {
-                        userId: p.uid
+                      logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Email notifications disabled for user`, {
+                        taskId: task._id,
+                        userId: p.uid,
+                        category: 'keywordTaskAlerts'
                       });
                     }
                   } catch (err) {
                     logger.error('Error sending task_created_keyword email to user', {
                       taskId: task._id,
-                      email: p.email,
+                      email: p.email?.substring(0, 10) + '***',
                       userId: p.uid,
                       error: err instanceof Error ? err.message : 'Unknown error',
                       stack: err instanceof Error ? err.stack : undefined
                     });
                   }
+                } else {
+                  logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Profile has no email`, {
+                    taskId: task._id,
+                    userId: p.uid,
+                    name: p.name
+                  });
                 }
               }
             } catch (emailErr) {
@@ -749,12 +800,23 @@ export class TaskService {
                 stack: emailErr instanceof Error ? emailErr.stack : undefined
               });
             }
+          } else {
+            logger.warn(`[TaskService.createTask] KEYWORD ALERTS - No matched users found`, {
+              taskId: task._id,
+              keywords: taskKeywords
+            });
           }
+        } else {
+          logger.warn(`[TaskService.createTask] KEYWORD ALERTS - No keywords extracted`, {
+            taskId: task._id,
+            taskTitle: task.title
+          });
         }
       } catch (error) {
         logger.error('Error sending TASK_CREATED_KEYWORD notification', {
           taskId: task._id,
-          error: error instanceof Error ? error.message : 'Unknown error'
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
         });
       }
 

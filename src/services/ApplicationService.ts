@@ -170,6 +170,15 @@ export class ApplicationService {
       try {
         const Profile = mongoose.connection.collection("profiles");
         const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        
+        logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Fetched requester profile`, {
+          applicationId: application._id,
+          requesterId: task.requesterId,
+          hasProfile: !!requesterProfile,
+          hasEmail: !!requesterProfile?.email,
+          email: requesterProfile?.email?.substring(0, 10) + '***'
+        });
+
         if (requesterProfile?.uid) {
           logger.debug(`[ApplicationService.submitApplication] Sending APPLICATION_SUBMITTED notification`);
           await NotificationClient.send(
@@ -192,15 +201,30 @@ export class ApplicationService {
         
         // Email: application submitted → requester
         if (requesterProfile?.email) {
-          logger.debug(`[ApplicationService.submitApplication] Checking email preferences for ${requesterProfile.uid}`);
+          logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Starting email workflow`, {
+            applicationId: application._id,
+            taskId,
+            requesterId: task.requesterId,
+            requesterEmail: requesterProfile.email?.substring(0, 10) + '***',
+            requesterUid: requesterProfile.uid
+          });
+
           try {
+            logger.debug(`[ApplicationService.submitApplication] APPLICATION EMAIL - Checking email preferences`);
             const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
               requesterProfile.uid,
               'taskUpdates'
             );
             
+            logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email preference check result`, {
+              applicationId: application._id,
+              requesterId: requesterProfile.uid,
+              emailEnabled,
+              category: 'taskUpdates'
+            });
+            
             if (emailEnabled) {
-              logger.debug(`[ApplicationService.submitApplication] Email notifications enabled, sending application_submitted email`);
+              logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email enabled, sending now`);
               const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
               
               await EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
@@ -215,35 +239,39 @@ export class ApplicationService {
                 taskUrl: applicationUrl,
                 userId: requesterProfile.uid,
               });
-              logger.info(`[ApplicationService.submitApplication] Email sent successfully`, {
+              logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email sent successfully`, {
                 applicationId: application._id,
-                to: requesterProfile.email,
+                taskId,
+                to: requesterProfile.email?.substring(0, 10) + '***',
                 template: 'application_submitted'
               });
             } else {
-              logger.info(`[ApplicationService.submitApplication] Email notifications disabled for user`, {
-                userId: requesterProfile.uid,
+              logger.warn(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email notifications disabled`, {
+                applicationId: application._id,
+                requesterId: requesterProfile.uid,
                 category: 'taskUpdates'
               });
             }
           } catch (emailErr) {
-            logger.error('Error sending application_submitted email', {
-              taskId,
+            logger.error('APPLICATION EMAIL - Error during email send', {
               applicationId: application._id,
-              email: requesterProfile.email,
+              taskId,
+              email: requesterProfile.email?.substring(0, 10) + '***',
               error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
               stack: emailErr instanceof Error ? emailErr.stack : undefined
             });
           }
         } else {
-          logger.debug(`[ApplicationService.submitApplication] No email found for requester`, {
-            requesterId: task.requesterId
+          logger.warn(`[ApplicationService.submitApplication] APPLICATION EMAIL - No email in requester profile`, {
+            applicationId: application._id,
+            requesterId: task.requesterId,
+            hasProfile: !!requesterProfile
           });
         }
       } catch (error) {
-        logger.error('Error sending APPLICATION_SUBMITTED notification', {
-          taskId,
+        logger.error('APPLICATION EMAIL - Error in notification workflow', {
           applicationId: application._id,
+          taskId,
           error: error instanceof Error ? error.message : 'Unknown error',
           stack: error instanceof Error ? error.stack : undefined
         });
