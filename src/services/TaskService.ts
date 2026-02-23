@@ -1316,6 +1316,75 @@ export class TaskService {
         });
       }
     }
+
+    // Email: task completed → notify requester + assignee (when poster marks completed directly)
+    if (status === "completed" && task.status !== "completed") {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        const assigneeProfile = task.assigneeId
+          ? await Profile.findOne({ _id: task.assigneeId })
+          : null;
+        const completedDateStr = new Date().toLocaleDateString();
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}`;
+        const reviewUrl = `${config.WEB_APP_URL}/tasks/${taskId}/review`;
+
+        if (requesterProfile?.email) {
+          EmailServiceClient.sendTaskCompleted(requesterProfile.email, {
+            recipientName: requesterProfile.name || requesterProfile.fullName || "There",
+            taskTitle: task.title,
+            isTasker: false,
+            completedDate: completedDateStr,
+            reviewUrl,
+            taskUrl,
+            userId: requesterProfile.uid,
+          }).catch((err) =>
+            logger.error("Error sending task_completed email to requester", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+
+          EmailServiceClient.sendReviewRequest(requesterProfile.email, {
+            reviewerName: requesterProfile.name || "There",
+            revieweeName: assigneeProfile?.name || assigneeProfile?.fullName || "Your tasker",
+            taskTitle: task.title,
+            isRequester: true,
+            completedDate: completedDateStr,
+            reviewUrl,
+            userId: requesterProfile.uid,
+          }).catch((err) =>
+            logger.error("Error sending review_request email", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+        }
+
+        if (assigneeProfile?.email) {
+          EmailServiceClient.sendTaskCompleted(assigneeProfile.email, {
+            recipientName: assigneeProfile.name || assigneeProfile.fullName || "There",
+            taskTitle: task.title,
+            isTasker: true,
+            completedDate: completedDateStr,
+            amount: task.budget?.amount,
+            reviewUrl,
+            taskUrl,
+            userId: assigneeProfile.uid,
+          }).catch((err) =>
+            logger.error("Error sending task_completed email to assignee", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+        }
+      } catch (error) {
+        logger.error("Error sending task_completed emails", {
+          taskId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
     
     return updatedTask as unknown as ITask;
   }
