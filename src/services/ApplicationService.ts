@@ -187,10 +187,34 @@ export class ApplicationService {
       try {
         const Profile = mongoose.connection.collection("profiles");
         
+        logger.info(`[ApplicationService.submitApplication] Starting profile lookup`, {
+          taskRequesterId: task.requesterId,
+          requestIdType: typeof task.requesterId,
+          isObjectId: task.requesterId instanceof mongoose.Types.ObjectId
+        });
+        
         // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
-        const requesterId = task.requesterId instanceof mongoose.Types.ObjectId 
-          ? task.requesterId 
-          : new mongoose.Types.ObjectId(task.requesterId);
+        let requesterId: any;
+        try {
+          requesterId = task.requesterId instanceof mongoose.Types.ObjectId 
+            ? task.requesterId 
+            : new mongoose.Types.ObjectId(task.requesterId);
+          
+          logger.debug(`[ApplicationService.submitApplication] ObjectId conversion successful`, {
+            original: task.requesterId,
+            converted: requesterId.toString()
+          });
+        } catch (conversionError) {
+          logger.error(`[ApplicationService.submitApplication] ObjectId conversion failed`, {
+            original: task.requesterId,
+            error: conversionError instanceof Error ? conversionError.message : String(conversionError)
+          });
+          throw conversionError;
+        }
+        
+        logger.debug(`[ApplicationService.submitApplication] Querying profiles collection`, {
+          query: { _id: requesterId.toString() }
+        });
         
         const requesterProfile = await Profile.findOne({ _id: requesterId });
         
@@ -199,7 +223,13 @@ export class ApplicationService {
           requesterId: task.requesterId.toString(),
           hasProfile: !!requesterProfile,
           hasEmail: !!requesterProfile?.email,
-          email: requesterProfile?.email?.substring(0, 10) + '***'
+          email: requesterProfile?.email?.substring(0, 10) + '***',
+          profileFields: requesterProfile ? {
+            name: requesterProfile.name,
+            fullName: requesterProfile.fullName,
+            uid: requesterProfile.uid,
+            photoURL: requesterProfile.photoURL ? '✓' : '✗'
+          } : 'null'
         });
 
         if (requesterProfile?.uid) {
