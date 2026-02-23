@@ -209,7 +209,7 @@ export class ReviewService {
       .limit(effectiveLimit)
       .lean();
 
-    return { reviews };
+    return { reviews: reviews as unknown as IReview[] };
   }
 }
 
