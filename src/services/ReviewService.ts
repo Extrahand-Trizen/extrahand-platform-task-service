@@ -178,7 +178,7 @@ export class ReviewService {
   }
 
   /**
-   * Get reviews for a specific user
+   * Get reviews for a specific user (userId = profile ObjectId string)
    */
   static async getUserReviews(
     userId: string,
@@ -188,30 +188,27 @@ export class ReviewService {
       rating?: number | null;
     }
   ): Promise<{ reviews: IReview[] }> {
+    const MAX_LIMIT = 50;
+    const MAX_PAGE = 100;
     const { limit = 20, skip = 0, rating } = filters;
+    const effectiveLimit = Math.min(limit, MAX_LIMIT);
+    const maxSkip = (MAX_PAGE - 1) * effectiveLimit;
+    const effectiveSkip = Math.min(Math.max(0, skip), maxSkip);
 
-    // Use static method if available, otherwise use direct query
-    let reviews;
-    if ((Review as any).getUserReviews) {
-      reviews = await (Review as any).getUserReviews(userId, {
-        limit,
-        skip,
-        rating: rating || null
-      }).lean();
-    } else {
-      const query: any = { reviewedUid: userId, isPublic: true };
-      if (rating !== null && rating !== undefined) {
-        query.rating = rating;
-      }
-
-      reviews = await Review.find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean();
+    const query: any = { isPublic: true };
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      query.reviewedId = new mongoose.Types.ObjectId(userId);
+    }
+    if (rating !== null && rating !== undefined) {
+      query.rating = rating;
     }
 
-    // Old format: just return reviews array
+    const reviews = await Review.find(query)
+      .sort({ createdAt: -1 })
+      .skip(effectiveSkip)
+      .limit(effectiveLimit)
+      .lean();
+
     return { reviews };
   }
 }

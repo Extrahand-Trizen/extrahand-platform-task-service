@@ -87,6 +87,8 @@ ReviewSchema.index(
   { taskId: 1, reviewerId: 1, reviewType: 1 }, // ✅ Updated from reviewerUid
   { unique: true }
 );
+// User reviews list: filter by reviewedId, sort by createdAt
+ReviewSchema.index({ reviewedId: 1, createdAt: -1 });
 
 const Review: Model<IReview> =
   mongoose.models.Review || mongoose.model<IReview>("Review", ReviewSchema);

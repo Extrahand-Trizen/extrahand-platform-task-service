@@ -68,6 +68,7 @@ export class ReportService {
 
     const reports = await TaskReport.find({ taskId })
       .sort({ createdAt: -1 })
+      .limit(100)
       .lean();
 
     return reports as unknown as ITaskReport[];

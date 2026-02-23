@@ -254,9 +254,10 @@ export class ApplicationService {
       page?: number;
     }
   ): Promise<{ applications: any[]; pagination: any }> {
+    const MAX_PAGE = 100;
     const { taskId, mine, status, limit = 20, page = 1 } = filters;
     const pageSize = Math.min(limit, 100);
-    const pageNum = page;
+    const pageNum = Math.min(Math.max(1, Number(page) || 1), MAX_PAGE);
     const skip = (pageNum - 1) * pageSize;
 
     const query: any = {};

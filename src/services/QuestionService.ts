@@ -84,12 +84,13 @@ export class QuestionService {
       throw new NotFoundError('Task not found');
     }
 
-    // Fetch all public questions for this task
+    // Fetch all public questions for this task (capped for M0 safety)
     const questions = await TaskQuestion.find({
       taskId,
       isPublic: true
     })
       .sort({ createdAt: -1 })
+      .limit(100)
       .lean();
 
     // Enrich questions with asker and answerer profiles using _id lookup

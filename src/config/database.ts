@@ -20,9 +20,15 @@ export class Database {
     mongoose.set('strictQuery', true);
 
     try {
-      await mongoose.connect(uri, {
+      const connectionOptions = {
         dbName: process.env.MONGODB_DB || 'extrahand',
-      });
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 45000,
+        connectTimeoutMS: 10000,
+        maxPoolSize: 10,
+        minPoolSize: 2,
+      };
+      await mongoose.connect(uri, connectionOptions);
 
       isConnected = true;
       logger.info('✅ MongoDB connected successfully');

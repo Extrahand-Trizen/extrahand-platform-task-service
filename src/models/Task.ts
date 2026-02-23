@@ -282,6 +282,10 @@ TaskSchema.index({ requesterId: 1, status: 1 });
 TaskSchema.index({ assigneeId: 1, status: 1 }); // ✅ Updated from assigneeUid
 TaskSchema.index({ expiresAt: 1, status: 1 });
 TaskSchema.index({ "schedule.date": 1, status: 1 });
+// List queries: filter by category+status (or status) then sort by date or price
+TaskSchema.index({ category: 1, status: 1, createdAt: -1 });
+TaskSchema.index({ category: 1, status: 1, "budget.amount": 1 });
+TaskSchema.index({ status: 1, createdAt: -1 });
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);

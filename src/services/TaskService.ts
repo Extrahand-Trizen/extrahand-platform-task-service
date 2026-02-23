@@ -67,7 +67,6 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "appliance-repair": "repair",
     "pest-control": "repair",
     "car-washing": "cleaning",
-    gardening: "gardening",
     handyperson: "repair",
     "furniture-assembly": "assembly",
     "security-patrol": "other",
@@ -144,6 +143,14 @@ function buildScheduleDates(params: {
   return dates;
 }
 
+// Pagination caps for Atlas M0 safety (avoid large skip() and unbounded list size)
+const MAX_LIMIT = 50;
+const MAX_PAGE = 100;
+
+// Minimal fields for task list responses (omit long description and heavy arrays)
+const TASK_LIST_SELECT =
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate flexibility createdAt updatedAt';
+
 export class TaskService {
   /**
    * Get all tasks with optional filtering
@@ -165,7 +172,9 @@ export class TaskService {
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
     const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, limit = 50, page = 1 } = filters;
-    const skip = (page - 1) * limit;
+    const effectiveLimit = Math.min(limit, MAX_LIMIT);
+    const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
+    const skip = (effectivePage - 1) * effectiveLimit;
 
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
@@ -248,9 +257,10 @@ export class TaskService {
     }
 
     const tasks = await Task.find(query)
+      .select(TASK_LIST_SELECT)
       .sort(sortObj)
       .skip(skip)
-      .limit(limit)
+      .limit(effectiveLimit)
       .lean();
 
     const total = await Task.countDocuments(query);
@@ -258,10 +268,10 @@ export class TaskService {
     return {
       tasks: tasks as unknown as ITask[],
       pagination: {
-        page,
-        limit,
+        page: effectivePage,
+        limit: effectiveLimit,
         total,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / effectiveLimit),
       },
     };
   }
@@ -277,6 +287,7 @@ export class TaskService {
     status?: TaskStatus;
   }): Promise<{ tasks: ITask[]; pagination: any; location: any }> {
     const { lat, lng, radiusKm = 10, limit = 50, status = "open" } = params;
+    const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const radiusMeters = radiusKm * 1000;
 
     const query: any = {
@@ -293,7 +304,8 @@ export class TaskService {
     };
 
     const tasks = await Task.find(query)
-      .limit(limit)
+      .select(TASK_LIST_SELECT)
+      .limit(effectiveLimit)
       .sort({ createdAt: -1 })
       .lean();
 
@@ -303,9 +315,9 @@ export class TaskService {
       tasks: tasks as unknown as ITask[],
       pagination: {
         page: 1,
-        limit,
+        limit: effectiveLimit,
         total,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / effectiveLimit),
       },
       location: {
         latitude: lat,
@@ -327,15 +339,18 @@ export class TaskService {
     }
   ): Promise<{ tasks: ITask[]; pagination: any }> {
     const { status, limit = 50, page = 1 } = filters;
-    const skip = (page - 1) * limit;
+    const effectiveLimit = Math.min(limit, MAX_LIMIT);
+    const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
+    const skip = (effectivePage - 1) * effectiveLimit;
 
     const query: any = { requesterId: profileId }; // ✅ ObjectId reference
     if (status) query.status = status;
 
     const tasks = await Task.find(query)
+      .select(TASK_LIST_SELECT)
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(limit)
+      .limit(effectiveLimit)
       .lean();
 
     const total = await Task.countDocuments(query);
@@ -343,10 +358,10 @@ export class TaskService {
     return {
       tasks: tasks as unknown as ITask[],
       pagination: {
-        page,
-        limit,
+        page: effectivePage,
+        limit: effectiveLimit,
         total,
-        pages: Math.ceil(total / limit),
+        pages: Math.ceil(total / effectiveLimit),
       },
     };
   }

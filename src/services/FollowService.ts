@@ -59,10 +59,16 @@ export class FollowService {
    * Get all tasks followed by user
    */
   static async getFollowedTasks(userId: string, page: number = 1, limit: number = 20): Promise<{ tasks: any[]; total: number; page: number; limit: number }> {
+    const MAX_LIMIT = 50;
+    const MAX_PAGE = 100;
+    const effectiveLimit = Math.min(Math.max(1, Number(limit) || 20), MAX_LIMIT);
+    const effectivePage = Math.min(Math.max(1, Number(page) || 1), MAX_PAGE);
+    const skip = (effectivePage - 1) * effectiveLimit;
+
     const follows = await TaskFollow.find({ userId })
       .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip((page - 1) * limit)
+      .skip(skip)
+      .limit(effectiveLimit)
       .populate('taskId')
       .lean();
 
@@ -72,8 +78,8 @@ export class FollowService {
     return {
       tasks,
       total: follows.length,
-      page,
-      limit
+      page: effectivePage,
+      limit: effectiveLimit
     };
   }
 }
