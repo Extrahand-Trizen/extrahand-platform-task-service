@@ -100,12 +100,17 @@ export class ApplicationService {
         const applicantProfile = await profileModel.findById(applicantProfileId);
         if (applicantProfile) {
           applicantProfileSnapshot = {
-            name: applicantProfile.name,
+            name: applicantProfile.name || applicantProfile.fullName,
             photoURL: applicantProfile.photoURL,
             rating: applicantProfile.rating,
             totalReviews: applicantProfile.totalReviews,
             skills: applicantProfile.skills,
           };
+          logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from Mongoose`, {
+            applicantId: applicantProfileId.toString(),
+            name: applicantProfileSnapshot.name,
+            rating: applicantProfileSnapshot.rating
+          });
         }
       } catch (error) {
         // Fallback: try raw collection access
@@ -116,12 +121,17 @@ export class ApplicationService {
           });
           if (applicantProfile) {
             applicantProfileSnapshot = {
-              name: applicantProfile.name,
+              name: applicantProfile.name || applicantProfile.fullName,
               photoURL: applicantProfile.photoURL,
               rating: applicantProfile.rating,
               totalReviews: applicantProfile.totalReviews,
               skills: applicantProfile.skills,
             };
+            logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from raw collection`, {
+              applicantId: applicantProfileId.toString(),
+              name: applicantProfileSnapshot.name,
+              rating: applicantProfileSnapshot.rating
+            });
           }
         } catch (fallbackError) {
           logger.warn("Could not snapshot applicant profile", {
@@ -158,6 +168,13 @@ export class ApplicationService {
           : [],
       });
 
+      logger.info(`[ApplicationService.submitApplication] Application created with snapshot`, {
+        applicationId: application._id,
+        applicantName: applicantProfileSnapshot?.name,
+        applicantRating: applicantProfileSnapshot?.rating,
+        snapshotData: applicantProfileSnapshot
+      });
+
       // Increment task applications count (atomic operation)
       logger.debug(`[ApplicationService.submitApplication] Incrementing application count for taskId=${taskId}`);
       await Task.updateOne({ _id: taskId }, { $inc: { applications: 1 } });
@@ -169,11 +186,17 @@ export class ApplicationService {
       // EMIT: APPLICATION_SUBMITTED notification to task requester
       try {
         const Profile = mongoose.connection.collection("profiles");
-        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        
+        // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
+        const requesterId = task.requesterId instanceof mongoose.Types.ObjectId 
+          ? task.requesterId 
+          : new mongoose.Types.ObjectId(task.requesterId);
+        
+        const requesterProfile = await Profile.findOne({ _id: requesterId });
         
         logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Fetched requester profile`, {
           applicationId: application._id,
-          requesterId: task.requesterId,
+          requesterId: task.requesterId.toString(),
           hasProfile: !!requesterProfile,
           hasEmail: !!requesterProfile?.email,
           email: requesterProfile?.email?.substring(0, 10) + '***'

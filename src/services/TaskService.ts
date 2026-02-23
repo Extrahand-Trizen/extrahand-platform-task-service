@@ -539,7 +539,13 @@ export class TaskService {
     // Email: task posted confirmation → requester
     try {
       const Profile = mongoose.connection.collection("profiles");
-      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+      
+      // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
+      const requesterId = task.requesterId instanceof mongoose.Types.ObjectId 
+        ? task.requesterId 
+        : new mongoose.Types.ObjectId(task.requesterId);
+      
+      const requesterProfile = await Profile.findOne({ _id: requesterId });
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
@@ -593,10 +599,12 @@ export class TaskService {
             },
             recommendedTaskers
           );
-          // Email: task_created_recommended → matched taskers
-          try {
-            const Profile = mongoose.connection.collection('profiles');
-            const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
+            // Email: task_created_recommended → matched taskers
+            try {
+              const Profile = mongoose.connection.collection('profiles');
+              
+              // ✅ FIX: query profiles by uid (string), not _id (ObjectId)
+              const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
             const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
             const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
             
