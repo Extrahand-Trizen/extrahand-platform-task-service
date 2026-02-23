@@ -539,10 +539,17 @@ export class TaskService {
     // Email: task posted confirmation → requester
     try {
       const Profile = mongoose.connection.collection("profiles");
-      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+      
+      // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
+      const requesterId = task.requesterId instanceof mongoose.Types.ObjectId 
+        ? task.requesterId 
+        : new mongoose.Types.ObjectId(task.requesterId);
+      
+      const requesterProfile = await Profile.findOne({ _id: requesterId });
       if (requesterProfile?.email) {
+        logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-        EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
+        await EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
           requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
           taskTitle: task.title,
           taskUrl,
@@ -550,17 +557,21 @@ export class TaskService {
           category: mappedCategory,
           location: task.location?.city || task.location?.address,
           userId: requesterProfile.uid,
-        }).catch((err) =>
-          logger.error('Error sending task_posted_confirmation email', {
-            taskId: task._id,
-            error: err instanceof Error ? err.message : 'Unknown error',
-          })
-        );
+        });
+        logger.info(`[TaskService.createTask] task_posted_confirmation email sent successfully`, {
+          taskId: task._id,
+          to: requesterProfile.email
+        });
+      } else {
+        logger.debug(`[TaskService.createTask] No email found for requester profile`, {
+          requesterId: task.requesterId
+        });
       }
     } catch (error) {
-      logger.error('Error fetching requester profile for task_posted_confirmation email', {
+      logger.error('Error fetching requester profile or sending task_posted_confirmation email', {
         taskId: task._id,
         error: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
       });
     }
 
@@ -588,38 +599,64 @@ export class TaskService {
             },
             recommendedTaskers
           );
-          // Email: task_created_recommended → matched taskers
-          try {
-            const Profile = mongoose.connection.collection('profiles');
-            const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
+            // Email: task_created_recommended → matched taskers
+            try {
+              const Profile = mongoose.connection.collection('profiles');
+              
+              // ✅ FIX: query profiles by uid (string), not _id (ObjectId)
+              const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
             const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
             const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
+            
             for (const p of recommendedProfiles) {
               if (p.email) {
-                EmailServiceClient.sendTaskCreatedRecommended(p.email, {
-                  taskerName: p.name || p.fullName || 'There',
-                  taskTitle: task.title,
-                  skillCategory: mappedCategory,
-                  taskDescription: task.description?.substring(0, 200),
-                  budget: task.budget?.amount,
-                  location: task.location?.city || task.location?.address,
-                  scheduledDate: scheduledDateStr,
-                  category: mappedCategory,
-                  taskUrl,
-                  userId: p.uid,
-                }).catch((err) =>
-                  logger.error('Error sending task_created_recommended email', {
+                try {
+                  logger.debug(`[TaskService.createTask] Sending task_created_recommended email to ${p.email}`);
+                  // Check if user has enabled recommended task alert emails
+                  const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+                    p.uid,
+                    'recommendedTaskAlerts'
+                  );
+                  
+                  if (emailEnabled) {
+                    await EmailServiceClient.sendTaskCreatedRecommended(p.email, {
+                      taskerName: p.name || p.fullName || 'There',
+                      taskTitle: task.title,
+                      skillCategory: mappedCategory,
+                      taskDescription: task.description?.substring(0, 200),
+                      budget: task.budget?.amount,
+                      location: task.location?.city || task.location?.address,
+                      scheduledDate: scheduledDateStr,
+                      category: mappedCategory,
+                      taskUrl,
+                      userId: p.uid,
+                    });
+                    logger.info(`[TaskService.createTask] task_created_recommended email sent successfully`, {
+                      taskId: task._id,
+                      to: p.email,
+                      userId: p.uid
+                    });
+                  } else {
+                    logger.info(`[TaskService.createTask] Email notifications disabled for recommended task alerts`, {
+                      userId: p.uid
+                    });
+                  }
+                } catch (err) {
+                  logger.error('Error sending task_created_recommended email to user', {
                     taskId: task._id,
                     email: p.email,
+                    userId: p.uid,
                     error: err instanceof Error ? err.message : 'Unknown error',
-                  })
-                );
+                    stack: err instanceof Error ? err.stack : undefined
+                  });
+                }
               }
             }
           } catch (emailErr) {
             logger.error('Error sending task_created_recommended emails', {
               taskId: task._id,
               error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+              stack: emailErr instanceof Error ? emailErr.stack : undefined
             });
           }
         }
@@ -641,10 +678,30 @@ export class TaskService {
           .filter(word => word.length > 3) // Filter short words
           .slice(0, 10); // Limit to top 10 keywords
 
+        logger.info(`[TaskService.createTask] KEYWORD ALERTS - Extracted keywords`, {
+          taskId: task._id,
+          keywords: taskKeywords,
+          keywordCount: taskKeywords.length,
+          taskTitle: task.title.substring(0, 50)
+        });
+
         if (taskKeywords.length > 0) {
+          logger.info(`[TaskService.createTask] KEYWORD ALERTS - Querying for matched users`, {
+            taskId: task._id,
+            keywords: taskKeywords
+          });
+
           const keywordMatchedUsers = await UserServiceClient.matchUsers('keywords', {
             keywords: taskKeywords
           });
+          
+          logger.info(`[TaskService.createTask] KEYWORD ALERTS - User matching result`, {
+            taskId: task._id,
+            matchedUserCount: keywordMatchedUsers.length,
+            matchedUsers: keywordMatchedUsers,
+            keywords: taskKeywords
+          });
+
           if (keywordMatchedUsers.length > 0) {
             await NotificationClient.sendBatch(
               {
@@ -665,51 +722,109 @@ export class TaskService {
             try {
               const Profile = mongoose.connection.collection('profiles');
               const keywordProfiles = await Profile.find({ uid: { $in: keywordMatchedUsers } }).toArray();
+              
+              logger.info(`[TaskService.createTask] KEYWORD ALERTS - Fetched profiles`, {
+                taskId: task._id,
+                fetchedProfileCount: keywordProfiles.length,
+                profilesWithEmail: keywordProfiles.filter(p => p.email).length
+              });
+
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
               
               for (const p of keywordProfiles) {
+                logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Processing profile`, {
+                  taskId: task._id,
+                  uid: p.uid,
+                  name: p.name,
+                  hasEmail: !!p.email,
+                  email: p.email?.substring(0, 10) + '***' // Mask email for logs
+                });
+
                 if (p.email) {
-                  // Check if user has enabled keyword alert emails
-                  const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                    p.uid,
-                    'keywordTaskAlerts'
-                  );
-                  
-                  if (emailEnabled) {
-                    EmailServiceClient.sendTaskCreatedKeyword(p.email, {
-                      userName: p.name || p.fullName || 'There',
-                      taskTitle: task.title,
-                      matchedKeyword: matchedKeywordStr,
-                      taskDescription: task.description?.substring(0, 200),
-                      budget: task.budget?.amount,
-                      location: task.location?.city || task.location?.address,
-                      scheduledDate: scheduledDateStr,
-                      taskUrl,
+                  try {
+                    logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Checking email preference`);
+                    // Check if user has enabled keyword alert emails
+                    const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+                      p.uid,
+                      'keywordTaskAlerts'
+                    );
+                    
+                    logger.info(`[TaskService.createTask] KEYWORD ALERTS - Email preference check result`, {
+                      taskId: task._id,
                       userId: p.uid,
-                    }).catch((err) => {
-                      logger.error('Error sending task_created_keyword email', {
-                        taskId: task._id,
-                        email: p.email,
-                        error: err instanceof Error ? err.message : 'Unknown error',
-                      });
+                      emailEnabled,
+                      email: p.email?.substring(0, 10) + '***'
                     });
-                }
+
+                    if (emailEnabled) {
+                      logger.info(`[TaskService.createTask] KEYWORD ALERTS - Sending email`);
+                      await EmailServiceClient.sendTaskCreatedKeyword(p.email, {
+                        userName: p.name || p.fullName || 'There',
+                        taskTitle: task.title,
+                        matchedKeyword: matchedKeywordStr,
+                        taskDescription: task.description?.substring(0, 200),
+                        budget: task.budget?.amount,
+                        location: task.location?.city || task.location?.address,
+                        scheduledDate: scheduledDateStr,
+                        taskUrl,
+                        userId: p.uid,
+                      });
+                      logger.info(`[TaskService.createTask] KEYWORD ALERTS - Email sent successfully`, {
+                        taskId: task._id,
+                        to: p.email?.substring(0, 10) + '***',
+                        userId: p.uid,
+                        keywords: taskKeywords.slice(0, 3)
+                      });
+                    } else {
+                      logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Email notifications disabled for user`, {
+                        taskId: task._id,
+                        userId: p.uid,
+                        category: 'keywordTaskAlerts'
+                      });
+                    }
+                  } catch (err) {
+                    logger.error('Error sending task_created_keyword email to user', {
+                      taskId: task._id,
+                      email: p.email?.substring(0, 10) + '***',
+                      userId: p.uid,
+                      error: err instanceof Error ? err.message : 'Unknown error',
+                      stack: err instanceof Error ? err.stack : undefined
+                    });
+                  }
+                } else {
+                  logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Profile has no email`, {
+                    taskId: task._id,
+                    userId: p.uid,
+                    name: p.name
+                  });
                 }
               }
             } catch (emailErr) {
               logger.error('Error sending task_created_keyword emails', {
                 taskId: task._id,
                 error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+                stack: emailErr instanceof Error ? emailErr.stack : undefined
               });
             }
+          } else {
+            logger.warn(`[TaskService.createTask] KEYWORD ALERTS - No matched users found`, {
+              taskId: task._id,
+              keywords: taskKeywords
+            });
           }
+        } else {
+          logger.warn(`[TaskService.createTask] KEYWORD ALERTS - No keywords extracted`, {
+            taskId: task._id,
+            taskTitle: task.title
+          });
         }
       } catch (error) {
         logger.error('Error sending TASK_CREATED_KEYWORD notification', {
           taskId: task._id,
-          error: error instanceof Error ? error.message : 'Unknown error'
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
         });
       }
 
@@ -758,37 +873,53 @@ export class TaskService {
               
               for (const p of categoryProfiles) {
                 if (p.email) {
-                  // Check if user has enabled keyword alert emails
-                  const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                    p.uid,
-                    'keywordTaskAlerts'
-                  );
-                  
-                  if (emailEnabled) {
-                    EmailServiceClient.sendTaskCreatedKeyword(p.email, {
-                      userName: p.name || p.fullName || 'There',
-                      taskTitle: task.title,
-                      matchedKeyword: categoryLabel,
-                      taskDescription: task.description?.substring(0, 200),
-                      budget: task.budget?.amount,
-                      location: task.location?.city || task.location?.address,
-                      scheduledDate: scheduledDateStr,
-                      taskUrl,
-                      userId: p.uid,
-                    }).catch((err) => {
-                      logger.error('Error sending task_created_category email', {
-                        taskId: task._id,
-                        email: p.email,
-                        error: err instanceof Error ? err.message : 'Unknown error',
+                  try {
+                    logger.debug(`[TaskService.createTask] Sending task_created_category email to ${p.email}`);
+                    // Check if user has enabled keyword alert emails
+                    const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+                      p.uid,
+                      'keywordTaskAlerts'
+                    );
+                    
+                    if (emailEnabled) {
+                      await EmailServiceClient.sendTaskCreatedKeyword(p.email, {
+                        userName: p.name || p.fullName || 'There',
+                        taskTitle: task.title,
+                        matchedKeyword: categoryLabel,
+                        taskDescription: task.description?.substring(0, 200),
+                        budget: task.budget?.amount,
+                        location: task.location?.city || task.location?.address,
+                        scheduledDate: scheduledDateStr,
+                        taskUrl,
+                        userId: p.uid,
                       });
+                      logger.info(`[TaskService.createTask] task_created_category email sent successfully`, {
+                        taskId: task._id,
+                        to: p.email,
+                        userId: p.uid,
+                        category: categoryLabel
+                      });
+                    } else {
+                      logger.info(`[TaskService.createTask] Email notifications disabled for keyword alerts`, {
+                        userId: p.uid
+                      });
+                    }
+                  } catch (err) {
+                    logger.error('Error sending task_created_category email to user', {
+                      taskId: task._id,
+                      email: p.email,
+                      userId: p.uid,
+                      error: err instanceof Error ? err.message : 'Unknown error',
+                      stack: err instanceof Error ? err.stack : undefined
                     });
-                }
+                  }
                 }
               }
             } catch (emailErr) {
               logger.error('Error sending task_created_category emails', {
                 taskId: task._id,
                 error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+                stack: emailErr instanceof Error ? emailErr.stack : undefined
               });
             }
           }

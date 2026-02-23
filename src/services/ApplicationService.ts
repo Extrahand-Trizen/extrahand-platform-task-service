@@ -101,12 +101,17 @@ export class ApplicationService {
         const applicantProfile = await profileModel.findById(applicantProfileId);
         if (applicantProfile) {
           applicantProfileSnapshot = {
-            name: applicantProfile.name,
+            name: applicantProfile.name || applicantProfile.fullName,
             photoURL: applicantProfile.photoURL,
             rating: applicantProfile.rating,
             totalReviews: applicantProfile.totalReviews,
             skills: applicantProfile.skills,
           };
+          logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from Mongoose`, {
+            applicantId: applicantProfileId.toString(),
+            name: applicantProfileSnapshot.name,
+            rating: applicantProfileSnapshot.rating
+          });
         }
       } catch (error) {
         // Fallback: try raw collection access
@@ -117,12 +122,17 @@ export class ApplicationService {
           });
           if (applicantProfile) {
             applicantProfileSnapshot = {
-              name: applicantProfile.name,
+              name: applicantProfile.name || applicantProfile.fullName,
               photoURL: applicantProfile.photoURL,
               rating: applicantProfile.rating,
               totalReviews: applicantProfile.totalReviews,
               skills: applicantProfile.skills,
             };
+            logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from raw collection`, {
+              applicantId: applicantProfileId.toString(),
+              name: applicantProfileSnapshot.name,
+              rating: applicantProfileSnapshot.rating
+            });
           }
         } catch (fallbackError) {
           logger.warn("Could not snapshot applicant profile", {
@@ -159,6 +169,13 @@ export class ApplicationService {
           : [],
       });
 
+      logger.info(`[ApplicationService.submitApplication] Application created with snapshot`, {
+        applicationId: application._id,
+        applicantName: applicantProfileSnapshot?.name,
+        applicantRating: applicantProfileSnapshot?.rating,
+        snapshotData: applicantProfileSnapshot
+      });
+
       // Increment task applications count (atomic operation)
       logger.debug(`[ApplicationService.submitApplication] Incrementing application count for taskId=${taskId}`);
       await Task.updateOne({ _id: taskId }, { $inc: { applications: 1 } });
@@ -169,8 +186,72 @@ export class ApplicationService {
 
       // EMIT: APPLICATION_SUBMITTED notification to task requester
       try {
-        const Profile = mongoose.connection.collection("profiles");
-        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        logger.info(`[ApplicationService.submitApplication] Starting profile lookup`, {
+          taskRequesterId: task.requesterId,
+          requestIdType: typeof task.requesterId,
+          isObjectId: task.requesterId instanceof mongoose.Types.ObjectId
+        });
+        
+        // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
+        let requesterId: any;
+        try {
+          requesterId = task.requesterId instanceof mongoose.Types.ObjectId 
+            ? task.requesterId 
+            : new mongoose.Types.ObjectId(task.requesterId);
+          
+          logger.info(`[ApplicationService.submitApplication] ObjectId conversion successful`, {
+            original: task.requesterId,
+            converted: requesterId.toString()
+          });
+        } catch (conversionError) {
+          logger.error(`[ApplicationService.submitApplication] ObjectId conversion failed`, {
+            original: task.requesterId,
+            error: conversionError instanceof Error ? conversionError.message : String(conversionError)
+          });
+          throw conversionError;
+        }
+        
+        // Try profiles collection
+        logger.info(`[ApplicationService.submitApplication] Querying profiles collection`, {
+          query: { _id: requesterId.toString() }
+        });
+        
+        const ProfilesCol = mongoose.connection.collection("profiles");
+        let requesterProfile = await ProfilesCol.findOne({ _id: requesterId });
+        
+        if (!requesterProfile) {
+          logger.warn(`[ApplicationService.submitApplication] Profile not found in 'profiles' collection, trying 'users'`, {
+            requesterId: requesterId.toString()
+          });
+          
+          // Try users collection as fallback
+          const UsersCol = mongoose.connection.collection("users");
+          requesterProfile = await UsersCol.findOne({ _id: requesterId });
+          
+          if (requesterProfile) {
+            logger.info(`[ApplicationService.submitApplication] Found profile in 'users' collection instead`);
+          }
+        }
+        
+        logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Fetched requester profile`, {
+          applicationId: application._id,
+          requesterId: task.requesterId.toString(),
+          hasProfile: !!requesterProfile,
+          hasEmail: !!requesterProfile?.email,
+          email: requesterProfile?.email?.substring(0, 10) + '***',
+          collectionType: requesterProfile ? 'found' : 'not_found',
+          profileFields: requesterProfile ? {
+            name: requesterProfile.name,
+            fullName: requesterProfile.fullName,
+            firstName: requesterProfile.firstName,
+            lastName: requesterProfile.lastName,
+            uid: requesterProfile.uid,
+            userId: requesterProfile.userId,
+            email: !!requesterProfile.email,
+            photoURL: requesterProfile.photoURL ? '✓' : '✗'
+          } : 'null'
+        });
+
         if (requesterProfile?.uid) {
           logger.debug(`[ApplicationService.submitApplication] Sending APPLICATION_SUBMITTED notification`);
           await NotificationClient.send(
@@ -190,42 +271,82 @@ export class ApplicationService {
             }
           );
         }
+        
         // Email: application submitted → requester
         if (requesterProfile?.email) {
-          logger.debug(`[ApplicationService.submitApplication] Checking email preferences`);
-          const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-            requesterProfile.uid,
-            'taskUpdates'
-          );
-          
-          if (emailEnabled) {
-            logger.debug(`[ApplicationService.submitApplication] Sending email notification`);
-            const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
-            EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
-              requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
-              applicantName: applicantProfileSnapshot?.name || 'An applicant',
-              taskTitle: task.title,
-              proposedAmount: application.proposedBudget?.amount,
-              applicantMessage: application.coverLetter || undefined,
-              applicantRating: applicantProfileSnapshot?.rating,
-              applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
-              applicationUrl,
-              taskUrl: applicationUrl,
-              userId: requesterProfile.uid,
-            }).catch((err) =>
-              logger.error('Error sending application_submitted email', {
-                taskId,
-                applicationId: application._id,
-                error: err instanceof Error ? err.message : 'Unknown error',
-              })
+          logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Starting email workflow`, {
+            applicationId: application._id,
+            taskId,
+            requesterId: task.requesterId,
+            requesterEmail: requesterProfile.email?.substring(0, 10) + '***',
+            requesterUid: requesterProfile.uid
+          });
+
+          try {
+            logger.debug(`[ApplicationService.submitApplication] APPLICATION EMAIL - Checking email preferences`);
+            const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+              requesterProfile.uid,
+              'taskUpdates'
             );
+            
+            logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email preference check result`, {
+              applicationId: application._id,
+              requesterId: requesterProfile.uid,
+              emailEnabled,
+              category: 'taskUpdates'
+            });
+            
+            if (emailEnabled) {
+              logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email enabled, sending now`);
+              const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
+              
+              await EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
+                requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
+                applicantName: applicantProfileSnapshot?.name || 'An applicant',
+                taskTitle: task.title,
+                proposedAmount: application.proposedBudget?.amount,
+                applicantMessage: application.coverLetter || undefined,
+                applicantRating: applicantProfileSnapshot?.rating,
+                applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
+                applicationUrl,
+                taskUrl: applicationUrl,
+                userId: requesterProfile.uid,
+              });
+              logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email sent successfully`, {
+                applicationId: application._id,
+                taskId,
+                to: requesterProfile.email?.substring(0, 10) + '***',
+                template: 'application_submitted'
+              });
+            } else {
+              logger.warn(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email notifications disabled`, {
+                applicationId: application._id,
+                requesterId: requesterProfile.uid,
+                category: 'taskUpdates'
+              });
+            }
+          } catch (emailErr) {
+            logger.error('APPLICATION EMAIL - Error during email send', {
+              applicationId: application._id,
+              taskId,
+              email: requesterProfile.email?.substring(0, 10) + '***',
+              error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+              stack: emailErr instanceof Error ? emailErr.stack : undefined
+            });
           }
+        } else {
+          logger.warn(`[ApplicationService.submitApplication] APPLICATION EMAIL - No email in requester profile`, {
+            applicationId: application._id,
+            requesterId: task.requesterId,
+            hasProfile: !!requesterProfile
+          });
         }
       } catch (error) {
-        logger.error('Error sending APPLICATION_SUBMITTED notification', {
-          taskId,
+        logger.error('APPLICATION EMAIL - Error in notification workflow', {
           applicationId: application._id,
-          error: error instanceof Error ? error.message : 'Unknown error'
+          taskId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
         });
       }
 
