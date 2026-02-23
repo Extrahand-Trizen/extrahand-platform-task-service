@@ -28,6 +28,7 @@ export class ApplicationService {
         isNegotiable?: boolean;
       };
       proposedTime?: any;
+      selectedDates?: Array<string | Date>;
       coverLetter?: string;
       relevantExperience?: string[];
       portfolio?: string[];
@@ -48,6 +49,35 @@ export class ApplicationService {
       // Compare ObjectIds
       if (task.requesterId.equals(applicantProfileId)) {
         throw new BadRequestError("Cannot apply to your own task");
+      }
+
+      const selectedDates = Array.isArray(applicationData.selectedDates)
+        ? applicationData.selectedDates
+            .map((value) => new Date(value))
+            .filter((date) => !Number.isNaN(date.getTime()))
+        : [];
+
+      if (task.recurring?.enabled) {
+        if (selectedDates.length === 0) {
+          throw new BadRequestError("Please select at least one date");
+        }
+
+        const schedule = Array.isArray(task.schedule) ? task.schedule : [];
+        const openDates = new Set(
+          schedule
+            .filter((entry: any) => entry.status === "open")
+            .map((entry: any) => new Date(entry.date).toDateString())
+        );
+
+        const allValid = selectedDates.every((date) =>
+          openDates.has(date.toDateString())
+        );
+
+        if (!allValid) {
+          throw new BadRequestError(
+            "One or more selected dates are not available"
+          );
+        }
       }
 
       // Check if user has already applied
@@ -102,6 +132,7 @@ export class ApplicationService {
           isNegotiable: applicationData.proposedBudget?.isNegotiable !== false,
         },
         proposedTime: applicationData.proposedTime || { flexible: true },
+        selectedDates: selectedDates,
         coverLetter: applicationData.coverLetter || "",
         relevantExperience: Array.isArray(applicationData.relevantExperience)
           ? applicationData.relevantExperience
@@ -393,35 +424,72 @@ export class ApplicationService {
 
     // Validate status transition
     if (status === "accepted") {
-      if (task.status !== "open") {
+      const isRecurring = Boolean(task.recurring?.enabled) && Array.isArray(task.schedule) && task.schedule.length > 0;
+
+      if (!isRecurring && task.status !== "open") {
         throw new BadRequestError("Task is not open for assignment");
       }
 
-      // Reject all other pending applications for this task
-      await TaskApplication.updateMany(
-        {
-          taskId: task._id,
-          _id: { $ne: applicationId },
-          status: "pending",
-        },
-        { status: "rejected" }
-      );
-
-      // Get applicant profile to set assigneeId and assigneeUid
+      // Get applicant profile to set assigneeUid
       const Profile = mongoose.connection.collection("profiles");
       const applicantProfile = await Profile.findOne({ _id: application.applicantId });
 
-      // Update task status to 'assigned' and set assignee
-      await Task.findByIdAndUpdate(task._id, {
-        status: "assigned",
-        assigneeId: application.applicantId,
-        assigneeUid: applicantProfile?.uid || null,
-        assignedToName: applicantProfile?.name || applicantProfile?.fullName || "Assigned User",
-        assignedAt: new Date(),
-        updatedAt: new Date(),
-      });
+      if (isRecurring && Array.isArray(application.selectedDates) && application.selectedDates.length > 0) {
+        const selectedSet = new Set(
+          application.selectedDates.map((d: Date) => new Date(d).toDateString())
+        );
 
-      logger.info(`✅ Task ${task._id} assigned to ${application.applicantId}`);
+        let updatedAny = false;
+        const schedule = task.schedule as any[];
+
+        schedule.forEach((entry) => {
+          const entryKey = new Date(entry.date).toDateString();
+          if (selectedSet.has(entryKey)) {
+            if (entry.status !== "open") {
+              throw new BadRequestError("One or more selected dates are no longer available");
+            }
+            entry.status = "assigned";
+            entry.assigneeId = application.applicantId;
+            entry.assigneeUid = applicantProfile?.uid || null;
+            updatedAny = true;
+          }
+        });
+
+        if (!updatedAny) {
+          throw new BadRequestError("No matching schedule dates found to assign");
+        }
+
+        const hasOpenDates = schedule.some((entry) => entry.status === "open");
+        task.status = hasOpenDates ? "open" : "assigned";
+        task.updatedAt = new Date();
+        task.assignedAt = new Date();
+
+        await task.save();
+
+        logger.info(`✅ Recurring task ${task._id} dates assigned to ${application.applicantId}`);
+      } else {
+        // Reject all other pending applications for this task
+        await TaskApplication.updateMany(
+          {
+            taskId: task._id,
+            _id: { $ne: applicationId },
+            status: "pending",
+          },
+          { status: "rejected" }
+        );
+
+        // Update task status to 'assigned' and set assignee
+        await Task.findByIdAndUpdate(task._id, {
+          status: "assigned",
+          assigneeId: application.applicantId,
+          assigneeUid: applicantProfile?.uid || null,
+          assignedToName: applicantProfile?.name || applicantProfile?.fullName || "Assigned User",
+          assignedAt: new Date(),
+          updatedAt: new Date(),
+        });
+
+        logger.info(`✅ Task ${task._id} assigned to ${application.applicantId}`);
+      }
     }
 
     // STEP 2: Update application status

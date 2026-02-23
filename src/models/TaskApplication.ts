@@ -25,6 +25,7 @@ export interface ITaskApplication extends Document {
     estimatedDuration?: number;
     flexible: boolean;
   };
+  selectedDates?: Date[];
   coverLetter?: string;
   relevantExperience?: string[];
   portfolio?: string[];
@@ -83,6 +84,11 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
       flexible: { type: Boolean, default: true },
     },
 
+    selectedDates: {
+      type: [Date],
+      default: [],
+    },
+
     coverLetter: { type: String, maxlength: 1000 },
     relevantExperience: [String],
     portfolio: [String],
@@ -118,6 +124,7 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
 TaskApplicationSchema.index({ taskId: 1, status: 1 });
 TaskApplicationSchema.index({ applicantId: 1, status: 1 });
 TaskApplicationSchema.index({ taskId: 1, applicantUid: 1 }, { unique: true }); // Prevent duplicate applications
+TaskApplicationSchema.index({ taskId: 1, selectedDates: 1 });
 
 // Auto-set respondedAt
 TaskApplicationSchema.pre("save", function (next) {

@@ -58,6 +58,22 @@ export interface ITask extends Document {
   flexibility: "strict" | "flexible" | "anytime";
   timeFlexibilityValue?: "exact" | "1h" | "3h";
 
+  recurring?: {
+    enabled: boolean;
+    frequency: "daily" | "weekly" | "custom";
+    startDate?: Date;
+    endDate?: Date;
+    requireApproval?: boolean;
+    minCommitment?: number;
+  };
+
+  schedule?: Array<{
+    date: Date;
+    status: "open" | "reserved" | "assigned" | "completed" | "cancelled";
+    assigneeId?: mongoose.Types.ObjectId | null;
+    assigneeUid?: string | null;
+  }>;
+
   requirements?: string[];
   images?: string[];
   tags?: string[];
@@ -185,6 +201,39 @@ const TaskSchema = new Schema<ITask>(
       enum: ["exact", "1h", "3h"],
     },
 
+    recurring: {
+      enabled: { type: Boolean, default: false },
+      frequency: {
+        type: String,
+        enum: ["daily", "weekly", "custom"],
+        default: "daily",
+      },
+      startDate: Date,
+      endDate: Date,
+      requireApproval: { type: Boolean, default: true },
+      minCommitment: Number,
+    },
+
+    schedule: {
+      type: [
+        {
+          date: { type: Date, required: true },
+          status: {
+            type: String,
+            enum: ["open", "reserved", "assigned", "completed", "cancelled"],
+            default: "open",
+          },
+          assigneeId: {
+            type: Schema.Types.ObjectId,
+            ref: "Profile",
+            default: null,
+          },
+          assigneeUid: { type: String, default: null },
+        },
+      ],
+      default: [],
+    },
+
     requirements: [String],
     images: [String],
     tags: [String],
@@ -228,6 +277,7 @@ TaskSchema.index({ category: 1, status: 1 });
 TaskSchema.index({ requesterId: 1, status: 1 });
 TaskSchema.index({ assigneeId: 1, status: 1 }); // ✅ Updated from assigneeUid
 TaskSchema.index({ expiresAt: 1, status: 1 });
+TaskSchema.index({ "schedule.date": 1, status: 1 });
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);

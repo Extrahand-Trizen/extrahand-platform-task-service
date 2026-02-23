@@ -86,6 +86,36 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
   return "other";
 }
 
+function normalizeDateOnly(value: Date): Date {
+  const d = new Date(value);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function buildScheduleDates(params: {
+  startDate: Date;
+  endDate: Date;
+  frequency: "daily" | "weekly" | "custom";
+  maxOccurrences: number;
+}): Date[] {
+  const { startDate, endDate, frequency, maxOccurrences } = params;
+  const dates: Date[] = [];
+  const stepDays = frequency === "weekly" ? 7 : 1;
+
+  let current = normalizeDateOnly(startDate);
+  const last = normalizeDateOnly(endDate);
+
+  while (current.getTime() <= last.getTime()) {
+    dates.push(new Date(current));
+    if (dates.length >= maxOccurrences) break;
+    const next = new Date(current);
+    next.setDate(next.getDate() + stepDays);
+    current = next;
+  }
+
+  return dates;
+}
+
 export class TaskService {
   /**
    * Get all tasks with optional filtering
@@ -380,6 +410,75 @@ export class TaskService {
       createdAt: new Date(),
       updatedAt: new Date(),
     };
+
+    const recurring = taskData.recurring;
+    if (recurring?.enabled) {
+      const frequency = (recurring.frequency || "daily") as
+        | "daily"
+        | "weekly"
+        | "custom";
+
+      const rawStart = recurring.startDate || taskData.scheduledDate;
+      const rawEnd = recurring.endDate;
+
+      if (!rawStart) {
+        throw new BadRequestError("Recurring tasks require a start date");
+      }
+
+      const startDate = normalizeDateOnly(
+        typeof rawStart === "string" ? new Date(rawStart) : rawStart
+      );
+
+      let endDate: Date | null = rawEnd
+        ? normalizeDateOnly(
+            typeof rawEnd === "string" ? new Date(rawEnd) : rawEnd
+          )
+        : null;
+
+      const occurrences = Number(recurring.occurrences || 0) || null;
+      const stepDays = frequency === "weekly" ? 7 : 1;
+
+      if (!endDate && occurrences) {
+        const computedEnd = new Date(startDate);
+        computedEnd.setDate(computedEnd.getDate() + stepDays * (occurrences - 1));
+        endDate = normalizeDateOnly(computedEnd);
+      }
+
+      if (!endDate) {
+        throw new BadRequestError("Recurring tasks require an end date or occurrences");
+      }
+
+      if (endDate.getTime() < startDate.getTime()) {
+        throw new BadRequestError("Recurring end date must be after start date");
+      }
+
+      const scheduleDates = buildScheduleDates({
+        startDate,
+        endDate,
+        frequency,
+        maxOccurrences: 366,
+      });
+
+      if (scheduleDates.length === 0) {
+        throw new BadRequestError("Recurring schedule has no dates");
+      }
+
+      taskPayload.recurring = {
+        enabled: true,
+        frequency,
+        startDate,
+        endDate,
+        requireApproval: recurring.requireApproval !== false,
+        minCommitment: recurring.minCommitment || undefined,
+      };
+
+      taskPayload.schedule = scheduleDates.map((date) => ({
+        date,
+        status: "open",
+      }));
+
+      taskPayload.scheduledDate = startDate;
+    }
 
     // Only include location if it was provided
     if (location) {
