@@ -55,6 +55,12 @@ export class EmailServiceClient {
       return false;
     }
     try {
+      logger.info('EmailServiceClient: Sending email request', {
+        endpoint,
+        to: email,
+        template: data.template,
+        subject: data.subject,
+      });
       await axios.post(`${this.baseURL}/api/v1/email${endpoint}`, data, {
         headers: {
           'X-Service-Auth': this.serviceAuthToken,
@@ -63,12 +69,19 @@ export class EmailServiceClient {
         },
         timeout: 10000,
       });
-      logger.info('EmailServiceClient: Email sent', { endpoint, to: email });
+      logger.info('EmailServiceClient: Email request successful', {
+        endpoint,
+        to: email,
+        template: data.template,
+      });
       return true;
     } catch (error) {
       const axiosError = error as AxiosError;
       logger.error('EmailServiceClient: Send failed', {
         endpoint,
+        to: email,
+        template: data.template,
+        subject: data.subject,
         status: axiosError.response?.status,
         message: axiosError.message,
       });
