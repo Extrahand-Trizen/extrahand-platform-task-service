@@ -93,12 +93,11 @@ export class ApplicationService {
 
       // Snapshot applicant profile at time of application
       logger.debug(`[ApplicationService.submitApplication] Creating profile snapshot for applicantId=${applicantProfileId}`);
-      const Profile = mongoose.connection.collection("profiles");
       let applicantProfileSnapshot: any | undefined;
       try {
-        const applicantProfile = await Profile.findOne({
-          _id: applicantProfileId,
-        });
+        // Try to use Mongoose model first if available
+        const profileModel = mongoose.connection.model("Profile");
+        const applicantProfile = await profileModel.findById(applicantProfileId);
         if (applicantProfile) {
           applicantProfileSnapshot = {
             name: applicantProfile.name,
@@ -109,11 +108,28 @@ export class ApplicationService {
           };
         }
       } catch (error) {
-        logger.warn("Could not snapshot applicant profile", {
-          applicantProfileId,
-          error:
-            error instanceof Error ? error.message : "Unknown error",
-        });
+        // Fallback: try raw collection access
+        try {
+          const Profile = mongoose.connection.collection("profiles");
+          const applicantProfile = await Profile.findOne({
+            _id: new mongoose.Types.ObjectId(applicantProfileId),
+          });
+          if (applicantProfile) {
+            applicantProfileSnapshot = {
+              name: applicantProfile.name,
+              photoURL: applicantProfile.photoURL,
+              rating: applicantProfile.rating,
+              totalReviews: applicantProfile.totalReviews,
+              skills: applicantProfile.skills,
+            };
+          }
+        } catch (fallbackError) {
+          logger.warn("Could not snapshot applicant profile", {
+            applicantProfileId,
+            error:
+              fallbackError instanceof Error ? fallbackError.message : "Unknown error",
+          });
+        }
       }
 
       // Create application
