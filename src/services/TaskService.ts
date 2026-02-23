@@ -67,7 +67,6 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "appliance-repair": "repair",
     "pest-control": "repair",
     "car-washing": "cleaning",
-    gardening: "gardening",
     handyperson: "repair",
     "furniture-assembly": "assembly",
     "security-patrol": "other",
