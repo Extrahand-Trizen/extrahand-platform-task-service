@@ -185,8 +185,6 @@ export class ApplicationService {
 
       // EMIT: APPLICATION_SUBMITTED notification to task requester
       try {
-        const Profile = mongoose.connection.collection("profiles");
-        
         logger.info(`[ApplicationService.submitApplication] Starting profile lookup`, {
           taskRequesterId: task.requesterId,
           requestIdType: typeof task.requesterId,
@@ -200,7 +198,7 @@ export class ApplicationService {
             ? task.requesterId 
             : new mongoose.Types.ObjectId(task.requesterId);
           
-          logger.debug(`[ApplicationService.submitApplication] ObjectId conversion successful`, {
+          logger.info(`[ApplicationService.submitApplication] ObjectId conversion successful`, {
             original: task.requesterId,
             converted: requesterId.toString()
           });
@@ -212,11 +210,27 @@ export class ApplicationService {
           throw conversionError;
         }
         
-        logger.debug(`[ApplicationService.submitApplication] Querying profiles collection`, {
+        // Try profiles collection
+        logger.info(`[ApplicationService.submitApplication] Querying profiles collection`, {
           query: { _id: requesterId.toString() }
         });
         
-        const requesterProfile = await Profile.findOne({ _id: requesterId });
+        const ProfilesCol = mongoose.connection.collection("profiles");
+        let requesterProfile = await ProfilesCol.findOne({ _id: requesterId });
+        
+        if (!requesterProfile) {
+          logger.warn(`[ApplicationService.submitApplication] Profile not found in 'profiles' collection, trying 'users'`, {
+            requesterId: requesterId.toString()
+          });
+          
+          // Try users collection as fallback
+          const UsersCol = mongoose.connection.collection("users");
+          requesterProfile = await UsersCol.findOne({ _id: requesterId });
+          
+          if (requesterProfile) {
+            logger.info(`[ApplicationService.submitApplication] Found profile in 'users' collection instead`);
+          }
+        }
         
         logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Fetched requester profile`, {
           applicationId: application._id,
@@ -224,10 +238,15 @@ export class ApplicationService {
           hasProfile: !!requesterProfile,
           hasEmail: !!requesterProfile?.email,
           email: requesterProfile?.email?.substring(0, 10) + '***',
+          collectionType: requesterProfile ? 'found' : 'not_found',
           profileFields: requesterProfile ? {
             name: requesterProfile.name,
             fullName: requesterProfile.fullName,
+            firstName: requesterProfile.firstName,
+            lastName: requesterProfile.lastName,
             uid: requesterProfile.uid,
+            userId: requesterProfile.userId,
+            email: !!requesterProfile.email,
             photoURL: requesterProfile.photoURL ? '✓' : '✗'
           } : 'null'
         });
