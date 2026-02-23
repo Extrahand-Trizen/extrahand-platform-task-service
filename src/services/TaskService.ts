@@ -385,6 +385,14 @@ export class TaskService {
     taskData: any,
     uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
+    logger.info(`[TaskService.createTask] Starting task creation`, {
+      profileId: profileId.toString(),
+      profileIdType: typeof profileId,
+      isObjectId: profileId instanceof mongoose.Types.ObjectId,
+      taskTitle: taskData.title,
+      uid
+    });
+
     // Map frontend category to backend enum
     const frontendCategory = taskData.category || taskData.type;
     const mappedCategory = mapCategoryToEnum(frontendCategory);
@@ -535,6 +543,33 @@ export class TaskService {
     const task = await Task.create(taskPayload);
 
     logger.info(`✅ Task created successfully: ${task._id}`);
+
+    // Verify the created task has the correct requesterId
+    logger.info(`[TaskService.createTask] Task created with requesterId`, {
+      taskId: task._id,
+      requesterId: task.requesterId,
+      requesterIdType: typeof task.requesterId,
+      isObjectId: task.requesterId instanceof mongoose.Types.ObjectId
+    });
+
+    // Check if the requester profile actually exists
+    try {
+      const ProfilesCol = mongoose.connection.collection("profiles");
+      const requesterProfile = await ProfilesCol.findOne({ _id: task.requesterId });
+      
+      logger.info(`[TaskService.createTask] Requester profile lookup`, {
+        taskId: task._id,
+        requesterId: task.requesterId.toString(),
+        profileExists: !!requesterProfile,
+        profileName: requesterProfile?.name || requesterProfile?.fullName || 'NOT FOUND'
+      });
+    } catch (error) {
+      logger.warn(`[TaskService.createTask] Could not verify requester profile`, {
+        taskId: task._id,
+        requesterId: task.requesterId.toString(),
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
     // Email: task posted confirmation → requester
     try {
