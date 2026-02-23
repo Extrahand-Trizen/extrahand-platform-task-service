@@ -4,6 +4,7 @@ import {
   BadRequestError,
   NotFoundError,
   ForbiddenError,
+  ConflictError,
 } from "../errors/AppError";
 import logger from "../config/logger";
 import { ApplicationStatus } from "../types";
@@ -613,6 +614,28 @@ export class ApplicationService {
 
         logger.info(`✅ Recurring task ${task._id} dates assigned to ${application.applicantId}`);
       } else {
+        // Concurrency-safe: only assign if task is still open (prevents two users accepting different applications simultaneously)
+        const updatedTask = await Task.findOneAndUpdate(
+          { _id: task._id, status: "open" },
+          {
+            $set: {
+              status: "assigned",
+              assigneeId: application.applicantId,
+              assigneeUid: applicantProfile?.uid || null,
+              assignedToName: applicantProfile?.name || applicantProfile?.fullName || "Assigned User",
+              assignedAt: new Date(),
+              updatedAt: new Date(),
+            },
+          },
+          { new: true }
+        );
+
+        if (!updatedTask) {
+          throw new ConflictError(
+            "Task is no longer open for assignment; another application may have been accepted."
+          );
+        }
+
         // Reject all other pending applications for this task
         await TaskApplication.updateMany(
           {
@@ -622,16 +645,6 @@ export class ApplicationService {
           },
           { status: "rejected" }
         );
-
-        // Update task status to 'assigned' and set assignee
-        await Task.findByIdAndUpdate(task._id, {
-          status: "assigned",
-          assigneeId: application.applicantId,
-          assigneeUid: applicantProfile?.uid || null,
-          assignedToName: applicantProfile?.name || applicantProfile?.fullName || "Assigned User",
-          assignedAt: new Date(),
-          updatedAt: new Date(),
-        });
 
         logger.info(`✅ Task ${task._id} assigned to ${application.applicantId}`);
       }
