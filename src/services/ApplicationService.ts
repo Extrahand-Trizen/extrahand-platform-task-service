@@ -307,8 +307,8 @@ export class ApplicationService {
     const Profile = mongoose.connection.collection("profiles");
     const enrichedApplications = await Promise.all(
       applications.map(async (app) => {
-        // Prefer stored snapshot if present
-        if (app.applicantProfile) {
+        // Prefer stored snapshot if present and has a name
+        if (app.applicantProfile && app.applicantProfile.name) {
           return app;
         }
 
@@ -422,15 +422,22 @@ export class ApplicationService {
 
     const application = await TaskApplication.findById(applicationId).populate(
       "taskId",
-      "requesterId status title budget location scheduledDate scheduledTimeStart scheduledTimeEnd"
+      "requesterId status title budget location scheduledDate scheduledTimeStart scheduledTimeEnd recurring schedule"
     );
 
     if (!application) {
       throw new NotFoundError("Application not found");
     }
 
+    // Always load full task to ensure recurring schedule is available
+    const populatedTask = application.taskId as any;
+    const taskId = populatedTask?._id || application.taskId;
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
     // Only task creator can update application status
-    const task = application.taskId as any;
     if (!task.requesterId.equals(taskOwnerProfileId)) {
       throw new ForbiddenError("Not authorized to update this application");
     }
