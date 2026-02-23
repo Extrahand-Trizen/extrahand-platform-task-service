@@ -207,7 +207,7 @@ export class ReviewService {
       .sort({ createdAt: -1 })
       .skip(effectiveSkip)
       .limit(effectiveLimit)
-      .lean();
+      .lean() as unknown as IReview[];
 
     return { reviews };
   }
