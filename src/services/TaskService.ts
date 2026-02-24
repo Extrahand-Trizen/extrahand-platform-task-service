@@ -705,19 +705,26 @@ export class TaskService {
       // STEP 2: Emit TASK_CREATED_KEYWORD notification
       // Find users who have saved keywords matching this task
       try {
-        // Extract keywords from task title and description
-        const taskKeywords = [
+        // Extract keywords from task title, description, category, and subcategory
+        const allWords = [
           ...task.title.toLowerCase().split(/\s+/),
-          ...task.description.toLowerCase().split(/\s+/)
-        ]
-          .filter(word => word.length > 3) // Filter short words
-          .slice(0, 10); // Limit to top 10 keywords
+          ...task.description.toLowerCase().split(/\s+/),
+          task.category?.toLowerCase(),
+          task.subcategory?.toLowerCase(),
+          task.categoryLabel?.toLowerCase()
+        ];
+        
+        const taskKeywords: string[] = allWords
+          .filter((word): word is string => typeof word === 'string' && word.length > 3) // Filter short words and null/undefined
+          .slice(0, 15); // Limit to top 15 keywords
 
         logger.info(`[TaskService.createTask] KEYWORD ALERTS - Extracted keywords`, {
           taskId: task._id,
           keywords: taskKeywords,
           keywordCount: taskKeywords.length,
-          taskTitle: task.title.substring(0, 50)
+          taskTitle: task.title.substring(0, 50),
+          category: task.category,
+          categoryLabel: task.categoryLabel
         });
 
         if (taskKeywords.length > 0) {
