@@ -703,20 +703,16 @@ export class TaskService {
       }
 
       // STEP 2: Emit TASK_CREATED_KEYWORD notification
-      // Find users who have saved keywords matching this task
+      // Find users who have saved keywords matching this task (ONLY matching category, not title/description)
       try {
-        // Extract keywords from task title, description, category, and subcategory
-        const allWords = [
-          ...task.title.toLowerCase().split(/\s+/),
-          ...task.description.toLowerCase().split(/\s+/),
+        // Extract keywords ONLY from category, subcategory, and categoryLabel
+        // Users save keywords as CATEGORIES, not individual words from task content
+        const taskKeywords: string[] = [
           task.category?.toLowerCase(),
           task.subcategory?.toLowerCase(),
           task.categoryLabel?.toLowerCase()
-        ];
-        
-        const taskKeywords: string[] = allWords
-          .filter((word): word is string => typeof word === 'string' && word.length > 3) // Filter short words and null/undefined
-          .slice(0, 15); // Limit to top 15 keywords
+        ]
+          .filter((word): word is string => typeof word === 'string' && word.length > 0); // Filter null/undefined only
 
         logger.info(`[TaskService.createTask] KEYWORD ALERTS - Extracted keywords`, {
           taskId: task._id,
@@ -776,6 +772,15 @@ export class TaskService {
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
               
               for (const p of keywordProfiles) {
+                // Skip the task creator - they should not receive alerts for their own tasks
+                if (p.uid === uid) {
+                  logger.info(`[TaskService.createTask] KEYWORD ALERTS - Skipping task creator`, {
+                    taskId: task._id,
+                    creatorId: uid
+                  });
+                  continue;
+                }
+
                 logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Processing profile`, {
                   taskId: task._id,
                   uid: p.uid,
