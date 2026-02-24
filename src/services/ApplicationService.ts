@@ -316,7 +316,7 @@ export class ApplicationService {
             
             if (emailEnabled) {
               logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email enabled, sending now`);
-              const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
+              const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}`;
               
               await EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
                 requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
@@ -326,8 +326,8 @@ export class ApplicationService {
                 applicantMessage: application.coverLetter || undefined,
                 applicantRating: applicantProfileSnapshot?.rating,
                 applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
-                applicationUrl,
-                taskUrl: applicationUrl,
+                applicationUrl: taskUrl,
+                taskUrl: taskUrl,
                 userId: requesterProfile.uid,
               });
               logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email sent successfully`, {
