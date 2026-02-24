@@ -1312,7 +1312,7 @@ export class TaskService {
             assigneeName: assigneeProfile?.name || assigneeProfile?.fullName || "Your tasker",
             taskTitle: task.title,
             startedAt: new Date().toLocaleString(),
-            taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}`,
+            taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
             userId: requesterProfile.uid,
           }).catch((err) =>
             logger.error("Error sending task_started email", {
@@ -1338,8 +1338,8 @@ export class TaskService {
           ? await Profile.findOne({ _id: task.assigneeId })
           : null;
         const completedDateStr = new Date().toLocaleDateString();
-        const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}`;
-        const reviewUrl = `${config.WEB_APP_URL}/tasks/${taskId}/review`;
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
+        const reviewUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
 
         if (requesterProfile?.email) {
           EmailServiceClient.sendTaskCompleted(requesterProfile.email, {

@@ -723,7 +723,7 @@ export class ApplicationService {
           });
         }
         // Email: application accepted → applicant; task assigned → requester
-        const taskUrl = `${config.WEB_APP_URL}/my-tasks`;
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}/track`;
         const requesterProfileForEmail = await Profile.findOne({ _id: task.requesterId });
         const scheduledDateStr = task.scheduledDate
           ? new Date(task.scheduledDate).toLocaleDateString()
