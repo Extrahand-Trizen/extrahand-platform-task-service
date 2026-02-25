@@ -1,15 +1,13 @@
-import type { RedisClientType } from 'redis';
-import { createClient } from 'redis';
+import Redis from 'ioredis';
 import logger from './logger';
-import { config } from './env';
 
-let client: RedisClientType | null = null;
+let client: any | null = null;
 let isReady = false;
 
 const TASK_LIST_CACHE_TTL_SECONDS = 30;
 const CONNECT_TIMEOUT_MS = 10000;
 
-export function getRedisClient(): RedisClientType | null {
+export function getRedisClient(): any | null {
   if (!client || !isReady) {
     return null;
   }
@@ -17,21 +15,19 @@ export function getRedisClient(): RedisClientType | null {
 }
 
 export async function initRedis(): Promise<void> {
-  const url = config.REDIS_URL;
-
-  if (!url) {
-    logger.info('Redis not configured (REDIS_URL missing); skipping Redis initialization');
-    return;
-  }
+  const host = process.env.REDIS_HOST || 'srv-captain--extrahand-redis';
+  const port = process.env.REDIS_PORT ? Number(process.env.REDIS_PORT) : 6379;
+  const password = process.env.REDIS_PASSWORD;
 
   if (!client) {
-    client = createClient({
-      url,
-      socket: {
-        connectTimeout: CONNECT_TIMEOUT_MS,
-        // Stop reconnecting after first failure so we don't spam timeout errors
-        reconnectStrategy: false,
-      },
+    client = new Redis({
+      host,
+      port,
+      password,
+      // Don't buffer commands forever if Redis is down
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 1,
+      connectTimeout: CONNECT_TIMEOUT_MS,
     });
 
     client.on('error', (err: unknown) => {
@@ -40,18 +36,23 @@ export async function initRedis(): Promise<void> {
     });
 
     client.on('ready', () => {
-      logger.info('✅ Redis client connected');
+      logger.info('✅ Redis client connected (ioredis)');
       isReady = true;
     });
   }
 
-  if (!isReady) {
+  if (!isReady && client) {
     try {
-      await client.connect();
+      // With ioredis + lazyConnect we could call connect(), but here we rely
+      // on the initial connection attempt and just wait for "ready"/"error".
+      await client.ping();
     } catch (err) {
-      logger.warn('Redis unreachable, continuing without cache. Set REDIS_URL only when Redis is reachable.', {
+      logger.warn(
+        'Redis unreachable, continuing without cache. Check REDIS_HOST/REDIS_PORT (or REDIS_URL) and ensure Redis is reachable.',
+        {
         error: err instanceof Error ? err.message : String(err),
-      });
+        },
+      );
       isReady = false;
       try {
         await client.quit();
