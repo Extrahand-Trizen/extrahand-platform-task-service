@@ -94,32 +94,28 @@ export class ApplicationService {
 
       // Snapshot applicant profile at time of application
       logger.debug(`[ApplicationService.submitApplication] Creating profile snapshot for applicantId=${applicantProfileId}`);
+      
+      // ✅ Use applicant profile data from gateway if provided (enriched request body)
       let applicantProfileSnapshot: any | undefined;
-      try {
-        // Try to use Mongoose model first if available
-        const profileModel = mongoose.connection.model("Profile");
-        const applicantProfile = await profileModel.findById(applicantProfileId);
-        if (applicantProfile) {
-          applicantProfileSnapshot = {
-            name: applicantProfile.name || applicantProfile.fullName,
-            photoURL: applicantProfile.photoURL,
-            rating: applicantProfile.rating,
-            totalReviews: applicantProfile.totalReviews,
-            skills: applicantProfile.skills,
-          };
-          logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from Mongoose`, {
-            applicantId: applicantProfileId.toString(),
-            name: applicantProfileSnapshot.name,
-            rating: applicantProfileSnapshot.rating
-          });
-        }
-      } catch (error) {
-        // Fallback: try raw collection access
+      const appData = applicationData as any; // Allow dynamic properties from gateway
+      if (appData.applicantName || appData.applicantPhotoURL) {
+        applicantProfileSnapshot = {
+          name: appData.applicantName,
+          photoURL: appData.applicantPhotoURL,
+          rating: appData.applicantRating,
+          totalReviews: appData.applicantTotalReviews,
+        };
+        logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from gateway enrichment`, {
+          applicantId: applicantProfileId.toString(),
+          name: applicantProfileSnapshot.name,
+          rating: applicantProfileSnapshot.rating
+        });
+      } else {
+        // Fallback: fetch from database if not provided by gateway
         try {
-          const Profile = mongoose.connection.collection("profiles");
-          const applicantProfile = await Profile.findOne({
-            _id: new mongoose.Types.ObjectId(applicantProfileId),
-          });
+          // Try to use Mongoose model first if available
+          const profileModel = mongoose.connection.model("Profile");
+          const applicantProfile = await profileModel.findById(applicantProfileId);
           if (applicantProfile) {
             applicantProfileSnapshot = {
               name: applicantProfile.name || applicantProfile.fullName,
@@ -128,18 +124,40 @@ export class ApplicationService {
               totalReviews: applicantProfile.totalReviews,
               skills: applicantProfile.skills,
             };
-            logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from raw collection`, {
+            logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from Mongoose`, {
               applicantId: applicantProfileId.toString(),
               name: applicantProfileSnapshot.name,
               rating: applicantProfileSnapshot.rating
             });
           }
-        } catch (fallbackError) {
-          logger.warn("Could not snapshot applicant profile", {
-            applicantProfileId,
-            error:
-              fallbackError instanceof Error ? fallbackError.message : "Unknown error",
-          });
+        } catch (error) {
+          // Fallback: try raw collection access
+          try {
+            const Profile = mongoose.connection.collection("profiles");
+            const applicantProfile = await Profile.findOne({
+              _id: new mongoose.Types.ObjectId(applicantProfileId),
+            });
+            if (applicantProfile) {
+              applicantProfileSnapshot = {
+                name: applicantProfile.name || applicantProfile.fullName,
+                photoURL: applicantProfile.photoURL,
+                rating: applicantProfile.rating,
+                totalReviews: applicantProfile.totalReviews,
+                skills: applicantProfile.skills,
+              };
+              logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from raw collection`, {
+                applicantId: applicantProfileId.toString(),
+                name: applicantProfileSnapshot.name,
+                rating: applicantProfileSnapshot.rating
+              });
+            }
+          } catch (fallbackError) {
+            logger.warn("Could not snapshot applicant profile", {
+              applicantProfileId,
+              error:
+                fallbackError instanceof Error ? fallbackError.message : "Unknown error",
+            });
+          }
         }
       }
 
@@ -298,7 +316,7 @@ export class ApplicationService {
             
             if (emailEnabled) {
               logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email enabled, sending now`);
-              const applicationUrl = `${config.WEB_APP_URL}/tasks/${taskId}/applications`;
+              const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}`;
               
               await EmailServiceClient.sendApplicationSubmitted(requesterProfile.email, {
                 requesterName: requesterProfile.name || requesterProfile.fullName || 'Task owner',
@@ -308,8 +326,8 @@ export class ApplicationService {
                 applicantMessage: application.coverLetter || undefined,
                 applicantRating: applicantProfileSnapshot?.rating,
                 applicantCompletedTasks: applicantProfileSnapshot?.totalReviews,
-                applicationUrl,
-                taskUrl: applicationUrl,
+                applicationUrl: taskUrl,
+                taskUrl: taskUrl,
                 userId: requesterProfile.uid,
               });
               logger.info(`[ApplicationService.submitApplication] APPLICATION EMAIL - Email sent successfully`, {
@@ -705,7 +723,7 @@ export class ApplicationService {
           });
         }
         // Email: application accepted → applicant; task assigned → requester
-        const taskUrl = `${config.WEB_APP_URL}/my-tasks`;
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}/track`;
         const requesterProfileForEmail = await Profile.findOne({ _id: task.requesterId });
         const scheduledDateStr = task.scheduledDate
           ? new Date(task.scheduledDate).toLocaleDateString()

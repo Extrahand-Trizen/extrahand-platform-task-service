@@ -10,6 +10,7 @@ import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
+import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -464,6 +465,14 @@ export class TaskService {
     taskData: any,
     uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
+    logger.info(`[TaskService.createTask] Starting task creation`, {
+      profileId: profileId.toString(),
+      profileIdType: typeof profileId,
+      isObjectId: profileId instanceof mongoose.Types.ObjectId,
+      taskTitle: taskData.title,
+      uid
+    });
+
     // Map frontend category to backend enum
     const frontendCategory = taskData.category || taskData.type;
     const mappedCategory = mapCategoryToEnum(frontendCategory);
@@ -615,6 +624,33 @@ export class TaskService {
 
     logger.info(`✅ Task created successfully: ${task._id}`);
 
+    // Verify the created task has the correct requesterId
+    logger.info(`[TaskService.createTask] Task created with requesterId`, {
+      taskId: task._id,
+      requesterId: task.requesterId,
+      requesterIdType: typeof task.requesterId,
+      isObjectId: task.requesterId instanceof mongoose.Types.ObjectId
+    });
+
+    // Check if the requester profile actually exists
+    try {
+      const ProfilesCol = mongoose.connection.collection("profiles");
+      const requesterProfile = await ProfilesCol.findOne({ _id: task.requesterId });
+      
+      logger.info(`[TaskService.createTask] Requester profile lookup`, {
+        taskId: task._id,
+        requesterId: task.requesterId.toString(),
+        profileExists: !!requesterProfile,
+        profileName: requesterProfile?.name || requesterProfile?.fullName || 'NOT FOUND'
+      });
+    } catch (error) {
+      logger.warn(`[TaskService.createTask] Could not verify requester profile`, {
+        taskId: task._id,
+        requesterId: task.requesterId.toString(),
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
     // Email: task posted confirmation → requester
     try {
       const Profile = mongoose.connection.collection("profiles");
@@ -641,6 +677,32 @@ export class TaskService {
           taskId: task._id,
           to: requesterProfile.email
         });
+
+        // 📬 In-App Notification: task posted confirmation → requester
+        try {
+          await InAppNotificationClient.send({
+            userId: requesterProfile.uid,
+            title: '✅ Task Posted Successfully',
+            body: `Your task "${task.title}" is now visible to taskers`,
+            category: 'taskUpdates',
+            type: 'success',
+            data: {
+              taskId: task._id.toString(),
+              taskUrl,
+              budget: task.budget?.amount
+            }
+          });
+          logger.info(`[TaskService.createTask] In-app notification sent to requester`, {
+            taskId: task._id,
+            userId: requesterProfile.uid
+          });
+        } catch (inAppError) {
+          logger.warn('Failed to send in-app notification to requester', {
+            taskId: task._id,
+            userId: requesterProfile.uid,
+            error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+          });
+        }
       } else {
         logger.debug(`[TaskService.createTask] No email found for requester profile`, {
           requesterId: task.requesterId
@@ -715,6 +777,33 @@ export class TaskService {
                       to: p.email,
                       userId: p.uid
                     });
+
+                    // 📬 In-App Notification: recommended task → tasker
+                    try {
+                      await InAppNotificationClient.send({
+                        userId: p.uid,
+                        title: '🎯 Task Matching Your Skills',
+                        body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
+                        category: 'recommendedTaskAlerts',
+                        type: 'info',
+                        data: {
+                          taskId: task._id.toString(),
+                          taskUrl,
+                          category: mappedCategory,
+                          budget: task.budget?.amount
+                        }
+                      });
+                      logger.info(`[TaskService.createTask] In-app notification sent to recommended tasker`, {
+                        taskId: task._id,
+                        userId: p.uid
+                      });
+                    } catch (inAppError) {
+                      logger.warn('Failed to send in-app notification to recommended tasker', {
+                        taskId: task._id,
+                        userId: p.uid,
+                        error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+                      });
+                    }
                   } else {
                     logger.info(`[TaskService.createTask] Email notifications disabled for recommended task alerts`, {
                       userId: p.uid
@@ -747,21 +836,24 @@ export class TaskService {
       }
 
       // STEP 2: Emit TASK_CREATED_KEYWORD notification
-      // Find users who have saved keywords matching this task
+      // Find users who have saved keywords matching this task (ONLY matching category, not title/description)
       try {
-        // Extract keywords from task title and description
-        const taskKeywords = [
-          ...task.title.toLowerCase().split(/\s+/),
-          ...task.description.toLowerCase().split(/\s+/)
+        // Extract keywords ONLY from category, subcategory, and categoryLabel
+        // Users save keywords as CATEGORIES, not individual words from task content
+        const taskKeywords: string[] = [
+          task.category?.toLowerCase(),
+          task.subcategory?.toLowerCase(),
+          task.categoryLabel?.toLowerCase()
         ]
-          .filter(word => word.length > 3) // Filter short words
-          .slice(0, 10); // Limit to top 10 keywords
+          .filter((word): word is string => typeof word === 'string' && word.length > 0); // Filter null/undefined only
 
         logger.info(`[TaskService.createTask] KEYWORD ALERTS - Extracted keywords`, {
           taskId: task._id,
           keywords: taskKeywords,
           keywordCount: taskKeywords.length,
-          taskTitle: task.title.substring(0, 50)
+          taskTitle: task.title.substring(0, 50),
+          category: task.category,
+          categoryLabel: task.categoryLabel
         });
 
         if (taskKeywords.length > 0) {
@@ -813,6 +905,15 @@ export class TaskService {
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
               
               for (const p of keywordProfiles) {
+                // Skip the task creator - they should not receive alerts for their own tasks
+                if (p.uid === uid) {
+                  logger.info(`[TaskService.createTask] KEYWORD ALERTS - Skipping task creator`, {
+                    taskId: task._id,
+                    creatorId: uid
+                  });
+                  continue;
+                }
+
                 logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Processing profile`, {
                   taskId: task._id,
                   uid: p.uid,
@@ -856,6 +957,35 @@ export class TaskService {
                         userId: p.uid,
                         keywords: taskKeywords.slice(0, 3)
                       });
+
+                      // 📬 In-App Notification: keyword alert → user
+                      try {
+                        await InAppNotificationClient.send({
+                          userId: p.uid,
+                          title: '🔔 Task Found: ' + matchedKeywordStr,
+                          body: `A new task "${task.title}" matches your keywords`,
+                          category: 'keywordTaskAlerts',
+                          type: 'info',
+                          data: {
+                            taskId: task._id.toString(),
+                            taskUrl,
+                            keywords: taskKeywords,
+                            matchedKeyword: matchedKeywordStr,
+                            budget: task.budget?.amount
+                          }
+                        });
+                        logger.info(`[TaskService.createTask] KEYWORD ALERTS - In-app notification sent`, {
+                          taskId: task._id,
+                          userId: p.uid,
+                          keywords: taskKeywords.slice(0, 3)
+                        });
+                      } catch (inAppError) {
+                        logger.warn('Failed to send in-app notification for keyword alert', {
+                          taskId: task._id,
+                          userId: p.uid,
+                          error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+                        });
+                      }
                     } else {
                       logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Email notifications disabled for user`, {
                         taskId: task._id,
@@ -1344,7 +1474,7 @@ export class TaskService {
             assigneeName: assigneeProfile?.name || assigneeProfile?.fullName || "Your tasker",
             taskTitle: task.title,
             startedAt: new Date().toLocaleString(),
-            taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}`,
+            taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
             userId: requesterProfile.uid,
           }).catch((err) =>
             logger.error("Error sending task_started email", {
@@ -1355,6 +1485,75 @@ export class TaskService {
         }
       } catch (error) {
         logger.error("Error sending task_started email", {
+          taskId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
+
+    // Email: task completed → notify requester + assignee (when poster marks completed directly)
+    if (status === "completed" && task.status !== "completed") {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        const assigneeProfile = task.assigneeId
+          ? await Profile.findOne({ _id: task.assigneeId })
+          : null;
+        const completedDateStr = new Date().toLocaleDateString();
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
+        const reviewUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
+
+        if (requesterProfile?.email) {
+          EmailServiceClient.sendTaskCompleted(requesterProfile.email, {
+            recipientName: requesterProfile.name || requesterProfile.fullName || "There",
+            taskTitle: task.title,
+            isTasker: false,
+            completedDate: completedDateStr,
+            reviewUrl,
+            taskUrl,
+            userId: requesterProfile.uid,
+          }).catch((err) =>
+            logger.error("Error sending task_completed email to requester", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+
+          EmailServiceClient.sendReviewRequest(requesterProfile.email, {
+            reviewerName: requesterProfile.name || "There",
+            revieweeName: assigneeProfile?.name || assigneeProfile?.fullName || "Your tasker",
+            taskTitle: task.title,
+            isRequester: true,
+            completedDate: completedDateStr,
+            reviewUrl,
+            userId: requesterProfile.uid,
+          }).catch((err) =>
+            logger.error("Error sending review_request email", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+        }
+
+        if (assigneeProfile?.email) {
+          EmailServiceClient.sendTaskCompleted(assigneeProfile.email, {
+            recipientName: assigneeProfile.name || assigneeProfile.fullName || "There",
+            taskTitle: task.title,
+            isTasker: true,
+            completedDate: completedDateStr,
+            amount: task.budget?.amount,
+            reviewUrl,
+            taskUrl,
+            userId: assigneeProfile.uid,
+          }).catch((err) =>
+            logger.error("Error sending task_completed email to assignee", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+        }
+      } catch (error) {
+        logger.error("Error sending task_completed emails", {
           taskId,
           error: error instanceof Error ? error.message : "Unknown error",
         });

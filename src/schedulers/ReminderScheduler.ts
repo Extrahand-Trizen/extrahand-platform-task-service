@@ -114,9 +114,18 @@ export class ReminderScheduler {
           // Email: task_reminder → requester + assignee
           try {
             const Profile = mongoose.connection.collection('profiles');
-            const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+            // Look up profiles by _id (requesterId and assigneeId are already ObjectIds from Task model)
+            const requesterProfile = await Profile.findOne({ 
+              _id: task.requesterId instanceof mongoose.Types.ObjectId 
+                ? task.requesterId 
+                : new mongoose.Types.ObjectId(task.requesterId) 
+            });
             const assigneeProfile = task.assigneeId
-              ? await Profile.findOne({ _id: task.assigneeId })
+              ? await Profile.findOne({ 
+                  _id: task.assigneeId instanceof mongoose.Types.ObjectId 
+                    ? task.assigneeId 
+                    : new mongoose.Types.ObjectId(task.assigneeId) 
+                })
               : null;
             const scheduledDateStr = task.scheduledDate
               ? new Date(task.scheduledDate).toLocaleDateString()
@@ -128,41 +137,69 @@ export class ReminderScheduler {
             const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
             const locationStr = task.location?.city || task.location?.address;
 
-            if (requesterProfile?.email) {
-              EmailServiceClient.sendTaskReminder(requesterProfile.email, {
-                recipientName: requesterProfile.name || requesterProfile.fullName || 'There',
-                taskTitle: task.title,
-                scheduledDate: scheduledDateStr,
-                scheduledTime: scheduledTimeStr,
-                location: locationStr,
-                isTasker: false,
-                otherPartyName: assigneeProfile?.name || assigneeProfile?.fullName,
-                taskUrl,
-                userId: requesterProfile.uid,
-              }).catch((err) =>
-                logger.error('ReminderScheduler: Error sending task_reminder email to requester', {
-                  taskId: task._id,
-                  error: err instanceof Error ? err.message : 'Unknown error',
-                })
+            if (requesterProfile?.email && requesterProfile?.uid) {
+              // Check if user has enabled task reminder emails
+              const { NotificationPreferenceChecker } = await import('../services/NotificationPreferenceChecker');
+              const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+                requesterProfile.uid,
+                'taskReminders'
               );
+              
+              if (emailEnabled) {
+                EmailServiceClient.sendTaskReminder(requesterProfile.email, {
+                  recipientName: requesterProfile.name || requesterProfile.fullName || 'There',
+                  taskTitle: task.title,
+                  scheduledDate: scheduledDateStr,
+                  scheduledTime: scheduledTimeStr,
+                  location: locationStr,
+                  isTasker: false,
+                  otherPartyName: assigneeProfile?.name || assigneeProfile?.fullName,
+                  taskUrl,
+                  userId: requesterProfile.uid,
+                }).catch((err) =>
+                  logger.error('ReminderScheduler: Error sending task_reminder email to requester', {
+                    taskId: task._id,
+                    error: err instanceof Error ? err.message : 'Unknown error',
+                  })
+                );
+              } else {
+                logger.info('ReminderScheduler: Email notifications disabled for requester', {
+                  taskId: task._id,
+                  userId: requesterProfile.uid
+                });
+              }
             }
-            if (assigneeProfile?.email) {
-              EmailServiceClient.sendTaskReminder(assigneeProfile.email, {
-                recipientName: assigneeProfile.name || assigneeProfile.fullName || 'There',
-                taskTitle: task.title,
-                scheduledDate: scheduledDateStr,
-                scheduledTime: scheduledTimeStr,
-                location: locationStr,
-                isTasker: true,
-                otherPartyName: requesterProfile?.name || requesterProfile?.fullName,
-                taskUrl,
-                userId: assigneeProfile.uid,
-              }).catch((err) =>
-                logger.error('ReminderScheduler: Error sending task_reminder email to assignee', {
-                  taskId: task._id,
-                  error: err instanceof Error ? err.message : 'Unknown error',
-                })
+            if (assigneeProfile?.email && assigneeProfile?.uid) {
+              // Check if user has enabled task reminder emails
+              const { NotificationPreferenceChecker } = await import('../services/NotificationPreferenceChecker');
+              const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+                assigneeProfile.uid,
+                'taskReminders'
               );
+              
+              if (emailEnabled) {
+                EmailServiceClient.sendTaskReminder(assigneeProfile.email, {
+                  recipientName: assigneeProfile.name || assigneeProfile.fullName || 'There',
+                  taskTitle: task.title,
+                  scheduledDate: scheduledDateStr,
+                  scheduledTime: scheduledTimeStr,
+                  location: locationStr,
+                  isTasker: true,
+                  otherPartyName: requesterProfile?.name || requesterProfile?.fullName,
+                  taskUrl,
+                  userId: assigneeProfile.uid,
+                }).catch((err) =>
+                  logger.error('ReminderScheduler: Error sending task_reminder email to assignee', {
+                    taskId: task._id,
+                    error: err instanceof Error ? err.message : 'Unknown error',
+                  })
+                );
+              } else {
+                logger.info('ReminderScheduler: Email notifications disabled for assignee', {
+                  taskId: task._id,
+                  userId: assigneeProfile.uid
+                });
+              }
             }
           } catch (emailErr) {
             logger.error('ReminderScheduler: Error sending task_reminder emails', {
