@@ -10,6 +10,7 @@ import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
+import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -597,6 +598,32 @@ export class TaskService {
           taskId: task._id,
           to: requesterProfile.email
         });
+
+        // 📬 In-App Notification: task posted confirmation → requester
+        try {
+          await InAppNotificationClient.send({
+            userId: requesterProfile.uid,
+            title: '✅ Task Posted Successfully',
+            body: `Your task "${task.title}" is now visible to taskers`,
+            category: 'taskUpdates',
+            type: 'success',
+            data: {
+              taskId: task._id.toString(),
+              taskUrl,
+              budget: task.budget?.amount
+            }
+          });
+          logger.info(`[TaskService.createTask] In-app notification sent to requester`, {
+            taskId: task._id,
+            userId: requesterProfile.uid
+          });
+        } catch (inAppError) {
+          logger.warn('Failed to send in-app notification to requester', {
+            taskId: task._id,
+            userId: requesterProfile.uid,
+            error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+          });
+        }
       } else {
         logger.debug(`[TaskService.createTask] No email found for requester profile`, {
           requesterId: task.requesterId
@@ -671,6 +698,33 @@ export class TaskService {
                       to: p.email,
                       userId: p.uid
                     });
+
+                    // 📬 In-App Notification: recommended task → tasker
+                    try {
+                      await InAppNotificationClient.send({
+                        userId: p.uid,
+                        title: '🎯 Task Matching Your Skills',
+                        body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
+                        category: 'recommendedTaskAlerts',
+                        type: 'info',
+                        data: {
+                          taskId: task._id.toString(),
+                          taskUrl,
+                          category: mappedCategory,
+                          budget: task.budget?.amount
+                        }
+                      });
+                      logger.info(`[TaskService.createTask] In-app notification sent to recommended tasker`, {
+                        taskId: task._id,
+                        userId: p.uid
+                      });
+                    } catch (inAppError) {
+                      logger.warn('Failed to send in-app notification to recommended tasker', {
+                        taskId: task._id,
+                        userId: p.uid,
+                        error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+                      });
+                    }
                   } else {
                     logger.info(`[TaskService.createTask] Email notifications disabled for recommended task alerts`, {
                       userId: p.uid
@@ -824,6 +878,35 @@ export class TaskService {
                         userId: p.uid,
                         keywords: taskKeywords.slice(0, 3)
                       });
+
+                      // 📬 In-App Notification: keyword alert → user
+                      try {
+                        await InAppNotificationClient.send({
+                          userId: p.uid,
+                          title: '🔔 Task Found: ' + matchedKeywordStr,
+                          body: `A new task "${task.title}" matches your keywords`,
+                          category: 'keywordTaskAlerts',
+                          type: 'info',
+                          data: {
+                            taskId: task._id.toString(),
+                            taskUrl,
+                            keywords: taskKeywords,
+                            matchedKeyword: matchedKeywordStr,
+                            budget: task.budget?.amount
+                          }
+                        });
+                        logger.info(`[TaskService.createTask] KEYWORD ALERTS - In-app notification sent`, {
+                          taskId: task._id,
+                          userId: p.uid,
+                          keywords: taskKeywords.slice(0, 3)
+                        });
+                      } catch (inAppError) {
+                        logger.warn('Failed to send in-app notification for keyword alert', {
+                          taskId: task._id,
+                          userId: p.uid,
+                          error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+                        });
+                      }
                     } else {
                       logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Email notifications disabled for user`, {
                         taskId: task._id,
