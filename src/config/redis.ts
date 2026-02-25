@@ -1,5 +1,6 @@
 import Redis from 'ioredis';
 import logger from './logger';
+import { config } from './env';
 
 let client: any | null = null;
 let isReady = false;
@@ -15,15 +16,17 @@ export function getRedisClient(): any | null {
 }
 
 export async function initRedis(): Promise<void> {
-  const host = process.env.REDIS_HOST || 'srv-captain--extrahand-redis';
-  const port = process.env.REDIS_PORT ? Number(process.env.REDIS_PORT) : 6379;
-  const password = process.env.REDIS_PASSWORD;
+  // Prefer process.env.REDIS_URL so local `.env` overrides match what Upstash gives you,
+  // but fall back to validated config.REDIS_URL if set.
+  const url = process.env.REDIS_URL || config.REDIS_URL;
+
+  if (!url) {
+    logger.info('Redis not configured (REDIS_URL missing); skipping Redis initialization');
+    return;
+  }
 
   if (!client) {
-    client = new Redis({
-      host,
-      port,
-      password,
+    client = new Redis(url, {
       // Don't buffer commands forever if Redis is down
       enableOfflineQueue: false,
       maxRetriesPerRequest: 1,
@@ -48,9 +51,9 @@ export async function initRedis(): Promise<void> {
       await client.ping();
     } catch (err) {
       logger.warn(
-        'Redis unreachable, continuing without cache. Check REDIS_HOST/REDIS_PORT (or REDIS_URL) and ensure Redis is reachable.',
+        'Redis unreachable, continuing without cache. Check REDIS_URL and ensure your Upstash Redis instance is reachable.',
         {
-        error: err instanceof Error ? err.message : String(err),
+          error: err instanceof Error ? err.message : String(err),
         },
       );
       isReady = false;
