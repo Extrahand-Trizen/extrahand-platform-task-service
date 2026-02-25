@@ -8,6 +8,7 @@ import { EmailServiceClient } from './clients/EmailServiceClient';
 import { ReminderScheduler } from './schedulers/ReminderScheduler';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
+import { initRedis, disconnectRedis } from './config/redis';
 
 async function startServer() {
   try {
@@ -25,6 +26,9 @@ async function startServer() {
 
     // Initialize schedulers
     await ReminderScheduler.initialize('task-service');
+
+    // Initialize Redis (optional, best-effort)
+    await initRedis();
 
     // Create Express app and HTTP server
     const { httpServer } = createApp();
@@ -54,6 +58,7 @@ async function startServer() {
       httpServer.close(async () => {
         logger.info("HTTP server closed");
         await Database.disconnectFromDb();
+        await disconnectRedis();
         process.exit(0);
       });
 
