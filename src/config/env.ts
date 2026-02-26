@@ -65,6 +65,16 @@ const envSchema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_S3_BUCKET_NAME: z.string().default('extrahand-images'),
   AWS_CLOUDFRONT_DOMAIN: z.string().optional(),
+
+  // Redis (optional - task list cache; app works without it)
+  // Use redis:// or rediss:// (not https); e.g. redis://:password@host:6379
+  REDIS_URL: z
+    .string()
+    .optional()
+    .refine(
+      (v) => !v || v.startsWith('redis://') || v.startsWith('rediss://'),
+      'REDIS_URL must be redis:// or rediss:// (e.g. redis://:password@host:6379)'
+    ),
 });
 
 // Extend global type for CORS config logging
@@ -255,6 +265,10 @@ export class Config {
 
   static get STORAGE_PROVIDER(): 'minio' | 's3' | 'local' {
     return this.env.STORAGE_PROVIDER;
+  }
+
+  static get REDIS_URL(): string | undefined {
+    return this.env.REDIS_URL;
   }
 }
 

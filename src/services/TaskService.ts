@@ -14,6 +14,7 @@ import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
+import { getRedisClient, REDIS_TTLS } from '../config/redis';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -177,6 +178,61 @@ export class TaskService {
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
 
+    // Determine if this request is eligible for Redis caching (discover list shape)
+    const hasCategory =
+      Array.isArray(category) ? category.length > 0 : !!category;
+    const hasBudgetFilter =
+      typeof minBudget === "number" || typeof maxBudget === "number";
+    const hasSearchOrSuburb = !!search || !!suburb;
+    const hasRemotelyFilter = typeof remotely === "boolean";
+    const hasUserSpecificFilter =
+      !!excludeRequesterId || !!assigneeId || !!posterUid;
+    const hasNonDefaultSort =
+      !!sortBy && sortBy !== "recent";
+
+    const isCacheable =
+      status === "open" &&
+      !hasCategory &&
+      !city &&
+      !hasBudgetFilter &&
+      !hasSearchOrSuburb &&
+      !hasRemotelyFilter &&
+      !hasUserSpecificFilter &&
+      !hasNonDefaultSort &&
+      effectiveLimit === 20 &&
+      effectivePage >= 1 &&
+      effectivePage <= 3;
+
+    let cacheKey: string | null = null;
+
+    if (isCacheable) {
+      cacheKey = `tasks:list:open:p${effectivePage}:20`;
+
+      try {
+        const redis = getRedisClient();
+        if (redis && cacheKey) {
+          const cached = await redis.get(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached) as {
+              tasks: ITask[];
+              pagination: any;
+            };
+            logger.info("Task list cache HIT", {
+              key: cacheKey,
+              page: effectivePage,
+              taskCount: parsed.tasks.length,
+            });
+            return parsed;
+          }
+          logger.info("Task list cache MISS", { key: cacheKey, page: effectivePage });
+        }
+      } catch (err) {
+        logger.error("Redis get error for task list cache", {
+          error: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
+    }
+
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
 
@@ -266,7 +322,7 @@ export class TaskService {
 
     const total = await Task.countDocuments(query);
 
-    return {
+    const result = {
       tasks: tasks as unknown as ITask[],
       pagination: {
         page: effectivePage,
@@ -275,6 +331,29 @@ export class TaskService {
         pages: Math.ceil(total / effectiveLimit),
       },
     };
+
+    if (cacheKey) {
+      try {
+        const redis = getRedisClient();
+        if (redis) {
+          await redis.set(cacheKey, JSON.stringify(result), {
+            EX: REDIS_TTLS.TASK_LIST_SECONDS,
+          });
+          logger.info("Task list cache SET", {
+            key: cacheKey,
+            page: effectivePage,
+            taskCount: result.tasks.length,
+            ttlSeconds: REDIS_TTLS.TASK_LIST_SECONDS,
+          });
+        }
+      } catch (err) {
+        logger.error("Redis set error for task list cache", {
+          error: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
+    }
+
+    return result;
   }
 
   /**

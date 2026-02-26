@@ -22,7 +22,7 @@ npm-debug.log*
 *.swp
 *.swo
 *~
-
+*.md
 # OS
 .DS_Store
 Thumbs.db
