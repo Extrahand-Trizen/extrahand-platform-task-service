@@ -81,6 +81,19 @@ export class ApplicationService {
         }
       }
 
+      // Prevent taskers with an active task from applying to new ones
+      const activeStatuses = ["assigned", "started", "in_progress", "review"];
+      const hasActiveTask = await Task.exists({
+        assigneeId: applicantProfileId,
+        status: { $in: activeStatuses },
+      });
+
+      if (hasActiveTask) {
+        throw new BadRequestError(
+          "You already have a task in progress. Please complete or cancel it before applying to another task."
+        );
+      }
+
       // Check if user has already applied
       logger.debug(`[ApplicationService.submitApplication] Checking for existing application: taskId=${taskId}, applicantUid=${applicantUid}`);
       const existingApplication = await TaskApplication.findOne({
