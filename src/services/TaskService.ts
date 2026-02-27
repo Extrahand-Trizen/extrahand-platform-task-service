@@ -1652,7 +1652,7 @@ export class TaskService {
       throw new BadRequestError('Can only request changes when task is in review status');
     }
 
-    // Add feedback to task
+    // Add feedback to task and revert status to "assigned"
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
@@ -1663,6 +1663,7 @@ export class TaskService {
             createdAt: new Date(),
           }
         },
+        status: 'assigned',
         updatedAt: new Date(),
       },
       { new: true, runValidators: true }
