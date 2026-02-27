@@ -214,5 +214,25 @@ export class TaskController {
 
     ApiResponse.success(res, task, 'Completion proof submitted for review');
   }
+
+  /**
+   * POST /api/v1/tasks/:id/request-changes
+   * Request changes from tasker (poster action in review status)
+   */
+  static async requestChanges(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { message } = req.body;
+
+    const task = await TaskService.requestChanges(
+      req.params.id,
+      req.user!.profileId,
+      message
+    );
+
+    ApiResponse.success(res, task, 'Changes requested successfully');
+  }
 }
 
