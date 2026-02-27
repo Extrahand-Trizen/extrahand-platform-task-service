@@ -74,4 +74,12 @@ router.post(
   asyncHandler(TaskController.submitCompletionProof)
 );
 
+// POST /api/v1/tasks/:id/request-changes - Request changes from tasker (poster action)
+router.post(
+  "/:id/request-changes",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.requestChanges)
+);
+
 export default router;

@@ -19,7 +19,7 @@ export class NotificationPreferenceChecker {
     try {
       if (!this.userServiceUrl || !this.serviceAuthToken) {
         logger.warn('NotificationPreferenceChecker: User service not configured');
-        return true; // Allow by default if can't check
+        return false; // Do not send if preferences cannot be checked
       }
 
       const response = await axios.get(
@@ -41,7 +41,7 @@ export class NotificationPreferenceChecker {
       
       if (canSend === undefined) {
         logger.warn('NotificationPreferenceChecker: Invalid response format', { userUid });
-        return true; // Allow by default if response format unclear
+        return false; // Do not send if response format is unclear
       }
 
       logger.info('NotificationPreferenceChecker: Permission check result', {
@@ -52,12 +52,12 @@ export class NotificationPreferenceChecker {
 
       return canSend;
     } catch (error) {
-      logger.warn('NotificationPreferenceChecker: Failed to check preferences (allowing to err on side of sending)', {
+      logger.warn('NotificationPreferenceChecker: Failed to check preferences (blocking to avoid unwanted sends)', {
         userUid,
         category,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
-      return true; // Allow email to be sent if we can't check preferences
+      return false; // Do not send if preferences cannot be checked
     }
   }
 }

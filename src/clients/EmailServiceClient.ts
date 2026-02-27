@@ -323,4 +323,17 @@ export class EmailServiceClient {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/tasks`;
     return this.sendTemplate(to, 'task_created_keyword', { ...data, taskUrl });
   }
+
+  static sendChangesRequested(to: string, data: {
+    assigneeName: string;
+    requesterName: string;
+    taskTitle: string;
+    message: string;
+    taskUrl?: string;
+    platformName?: string;
+    userId?: string;
+  }): Promise<boolean> {
+    const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
+    return this.sendTemplate(to, 'changes_requested', { ...data, taskUrl });
+  }
 }

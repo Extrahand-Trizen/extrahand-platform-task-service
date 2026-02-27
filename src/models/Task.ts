@@ -96,6 +96,12 @@ export interface ITask extends Document {
   completionApprovedAt?: Date;
   completionRejectedAt?: Date;
 
+  feedback?: Array<{
+    message: string;
+    createdById: mongoose.Types.ObjectId;
+    createdAt: Date;
+  }>;
+
   completedAt?: Date;
   cancelledAt?: Date;
   cancelledById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
@@ -262,7 +268,15 @@ const TaskSchema = new Schema<ITask>(
     completionRejectedReason: String,
     completionApprovedAt: Date,
     completionRejectedAt: Date,
-
+    feedback: [{
+      message: { type: String, required: true },
+      createdById: {
+        type: Schema.Types.ObjectId,
+        ref: "Profile",
+        required: true,
+      },
+      createdAt: { type: Date, default: Date.now },
+    }],
     completedAt: Date,
     cancelledAt: Date,
     cancelledById: {

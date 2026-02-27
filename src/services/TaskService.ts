@@ -1622,4 +1622,107 @@ export class TaskService {
     logger.info(`Completion proof submitted for task ${taskId} by user ${uid}`);
     return updatedTask as unknown as ITask;
   }
+
+  /**
+   * Request changes on a task in review status
+   * Only the task requester (poster) can request changes
+   */
+  static async requestChanges(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    message: string
+  ): Promise<ITask> {
+    if (!message || !message.trim()) {
+      throw new BadRequestError('Change request message is required');
+    }
+
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError('Task not found');
+    }
+
+    // Only requester (poster) can request changes
+    const isRequester = task.requesterId.equals(profileId);
+    if (!isRequester) {
+      throw new ForbiddenError('Only the task requester can request changes');
+    }
+
+    // Can only request changes when task is in review status
+    if (task.status !== 'review') {
+      throw new BadRequestError('Can only request changes when task is in review status');
+    }
+
+    // Add feedback to task and revert status to "assigned"
+    const updatedTask = await Task.findByIdAndUpdate(
+      taskId,
+      {
+        $push: {
+          feedback: {
+            message: message.trim(),
+            createdById: profileId,
+            createdAt: new Date(),
+          }
+        },
+        status: 'assigned',
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updatedTask) {
+      throw new NotFoundError('Task not found');
+    }
+
+    logger.info(`Change request submitted for task ${taskId} by requester ${profileId.toString()}`);
+
+    // Send notification to assignee about the change request
+    if (task.assigneeId) {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: profileId });
+        const assigneeProfile = await Profile.findOne({ _id: task.assigneeId });
+
+        if (assigneeProfile?.email && requesterProfile?.name) {
+          EmailServiceClient.sendChangesRequested(assigneeProfile.email, {
+            assigneeName: assigneeProfile.name || assigneeProfile.fullName || "There",
+            requesterName: requesterProfile.name || requesterProfile.fullName || "Task Poster",
+            taskTitle: task.title,
+            message,
+            taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
+            userId: assigneeProfile.uid,
+          }).catch((err: Error) =>
+            logger.error("Error sending changes_requested email", {
+              taskId,
+              error: err instanceof Error ? err.message : "Unknown error",
+            })
+          );
+        }
+
+        // Send in-app notification
+        await InAppNotificationClient.send({
+          userId: task.assigneeId.toString(),
+          title: 'Changes Requested',
+          body: `${requesterProfile?.name || 'The task requester'} has requested changes on: ${task.title}`,
+          type: 'info',
+          category: 'taskUpdates',
+          data: {
+            taskId,
+            changeMessage: message,
+          },
+        }).catch((err: Error) =>
+          logger.error("Error sending in-app notification for changes_requested", {
+            taskId,
+            error: err instanceof Error ? err.message : "Unknown error",
+          })
+        );
+      } catch (error) {
+        logger.error("Error notifying assignee about change request", {
+          taskId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
+
+    return updatedTask as unknown as ITask;
+  }
 }
