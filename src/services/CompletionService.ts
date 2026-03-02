@@ -326,6 +326,7 @@ export class CompletionService {
     }
 
     // Update task status - move back to in_progress so performer can fix issues
+    // and record feedback so both poster and tasker can see the requested changes
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
@@ -337,6 +338,13 @@ export class CompletionService {
         $unset: {
           completionProof: '',
           completionNotes: ''
+        },
+        $push: {
+          feedback: {
+            message: reason,
+            createdById: new mongoose.Types.ObjectId(taskOwnerProfileId),
+            createdAt: new Date(),
+          },
         },
         updatedAt: new Date(),
       },
