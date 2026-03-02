@@ -93,52 +93,46 @@ export class QuestionService {
       .limit(100)
       .lean();
 
-    // Enrich questions with asker and answerer profiles using _id lookup
+    // Batch fetch asker and answerer profiles (avoid N+1)
     const Profile = mongoose.connection.collection('profiles');
-    const enrichedQuestions = await Promise.all(
-      questions.map(async (q: any) => {
-        let askerProfile = null;
-        let answererProfile = null;
+    const askerIds = [...new Set(questions.map((q: any) => q.askedById).filter(Boolean))];
+    const answererIds = [...new Set(questions.map((q: any) => q.answeredById).filter(Boolean))];
 
-        try {
-          askerProfile = await Profile.findOne({ _id: q.askedById });
-        } catch (error) {
-          logger.warn('Could not fetch asker profile for', q.askedById);
-        }
+    const [askerProfiles, answererProfiles] = await Promise.all([
+      askerIds.length > 0 ? Profile.find({ _id: { $in: askerIds } }).toArray() : [],
+      answererIds.length > 0 ? Profile.find({ _id: { $in: answererIds } }).toArray() : []
+    ]);
 
-        if (q.answeredById) {
-          try {
-            answererProfile = await Profile.findOne({ _id: q.answeredById });
-          } catch (error) {
-            logger.warn('Could not fetch answerer profile for', q.answeredById);
-          }
-        }
+    const askerMap = new Map(askerProfiles.map((p: any) => [p._id.toString(), p]));
+    const answererMap = new Map(answererProfiles.map((p: any) => [p._id.toString(), p]));
 
-        return {
-          id: String(q._id),
-          _id: String(q._id),
-          taskId: String(q.taskId),
-          askedById: String(q.askedById),
-          question: q.question,
-          answer: q.answer,
-          answeredById: q.answeredById ? String(q.answeredById) : null,
-          answeredAt: q.answeredAt,
-          isPublic: q.isPublic,
-          createdAt: q.createdAt,
-          updatedAt: q.updatedAt,
-          askerProfile: askerProfile ? {
-            name: askerProfile.name,
-            photoURL: askerProfile.photoURL,
-            rating: askerProfile.rating,
-            totalReviews: askerProfile.totalReviews
-          } : null,
-          answererProfile: answererProfile ? {
-            name: answererProfile.name,
-            photoURL: answererProfile.photoURL
-          } : null
-        };
-      })
-    );
+    const enrichedQuestions = questions.map((q: any) => {
+      const askerProfile = q.askedById ? askerMap.get(q.askedById.toString()) : null;
+      const answererProfile = q.answeredById ? answererMap.get(q.answeredById.toString()) : null;
+      return {
+        id: String(q._id),
+        _id: String(q._id),
+        taskId: String(q.taskId),
+        askedById: String(q.askedById),
+        question: q.question,
+        answer: q.answer,
+        answeredById: q.answeredById ? String(q.answeredById) : null,
+        answeredAt: q.answeredAt,
+        isPublic: q.isPublic,
+        createdAt: q.createdAt,
+        updatedAt: q.updatedAt,
+        askerProfile: askerProfile ? {
+          name: askerProfile.name,
+          photoURL: askerProfile.photoURL,
+          rating: askerProfile.rating,
+          totalReviews: askerProfile.totalReviews
+        } : null,
+        answererProfile: answererProfile ? {
+          name: answererProfile.name,
+          photoURL: answererProfile.photoURL
+        } : null
+      };
+    });
 
     return enrichedQuestions;
   }

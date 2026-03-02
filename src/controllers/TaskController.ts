@@ -92,8 +92,10 @@ export class TaskController {
   static async getTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     const task = await TaskService.getTaskById(req.params.id);
 
-    // Increment views
-    await TaskService.incrementViews(req.params.id);
+    // Increment views in background so response is not blocked
+    setImmediate(() => {
+      TaskService.incrementViews(req.params.id).catch(() => {});
+    });
 
     ApiResponse.success(res, task, 'Task retrieved successfully');
   }
