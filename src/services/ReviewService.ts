@@ -222,9 +222,12 @@ export class ReviewService {
    * Get reviews for a specific user (userId = profile ObjectId string)
    */
   static async getUserReviews(
+    userId: string,
+    filters: {
+      limit?: number;
       skip?: number;
       rating?: number | null;
-    }
+    } = {}
   ): Promise<{ reviews: IReview[] }> {
     const MAX_LIMIT = 50;
     const MAX_PAGE = 100;
