@@ -14,5 +14,8 @@ router.get('/task/:taskId', authMiddleware, asyncHandler(ReviewController.getTas
 // GET /api/v1/reviews/user/:userId - Get reviews for a user (PUBLIC - no auth required)
 router.get('/user/:userId', asyncHandler(ReviewController.getUserReviews));
 
+// POST /api/v1/reviews/:id/vote - Vote helpful/not helpful (requires auth)
+router.post('/:id/vote', authMiddleware, asyncHandler(ReviewController.voteHelpful));
+
 export default router;
 

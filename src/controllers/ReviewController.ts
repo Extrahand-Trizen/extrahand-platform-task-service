@@ -44,6 +44,31 @@ export class ReviewController {
   }
 
   /**
+   * POST /api/v1/reviews/:id/vote
+   * Vote helpful or not helpful on a review (one vote per user)
+   */
+  static async voteHelpful(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { id: reviewId } = req.params;
+    const { helpful } = req.body;
+
+    if (typeof helpful !== 'boolean') {
+      throw new BadRequestError('helpful must be a boolean');
+    }
+
+    const updated = await ReviewService.voteHelpful(
+      reviewId,
+      req.user!.profileId.toString(),
+      helpful
+    );
+
+    ApiResponse.success(res, updated, 'Vote recorded');
+  }
+
+  /**
    * GET /api/v1/reviews/user/:userId
    * Get reviews for a specific user (PUBLIC - no auth required)
    */

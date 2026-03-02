@@ -178,12 +178,50 @@ export class ReviewService {
   }
 
   /**
+   * Vote helpful/not helpful on a review – one vote per user, toggle supported
+   */
+  static async voteHelpful(
+    reviewId: string,
+    voterId: string, // profile ObjectId string
+    helpful: boolean
+  ): Promise<IReview> {
+    const review = await Review.findById(reviewId);
+    if (!review) {
+      throw new NotFoundError('Review not found');
+    }
+
+    const voterField = helpful ? 'helpfulVoters' : 'notHelpfulVoters';
+    const otherVoterField = helpful ? 'notHelpfulVoters' : 'helpfulVoters';
+    const countField = helpful ? 'helpful' : 'notHelpful';
+    const otherCountField = helpful ? 'notHelpful' : 'helpful';
+
+    const alreadyVotedThisSide = (review as any)[voterField].includes(voterId);
+    const alreadyVotedOtherSide = (review as any)[otherVoterField].includes(voterId);
+
+    if (alreadyVotedThisSide) {
+      // Already voted this direction – no-op
+      return review;
+    }
+
+    const update: any = {
+      $addToSet: { [voterField]: voterId },
+      $inc: { [countField]: 1 },
+    };
+
+    // Remove from opposite side if switching
+    if (alreadyVotedOtherSide) {
+      update.$pull = { [otherVoterField]: voterId };
+      update.$inc[otherCountField] = -1;
+    }
+
+    const updated = await Review.findByIdAndUpdate(reviewId, update, { new: true });
+    return updated as IReview;
+  }
+
+  /**
    * Get reviews for a specific user (userId = profile ObjectId string)
    */
   static async getUserReviews(
-    userId: string,
-    filters: {
-      limit?: number;
       skip?: number;
       rating?: number | null;
     }

@@ -21,6 +21,8 @@ export interface IReview extends Document {
   isVerified: boolean;
   helpful: number;
   notHelpful: number;
+  helpfulVoters: string[];    // profile ObjectId strings
+  notHelpfulVoters: string[]; // profile ObjectId strings
   response?: {
     comment: string;
     timestamp: Date;
@@ -73,6 +75,8 @@ const ReviewSchema = new Schema<IReview>(
     isVerified: { type: Boolean, default: true }, // auto-set in service
     helpful: { type: Number, default: 0 },
     notHelpful: { type: Number, default: 0 },
+    helpfulVoters: { type: [String], default: [] },
+    notHelpfulVoters: { type: [String], default: [] },
 
     response: {
       comment: String,
