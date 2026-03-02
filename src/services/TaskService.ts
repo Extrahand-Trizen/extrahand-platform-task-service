@@ -447,14 +447,51 @@ export class TaskService {
   }
 
   /**
-   * Get a single task by ID
+   * Get a single task by ID (with Redis cache to reduce DB load under concurrency)
    */
   static async getTaskById(taskId: string): Promise<ITask> {
+    const cacheKey = `task:detail:${taskId}`;
+    try {
+      const redis = getRedisClient();
+      if (redis) {
+        const cached = await redis.get(cacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached) as ITask;
+          logger.debug("Task detail cache HIT", { taskId });
+          return parsed;
+        }
+      }
+    } catch (err) {
+      logger.warn("Task detail cache read error", { taskId, error: err instanceof Error ? err.message : String(err) });
+    }
+
     const task = await Task.findById(taskId).lean();
     if (!task) {
       throw new NotFoundError("Task not found");
     }
-    return task as unknown as ITask;
+    const result = task as unknown as ITask;
+
+    try {
+      const redis = getRedisClient();
+      if (redis) {
+        await redis.setex(cacheKey, REDIS_TTLS.TASK_DETAIL_SECONDS, JSON.stringify(result));
+        logger.debug("Task detail cache SET", { taskId });
+      }
+    } catch (err) {
+      logger.warn("Task detail cache write error", { taskId, error: err instanceof Error ? err.message : String(err) });
+    }
+
+    return result;
+  }
+
+  /**
+   * Invalidate cached task so next getTaskById fetches fresh from DB (call after update/delete)
+   */
+  static invalidateTaskCache(taskId: string): void {
+    const cacheKey = `task:detail:${taskId}`;
+    getRedisClient()?.del(cacheKey).catch((err: any) => {
+      logger.warn("Task detail cache invalidate error", { taskId, error: err instanceof Error ? err.message : String(err) });
+    });
   }
 
   /**
@@ -1314,6 +1351,7 @@ export class TaskService {
       }
     }
 
+    TaskService.invalidateTaskCache(taskId);
     return updatedTask as unknown as ITask;
   }
 
@@ -1332,6 +1370,7 @@ export class TaskService {
     }
 
     await Task.findByIdAndDelete(taskId);
+    TaskService.invalidateTaskCache(taskId);
     logger.info(`Task deleted: ${taskId} by user ${profileId.toString()}`);
   }
 
@@ -1559,7 +1598,8 @@ export class TaskService {
         });
       }
     }
-    
+
+    TaskService.invalidateTaskCache(taskId);
     return updatedTask as unknown as ITask;
   }
 
@@ -1620,6 +1660,7 @@ export class TaskService {
     }
 
     logger.info(`Completion proof submitted for task ${taskId} by user ${uid}`);
+    TaskService.invalidateTaskCache(taskId);
     return updatedTask as unknown as ITask;
   }
 
@@ -1723,6 +1764,7 @@ export class TaskService {
       }
     }
 
+    TaskService.invalidateTaskCache(taskId);
     return updatedTask as unknown as ITask;
   }
 }

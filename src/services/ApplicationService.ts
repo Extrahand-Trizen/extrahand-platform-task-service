@@ -459,38 +459,43 @@ export class ApplicationService {
       .lean();
 
     const Profile = mongoose.connection.collection("profiles");
-    const enrichedApplications = await Promise.all(
-      applications.map(async (app) => {
-        // Prefer stored snapshot if present and has a name
-        if (app.applicantProfile && app.applicantProfile.name) {
-          return app;
-        }
+    const needProfileIds = applications
+      .filter((app) => !app.applicantProfile?.name)
+      .map((app) => app.applicantId);
+    const uniqueApplicantIds = [...new Set(needProfileIds.map((id: any) => id.toString()))];
 
-        try {
-          const applicantProfile = await Profile.findOne({
-            _id: app.applicantId,
-          });
-          return {
-            ...app,
-            applicantProfile: applicantProfile
-              ? {
-                  name: applicantProfile.name,
-                  photoURL: applicantProfile.photoURL,
-                  rating: applicantProfile.rating,
-                  totalReviews: applicantProfile.totalReviews,
-                  skills: applicantProfile.skills,
-                }
-              : null,
-          };
-        } catch (error) {
-          logger.warn(
-            "Could not fetch applicant profile for",
-            app.applicantId
-          );
-          return app;
-        }
-      })
-    );
+    let profileMap = new Map<string, any>();
+    if (uniqueApplicantIds.length > 0) {
+      try {
+        const profiles = await Profile.find({
+          _id: { $in: uniqueApplicantIds.map((id) => new mongoose.Types.ObjectId(id)) },
+        }).toArray();
+        profileMap = new Map(profiles.map((p: any) => [p._id.toString(), p]));
+      } catch (error) {
+        logger.warn("Could not batch fetch applicant profiles", { error });
+      }
+    }
+
+    const enrichedApplications = applications.map((app) => {
+      if (app.applicantProfile && app.applicantProfile.name) {
+        return app;
+      }
+      const applicantProfile = app.applicantId
+        ? profileMap.get(app.applicantId.toString())
+        : null;
+      return {
+        ...app,
+        applicantProfile: applicantProfile
+          ? {
+              name: applicantProfile.name,
+              photoURL: applicantProfile.photoURL,
+              rating: applicantProfile.rating,
+              totalReviews: applicantProfile.totalReviews,
+              skills: applicantProfile.skills,
+            }
+          : null,
+      };
+    });
 
     // Get total count for pagination
     const total = await TaskApplication.countDocuments(query);

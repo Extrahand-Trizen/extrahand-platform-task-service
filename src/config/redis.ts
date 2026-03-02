@@ -6,6 +6,7 @@ let client: any | null = null;
 let isReady = false;
 
 const TASK_LIST_CACHE_TTL_SECONDS = 30;
+const TASK_DETAIL_CACHE_TTL_SECONDS = 60;
 const CONNECT_TIMEOUT_MS = 10000;
 
 export function getRedisClient(): any | null {
@@ -85,5 +86,6 @@ export async function disconnectRedis(): Promise<void> {
 
 export const REDIS_TTLS = {
   TASK_LIST_SECONDS: TASK_LIST_CACHE_TTL_SECONDS,
+  TASK_DETAIL_SECONDS: TASK_DETAIL_CACHE_TTL_SECONDS,
 };
 

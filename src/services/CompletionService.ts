@@ -8,6 +8,7 @@ import { PaymentClient } from '../services/PaymentClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
 import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
+import { TaskService } from './TaskService';
 
 export class CompletionService {
   /**
@@ -105,6 +106,7 @@ export class CompletionService {
       });
     }
 
+    TaskService.invalidateTaskCache(taskId);
     return updatedTask;
   }
 
@@ -299,6 +301,7 @@ export class CompletionService {
     // Emit real-time proof approval
     emitProofApproved(taskId, updatedTask);
 
+    TaskService.invalidateTaskCache(taskId);
     return updatedTask;
   }
 
@@ -356,6 +359,7 @@ export class CompletionService {
     // Emit real-time proof rejection
     emitProofRejected(taskId, { task: updatedTask, reason });
 
+    TaskService.invalidateTaskCache(taskId);
     return updatedTask;
   }
 }
