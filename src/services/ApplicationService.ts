@@ -470,28 +470,41 @@ export class ApplicationService {
     }
 
     const enrichedApplications = applications.map((app) => {
+      // Always try to get fresh profile data if not already populated
+      let applicantProfile = null;
+      
       if (app.applicantProfile && app.applicantProfile.name) {
-        return app;
+        // Use stored snapshot if available
+        applicantProfile = app.applicantProfile;
+      } else if (app.applicantId) {
+        // Fetch from map
+        const profile = profileMap.get(app.applicantId.toString());
+        if (profile) {
+          applicantProfile = {
+            name: profile.name || profile.fullName,
+            photoURL: profile.photoURL,
+            rating: profile.rating,
+            totalReviews: profile.totalReviews,
+            skills: profile.skills,
+          };
+        }
       }
-      const applicantProfile = app.applicantId
-        ? profileMap.get(app.applicantId.toString())
-        : null;
+      
       return {
         ...app,
-        applicantProfile: applicantProfile
-          ? {
-              name: applicantProfile.name,
-              photoURL: applicantProfile.photoURL,
-              rating: applicantProfile.rating,
-              totalReviews: applicantProfile.totalReviews,
-              skills: applicantProfile.skills,
-            }
-          : null,
+        applicantProfile,
       };
     });
 
     // Get total count for pagination
     const total = await TaskApplication.countDocuments(query);
+
+    logger.info(`[ApplicationService.getApplications] Applications enrichment complete`, {
+      totalApplications: enrichedApplications.length,
+      withProfiles: enrichedApplications.filter(a => !!a.applicantProfile?.name).length,
+      withoutProfiles: enrichedApplications.filter(a => !a.applicantProfile?.name).length,
+      taskId: taskId || 'all'
+    });
 
     const results = enrichedApplications.map((app) => ({
       id: String(app._id),

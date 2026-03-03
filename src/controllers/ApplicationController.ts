@@ -107,7 +107,15 @@ export class ApplicationController {
       }
     }
 
-    ApiResponse.paginated(res, applications, 'Applications retrieved successfully', result.pagination,);
+    ApiResponse.paginated(res, applications, 'Applications retrieved successfully', result.pagination);
+    
+    // Log for debugging
+    logger.info(`[ApplicationController.getApplications] Response sent`, {
+      applicationsCount: applications.length,
+      hasProfiles: applications.filter((a: any) => !!a.applicantProfile?.name).length,
+      taskId: taskId || 'all',
+      isOwner: !!profileId && taskId ? 'pending' : 'n/a'
+    });
   }
 
   /**
