@@ -4,6 +4,7 @@ import { ApplicationService } from '../services/ApplicationService';
 import { ApiResponse } from '../utils/ApiResponse';
 import { BadRequestError } from '../errors/AppError';
 import logger from '../config/logger';
+import Task from '../models/Task';
 
 export class ApplicationController {
   /**
@@ -86,7 +87,27 @@ export class ApplicationController {
       filters
     );
 
-    ApiResponse.paginated(res, result.applications, 'Applications retrieved successfully', result.pagination,);
+    // ✅ Filter budget information for non-owners when viewing task applications
+    let applications = result.applications;
+    if (taskId && !mine) {
+      try {
+        const task = await Task.findById(taskId);
+        const isOwner = task && profileId && task.requesterId.equals(profileId);
+        
+        // If not the owner, hide budget information only
+        if (!isOwner && task) {
+          applications = applications.map((app: any) => ({
+            ...app,
+            proposedBudget: undefined, // Hide budget from non-owners
+          }));
+        }
+      } catch (error) {
+        // If task lookup fails, continue without filtering (safety measure)
+        logger.warn('Could not filter budget information:', error);
+      }
+    }
+
+    ApiResponse.paginated(res, applications, 'Applications retrieved successfully', result.pagination,);
   }
 
   /**

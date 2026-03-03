@@ -422,8 +422,8 @@ export class ApplicationService {
         throw new NotFoundError("Task not found");
       }
 
-      // Everyone sees all applications for a task (public or logged in)
-      // Budget filtering happens on frontend based on ownership
+      // ✅ Everyone sees all applications for a task
+      // Budget amounts will be hidden at the controller level based on ownership
       query.taskId = taskId;
     }
 
