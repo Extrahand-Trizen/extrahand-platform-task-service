@@ -422,21 +422,9 @@ export class ApplicationService {
         throw new NotFoundError("Task not found");
       }
 
-      // If no user profile ID (public access), show all applications for the task
-      if (!currentUserProfileId) {
-        query.taskId = taskId;
-      } else {
-        const isOwner = task.requesterId.equals(currentUserProfileId);
-        
-        if (isOwner) {
-          // Owner sees all applications for their task
-          query.taskId = taskId;
-        } else {
-          // Non-owner sees only their own application for this task
-          query.taskId = taskId;
-          query.applicantId = currentUserProfileId;
-        }
-      }
+      // Everyone sees all applications for a task (public or logged in)
+      // Budget filtering happens on frontend based on ownership
+      query.taskId = taskId;
     }
 
     // Get my applications across all tasks (requires auth)
