@@ -51,17 +51,18 @@ export class ApplicationController {
 
   /**
    * GET /api/v1/applications
-   * Get applications
+   * Get applications (supports optional auth for public viewing of task applications)
    */
   static async getApplications(
     req: AuthenticatedRequest,
     res: Response
   ): Promise<void> {
-    if (!req.user!.profileId) {
-      throw new BadRequestError('Profile not found. Please complete onboarding.');
-    }
-
     const { taskId, status, mine, limit, page } = req.query;
+
+    // Require authentication for "mine" queries
+    if (mine === "true" && !req.user?.profileId) {
+      throw new BadRequestError('Authentication required to view your applications');
+    }
 
     const filters: any = {
       limit: limit ? parseInt(limit as string) : undefined,
@@ -77,8 +78,11 @@ export class ApplicationController {
       filters.mine = true;
     }
 
+    // Pass profileId only if user is authenticated
+    const profileId = req.user?.profileId || undefined;
+
     const result = await ApplicationService.getApplications(
-      req.user!.profileId,
+      profileId,
       filters
     );
 

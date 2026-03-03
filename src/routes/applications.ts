@@ -1,11 +1,14 @@
 import { Router } from "express";
 import { ApplicationController } from "../controllers/ApplicationController";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { asyncHandler } from "../middleware/errorHandler";
 
 const router = Router();
 
-// All application routes require authentication
+// GET /api/v1/applications - Get applications (public with optional auth)
+router.get("/", optionalAuthMiddleware, asyncHandler(ApplicationController.getApplications));
+
+// All other application routes require authentication
 router.use(authMiddleware);
 
 // POST /api/v1/applications - Submit application

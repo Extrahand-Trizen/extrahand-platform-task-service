@@ -398,7 +398,7 @@ export class ApplicationService {
    * Get applications with authorization checks
    */
   static async getApplications(
-    currentUserProfileId: mongoose.Types.ObjectId,
+    currentUserProfileId: mongoose.Types.ObjectId | undefined,
     filters: {
       taskId?: string;
       mine?: boolean;
@@ -422,20 +422,25 @@ export class ApplicationService {
         throw new NotFoundError("Task not found");
       }
 
-      const isOwner = task.requesterId.equals(currentUserProfileId);
-      
-      if (isOwner) {
-        // Owner sees all applications for their task
+      // If no user profile ID (public access), show all applications for the task
+      if (!currentUserProfileId) {
         query.taskId = taskId;
       } else {
-        // Non-owner sees only their own application for this task
-        query.taskId = taskId;
-        query.applicantId = currentUserProfileId;
+        const isOwner = task.requesterId.equals(currentUserProfileId);
+        
+        if (isOwner) {
+          // Owner sees all applications for their task
+          query.taskId = taskId;
+        } else {
+          // Non-owner sees only their own application for this task
+          query.taskId = taskId;
+          query.applicantId = currentUserProfileId;
+        }
       }
     }
 
-    // Get my applications across all tasks
-    if (mine) {
+    // Get my applications across all tasks (requires auth)
+    if (mine && currentUserProfileId) {
       query.applicantId = currentUserProfileId;
     }
 
