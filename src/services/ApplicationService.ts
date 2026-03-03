@@ -887,9 +887,15 @@ export class ApplicationService {
       throw new BadRequestError("Can only withdraw pending applications");
     }
 
-    application.status = "withdrawn";
-    application.updatedAt = new Date();
-    await application.save();
+    // Use findByIdAndUpdate to avoid Mongoose validation issues with required fields
+    await TaskApplication.findByIdAndUpdate(
+      applicationId,
+      {
+        status: "withdrawn",
+        updatedAt: new Date(),
+      },
+      { new: true }
+    );
 
     logger.info(
       `Application withdrawn: ${applicationId} by user ${applicantProfileId.toString()}`
@@ -943,10 +949,15 @@ export class ApplicationService {
       throw new BadRequestError("Only accepted applications can be withdrawn");
     }
 
-    // 1️⃣ Mark application withdrawn
-    application.status = "withdrawn";
-    application.updatedAt = new Date();
-    await application.save();
+    // 1️⃣ Mark application withdrawn using findByIdAndUpdate to avoid validation issues
+    await TaskApplication.findByIdAndUpdate(
+      applicationId,
+      {
+        status: "withdrawn",
+        updatedAt: new Date(),
+      },
+      { new: true }
+    );
 
     // 2️⃣ Reset task to OPEN
     await Task.updateOne(

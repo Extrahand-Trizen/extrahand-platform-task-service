@@ -583,6 +583,16 @@ export class TaskService {
       updatedAt: new Date(),
     };
 
+    // DEBUG: Log images field received
+    logger.info(`[TaskService.createTask] images DEBUG`, {
+      hasImagesInInput: !!taskData.images,
+      inputImagesCount: taskData.images?.length || 0,
+      inputImages: taskData.images,
+      hasImagesInPayload: !!taskPayload.images,
+      payloadImagesCount: taskPayload.images.length,
+      payloadImages: taskPayload.images
+    });
+
     const recurring = taskData.recurring;
     if (recurring?.enabled) {
       const frequency = (recurring.frequency || "daily") as
