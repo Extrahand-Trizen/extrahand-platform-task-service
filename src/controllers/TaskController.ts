@@ -13,6 +13,10 @@ export class TaskController {
   static async getTasks(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { status, category, city, limit, page, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid } = req.query;
 
+    // Allow comma-separated statuses (frontend may send multiple, e.g. "open,assigned")
+    const statusParam = status ? (status as string) : undefined;
+    const statuses = statusParam && statusParam.includes(',') ? statusParam.split(',').map(s => s.trim()).filter(Boolean) : statusParam;
+
     // Allow comma-separated categories (frontend may send multiple)
     const categoriesParam = category ? (category as string) : undefined;
     const categories = categoriesParam && categoriesParam.includes(',') ? categoriesParam.split(',').map(s => s.trim()).filter(Boolean) : categoriesParam;
@@ -24,7 +28,7 @@ export class TaskController {
     }
 
     const result = await TaskService.getTasks({
-      status: status as any,
+      status: statuses as any,
       category: categories as any,
       city: city as string,
       minBudget: minBudget ? parseFloat(minBudget as string) : undefined,
@@ -94,7 +98,7 @@ export class TaskController {
 
     // Increment views in background so response is not blocked
     setImmediate(() => {
-      TaskService.incrementViews(req.params.id).catch(() => {});
+      TaskService.incrementViews(req.params.id).catch(() => { });
     });
 
     ApiResponse.success(res, task, 'Task retrieved successfully');
@@ -179,7 +183,7 @@ export class TaskController {
    */
   static async updateTaskStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { status, cancellationReason } = req.body;
-    
+
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
@@ -204,10 +208,10 @@ export class TaskController {
     }
 
     const { proofUrls, notes } = req.body;
-    
+
     // Import CompletionService for proper proof submission
     const { CompletionService } = await import('../services/CompletionService');
-    
+
     const task = await CompletionService.submitCompletionProof(
       req.params.id,
       req.user!.profileId.toString(),

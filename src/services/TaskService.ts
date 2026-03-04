@@ -151,14 +151,14 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views applications isFeatured expiresAt scheduledDate flexibility createdAt updatedAt';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate flexibility createdAt updatedAt';
 
 export class TaskService {
   /**
    * Get all tasks with optional filtering
    */
   static async getTasks(filters: {
-    status?: TaskStatus;
+    status?: TaskStatus | TaskStatus[] | string | string[];
     category?: TaskCategory | string | string[];
     city?: string;
     minBudget?: number;
@@ -191,7 +191,7 @@ export class TaskService {
       !!sortBy && sortBy !== "recent";
 
     const isCacheable =
-      status === "open" &&
+      (status === "open" || (Array.isArray(status) && status.length === 1 && status[0] === "open")) &&
       !hasCategory &&
       !city &&
       !hasBudgetFilter &&
@@ -236,7 +236,16 @@ export class TaskService {
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
 
-    if (status) andClauses.push({ status });
+    // Status filter: support single value or array (e.g. "open,assigned" sent as array)
+    if (status) {
+      if (Array.isArray(status) && status.length > 1) {
+        andClauses.push({ status: { $in: status } });
+      } else if (Array.isArray(status) && status.length === 1) {
+        andClauses.push({ status: status[0] });
+      } else if (typeof status === 'string') {
+        andClauses.push({ status });
+      }
+    }
 
     if (excludeRequesterId && mongoose.Types.ObjectId.isValid(excludeRequesterId)) {
       andClauses.push({ requesterId: { $ne: new mongoose.Types.ObjectId(excludeRequesterId) } });
