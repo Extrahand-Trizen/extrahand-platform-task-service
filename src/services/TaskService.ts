@@ -151,7 +151,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate flexibility createdAt updatedAt';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views applications isFeatured expiresAt scheduledDate flexibility createdAt updatedAt';
 
 export class TaskService {
   /**
@@ -294,12 +294,14 @@ export class TaskService {
     if (search) {
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const re = new RegExp(escaped, 'i');
-      andClauses.push({ $or: [
-        { title: re },
-        { description: re },
-        { 'location.city': re },
-        { category: re },
-      ] });
+      andClauses.push({
+        $or: [
+          { title: re },
+          { description: re },
+          { 'location.city': re },
+          { category: re },
+        ]
+      });
     }
 
     const query = andClauses.length > 0 ? { $and: andClauses } : {};
@@ -414,7 +416,7 @@ export class TaskService {
     profileId: mongoose.Types.ObjectId,
     filters: {
       status?: TaskStatus;
-      limit?: number; 
+      limit?: number;
       page?: number;
     }
   ): Promise<{ tasks: ITask[]; pagination: any }> {
@@ -613,8 +615,8 @@ export class TaskService {
 
       let endDate: Date | null = rawEnd
         ? normalizeDateOnly(
-            typeof rawEnd === "string" ? new Date(rawEnd) : rawEnd
-          )
+          typeof rawEnd === "string" ? new Date(rawEnd) : rawEnd
+        )
         : null;
 
       const occurrences = Number(recurring.occurrences || 0) || null;
@@ -683,7 +685,7 @@ export class TaskService {
     try {
       const ProfilesCol = mongoose.connection.collection("profiles");
       const requesterProfile = await ProfilesCol.findOne({ _id: task.requesterId });
-      
+
       logger.info(`[TaskService.createTask] Requester profile lookup`, {
         taskId: task._id,
         requesterId: task.requesterId.toString(),
@@ -701,12 +703,12 @@ export class TaskService {
     // Email: task posted confirmation → requester
     try {
       const Profile = mongoose.connection.collection("profiles");
-      
+
       // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
-      const requesterId = task.requesterId instanceof mongoose.Types.ObjectId 
-        ? task.requesterId 
+      const requesterId = task.requesterId instanceof mongoose.Types.ObjectId
+        ? task.requesterId
         : new mongoose.Types.ObjectId(task.requesterId);
-      
+
       const requesterProfile = await Profile.findOne({ _id: requesterId });
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
@@ -787,15 +789,15 @@ export class TaskService {
             },
             recommendedTaskers
           );
-            // Email: task_created_recommended → matched taskers
-            try {
-              const Profile = mongoose.connection.collection('profiles');
-              
-              // ✅ FIX: query profiles by uid (string), not _id (ObjectId)
-              const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
+          // Email: task_created_recommended → matched taskers
+          try {
+            const Profile = mongoose.connection.collection('profiles');
+
+            // ✅ FIX: query profiles by uid (string), not _id (ObjectId)
+            const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
             const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
             const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
-            
+
             for (const p of recommendedProfiles) {
               if (p.email) {
                 try {
@@ -805,7 +807,7 @@ export class TaskService {
                     p.uid,
                     'recommendedTaskAlerts'
                   );
-                  
+
                   if (emailEnabled) {
                     await EmailServiceClient.sendTaskCreatedRecommended(p.email, {
                       taskerName: p.name || p.fullName || 'There',
@@ -912,7 +914,7 @@ export class TaskService {
           const keywordMatchedUsers = await UserServiceClient.matchUsers('keywords', {
             keywords: taskKeywords
           });
-          
+
           logger.info(`[TaskService.createTask] KEYWORD ALERTS - User matching result`, {
             taskId: task._id,
             matchedUserCount: keywordMatchedUsers.length,
@@ -940,7 +942,7 @@ export class TaskService {
             try {
               const Profile = mongoose.connection.collection('profiles');
               const keywordProfiles = await Profile.find({ uid: { $in: keywordMatchedUsers } }).toArray();
-              
+
               logger.info(`[TaskService.createTask] KEYWORD ALERTS - Fetched profiles`, {
                 taskId: task._id,
                 fetchedProfileCount: keywordProfiles.length,
@@ -950,7 +952,7 @@ export class TaskService {
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
-              
+
               for (const p of keywordProfiles) {
                 // Skip the task creator - they should not receive alerts for their own tasks
                 if (p.uid === uid) {
@@ -977,7 +979,7 @@ export class TaskService {
                       p.uid,
                       'keywordTaskAlerts'
                     );
-                    
+
                     logger.info(`[TaskService.createTask] KEYWORD ALERTS - Email preference check result`, {
                       taskId: task._id,
                       userId: p.uid,
@@ -1126,7 +1128,7 @@ export class TaskService {
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
               const categoryLabel = task.categoryLabel || task.subcategory || task.category;
-              
+
               for (const p of categoryProfiles) {
                 if (p.email) {
                   try {
@@ -1136,7 +1138,7 @@ export class TaskService {
                       p.uid,
                       'keywordTaskAlerts'
                     );
-                    
+
                     if (emailEnabled) {
                       await EmailServiceClient.sendTaskCreatedKeyword(p.email, {
                         userName: p.name || p.fullName || 'There',
@@ -1472,7 +1474,7 @@ export class TaskService {
     }
 
     logger.info(`Task ${taskId} status updated to ${status} by ${profileId.toString()}`);
-    
+
     // Emit real-time status update
     emitTaskStatusChanged(taskId, updatedTask);
 
