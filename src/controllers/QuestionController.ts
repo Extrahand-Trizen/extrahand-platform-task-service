@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../types';
 import { QuestionService } from '../services/QuestionService';
 import { ApiResponse } from '../utils/ApiResponse';
 import { BadRequestError } from '../errors/AppError';
+import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
 import mongoose from 'mongoose';
 
 export class QuestionController {
@@ -13,6 +14,11 @@ export class QuestionController {
   static async askQuestion(req: AuthenticatedRequest, res: Response): Promise<void> {
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const questionText: string = req.body.question;
+    if (containsPhoneNumber(questionText)) {
+      throw new BadRequestError(PHONE_NUMBER_ERROR);
     }
 
     const question = await QuestionService.askQuestion(
@@ -50,6 +56,11 @@ export class QuestionController {
   static async answerQuestion(req: AuthenticatedRequest, res: Response): Promise<void> {
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const answerText: string = req.body.answer;
+    if (containsPhoneNumber(answerText)) {
+      throw new BadRequestError(PHONE_NUMBER_ERROR);
     }
 
     const question = await QuestionService.answerQuestion(

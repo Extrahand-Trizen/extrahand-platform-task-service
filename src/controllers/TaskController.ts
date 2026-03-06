@@ -4,6 +4,7 @@ import { TaskService } from '../services/TaskService';
 import { ApplicationService } from '../services/ApplicationService';
 import { BadRequestError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
+import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
 
 export class TaskController {
   /**
@@ -111,6 +112,11 @@ export class TaskController {
   static async createTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { title, description } = req.body;
+    if (containsPhoneNumber(title) || containsPhoneNumber(description)) {
+      throw new BadRequestError(PHONE_NUMBER_ERROR);
     }
 
     // Pass both profileId (ObjectId) and uid (Firebase UID string)

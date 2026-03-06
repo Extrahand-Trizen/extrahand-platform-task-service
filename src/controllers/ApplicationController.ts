@@ -94,12 +94,17 @@ export class ApplicationController {
         const task = await Task.findById(taskId);
         const isOwner = task && profileId && task.requesterId.equals(profileId);
         
-        // If not the owner, hide budget information only
+        // If not the owner, hide budget information for OTHER applicants only.
+        // The applicant should always see their own proposed budget.
         if (!isOwner && task) {
-          applications = applications.map((app: any) => ({
-            ...app,
-            proposedBudget: undefined, // Hide budget from non-owners
-          }));
+          applications = applications.map((app: any) => {
+            const isOwnApplication = profileId && String(app.applicantId) === String(profileId);
+            if (isOwnApplication) return app; // applicant can see their own budget
+            return {
+              ...app,
+              proposedBudget: undefined, // Hide other applicants' budgets from non-owners
+            };
+          });
         }
       } catch (error) {
         // If task lookup fails, continue without filtering (safety measure)
