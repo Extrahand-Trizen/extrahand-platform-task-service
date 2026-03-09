@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 import Task, { ITask } from "../models/Task";
 import {
   BadRequestError,
@@ -151,7 +152,18 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate flexibility createdAt updatedAt';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt';
+
+const START_OTP_TTL_MS = 10 * 60 * 1000;
+const START_OTP_MAX_ATTEMPTS = 5;
+
+function generateStartOtpCode(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function hashStartOtp(taskId: string, otp: string): string {
+  return crypto.createHash("sha256").update(`${taskId}:${otp}`).digest("hex");
+}
 
 export class TaskService {
   /**
@@ -583,6 +595,8 @@ export class TaskService {
         : undefined,
       scheduledTimeStart: taskData.scheduledTimeStart,
       scheduledTimeEnd: taskData.scheduledTimeEnd,
+      dateOption: taskData.dateOption,
+      timeSlot: taskData.timeSlot,
       flexibility: taskData.flexibility || "flexible",
       timeFlexibilityValue: taskData.timeFlexibilityValue,
       requirements: taskData.requirements || taskData.skillsRequired || [],
@@ -1409,7 +1423,7 @@ export class TaskService {
     taskId: string,
     profileId: mongoose.Types.ObjectId,
     status: TaskStatus,
-    options?: { cancellationReason?: string }
+    options?: { cancellationReason?: string; skipStartOtpValidation?: boolean }
   ): Promise<ITask> {
     const validStatuses: TaskStatus[] = [
       "open",
@@ -1458,6 +1472,23 @@ export class TaskService {
       }
     }
 
+    // OTP gate: performer cannot move assigned -> started/in_progress without successful OTP verification.
+    if (
+      (status === "started" || status === "in_progress") &&
+      task.status === "assigned" &&
+      isPerformer &&
+      !options?.skipStartOtpValidation
+    ) {
+      const startOtp = task.startOtp;
+      if (!startOtp?.verifiedAt) {
+        throw new BadRequestError("Start OTP verification required before starting task");
+      }
+
+      if (startOtp.expiresAt && new Date(startOtp.expiresAt).getTime() < Date.now()) {
+        throw new BadRequestError("Start OTP expired. Please resend and verify OTP again");
+      }
+    }
+
     const updateData: any = {
       status,
       updatedAt: new Date(),
@@ -1471,6 +1502,11 @@ export class TaskService {
       updateData.cancelledAt = new Date();
       updateData.cancelledById = profileId; // ✅ Updated from cancelledBy
       updateData.cancellationReason = options?.cancellationReason;
+    }
+
+    // Clear OTP state once task leaves assigned state.
+    if (task.status === "assigned" && status !== "assigned") {
+      updateData.startOtp = undefined;
     }
 
     const updatedTask = await Task.findByIdAndUpdate(taskId, updateData, {
@@ -1625,6 +1661,164 @@ export class TaskService {
   }
 
   /**
+   * Request or resend task start OTP.
+   * OTP is sent to requester (poster) and must be shared with tasker in person.
+   */
+  static async requestStartOtp(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    uid: string,
+    options?: { isResend?: boolean }
+  ): Promise<{ expiresAt: Date; sentTo: string }> {
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can request start OTP");
+    }
+
+    if (task.status !== "assigned") {
+      throw new BadRequestError("OTP can only be requested when task is in assigned status");
+    }
+
+    const Profile = mongoose.connection.collection("profiles");
+    const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+
+    if (!requesterProfile?.uid) {
+      throw new BadRequestError("Requester notification channel unavailable");
+    }
+
+    const otp = generateStartOtpCode();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + START_OTP_TTL_MS);
+
+    const nextResendCount = options?.isResend
+      ? (task.startOtp?.resendCount || 0) + 1
+      : task.startOtp?.resendCount || 0;
+
+    task.startOtp = {
+      codeHash: hashStartOtp(taskId, otp),
+      requestedAt: now,
+      expiresAt,
+      attempts: 0,
+      resendCount: nextResendCount,
+      requestedById: profileId,
+    };
+
+    await task.save();
+
+    const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
+
+    // Event-driven notification via notification service (FCM/in-app delivery path).
+    await NotificationClient.send({
+      eventKey: "TASK_UPDATED",
+      category: "taskUpdates",
+      actorId: uid,
+      recipients: [requesterProfile.uid],
+      entity: {
+        type: "task",
+        id: taskId,
+      },
+      title: "Task Start OTP",
+      body: otpBody,
+      data: {
+        taskId,
+        otp,
+        otpType: "task_start",
+        expiresAt: expiresAt.toISOString(),
+      },
+    });
+
+    // Direct in-app notification fallback for requester.
+    const inAppSent = await InAppNotificationClient.send({
+      userId: task.requesterId.toString(),
+      title: "Task Start OTP",
+      body: otpBody,
+      type: "info",
+      category: "taskUpdates",
+      data: {
+        taskId,
+        otp,
+        otpType: "task_start",
+        expiresAt: expiresAt.toISOString(),
+      },
+    });
+
+    if (!inAppSent) {
+      throw new BadRequestError("Unable to deliver OTP right now. Please try again.");
+    }
+
+    TaskService.invalidateTaskCache(taskId);
+
+    return {
+      expiresAt,
+      sentTo: requesterProfile.name || requesterProfile.fullName || "requester",
+    };
+  }
+
+  /**
+   * Verify task start OTP and mark task as started.
+   */
+  static async verifyStartOtp(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    otp: string
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can verify start OTP");
+    }
+
+    if (task.status !== "assigned") {
+      throw new BadRequestError("Task is not in assigned state");
+    }
+
+    const sanitizedOtp = (otp || "").trim();
+    if (!/^\d{6}$/.test(sanitizedOtp)) {
+      throw new BadRequestError("Please enter a valid 6-digit OTP");
+    }
+
+    if (!task.startOtp?.codeHash || !task.startOtp?.expiresAt) {
+      throw new BadRequestError("Start OTP not requested. Please request OTP first");
+    }
+
+    if (task.startOtp.expiresAt.getTime() < Date.now()) {
+      throw new BadRequestError("OTP expired. Please resend OTP");
+    }
+
+    if ((task.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
+      throw new BadRequestError("Too many invalid attempts. Please resend OTP");
+    }
+
+    const expectedHash = hashStartOtp(taskId, sanitizedOtp);
+    if (task.startOtp.codeHash !== expectedHash) {
+      task.startOtp.attempts = (task.startOtp.attempts || 0) + 1;
+      await task.save();
+
+      if (task.startOtp.attempts >= START_OTP_MAX_ATTEMPTS) {
+        throw new BadRequestError("OTP mismatch. Max attempts reached. Please resend OTP");
+      }
+
+      throw new BadRequestError("OTP mismatch");
+    }
+
+    task.startOtp.verifiedAt = new Date();
+    await task.save();
+
+    return TaskService.updateTaskStatus(taskId, profileId, "started", {
+      skipStartOtpValidation: true,
+    });
+  }
+
+  /**
    * Submit completion proof for review
    */
   static async submitCompletionProof(
@@ -1726,6 +1920,7 @@ export class TaskService {
           }
         },
         status: 'assigned',
+        startOtp: undefined,
         updatedAt: new Date(),
       },
       { new: true, runValidators: true }

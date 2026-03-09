@@ -66,6 +66,30 @@ router.patch(
   asyncHandler(TaskController.updateTaskStatus)
 );
 
+// POST /api/v1/tasks/:id/start-otp/send - Send OTP to requester before task start
+router.post(
+  "/:id/start-otp/send",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.sendStartOtp)
+);
+
+// POST /api/v1/tasks/:id/start-otp/resend - Resend OTP to requester
+router.post(
+  "/:id/start-otp/resend",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.resendStartOtp)
+);
+
+// POST /api/v1/tasks/:id/start-otp/verify - Verify OTP and start task
+router.post(
+  "/:id/start-otp/verify",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.verifyStartOtp)
+);
+
 // POST /api/v1/tasks/:id/submit-proof - Submit completion proof for review
 router.post(
   "/:id/submit-proof",

@@ -3,6 +3,70 @@ import TaskApplication from '../models/TaskApplication';
 import { NotFoundError, BadRequestError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
 import { uploadFile, deleteFile, getStorageType } from '../utils/storageManager';
+import sharp from 'sharp';
+
+interface ProcessedImage {
+  buffer: Buffer;
+  filename: string;
+  mimetype: string;
+}
+
+const COMPRESSION_SUPPORTED_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+]);
+
+async function compressImageIfSupported(
+  fileBuffer: Buffer,
+  filename: string,
+  mimetype: string
+): Promise<ProcessedImage> {
+  const normalizedType = mimetype.toLowerCase();
+
+  if (!COMPRESSION_SUPPORTED_TYPES.has(normalizedType)) {
+    return { buffer: fileBuffer, filename, mimetype };
+  }
+
+  try {
+    let pipeline = sharp(fileBuffer, { failOn: 'none' }).rotate();
+
+    if (normalizedType === 'image/png') {
+      // Lossless PNG optimization (no quality/color reduction)
+      pipeline = pipeline.png({ compressionLevel: 9, palette: false, adaptiveFiltering: true });
+    } else if (normalizedType === 'image/webp') {
+      // Lossless WebP optimization
+      pipeline = pipeline.webp({ lossless: true, effort: 6 });
+    } else {
+      // JPEG cannot be strictly losslessly recompressed with sharp while preserving size optimally.
+      // Use max-quality settings and entropy optimization to keep visual quality intact.
+      pipeline = pipeline.jpeg({ quality: 100, mozjpeg: true, chromaSubsampling: '4:4:4' });
+    }
+
+    const compressed = await pipeline.toBuffer();
+
+    if (compressed.length >= fileBuffer.length) {
+      return { buffer: fileBuffer, filename, mimetype };
+    }
+
+    logger.info('Image compressed before storage', {
+      filename,
+      originalSize: fileBuffer.length,
+      compressedSize: compressed.length,
+      reductionPercent: Number((((fileBuffer.length - compressed.length) / fileBuffer.length) * 100).toFixed(2)),
+    });
+
+    return { buffer: compressed, filename, mimetype };
+  } catch (error) {
+    logger.warn('Image compression skipped due to processing error', {
+      filename,
+      mimetype,
+      error: error instanceof Error ? error.message : 'unknown',
+    });
+    return { buffer: fileBuffer, filename, mimetype };
+  }
+}
 
 export class UploadService {
   /**
@@ -19,11 +83,13 @@ export class UploadService {
       throw new BadRequestError('No image file provided');
     }
 
+    const processed = await compressImageIfSupported(fileBuffer, filename, mimetype);
+
     // Upload to storage (MinIO, S3, etc.)
     const result = await uploadFile(
-      fileBuffer,
-      filename,
-      mimetype,
+      processed.buffer,
+      processed.filename,
+      processed.mimetype,
       'task-images',
       {
         userId,
@@ -84,11 +150,13 @@ export class UploadService {
       throw new ForbiddenError('Only the assigned performer can upload completion proof');
     }
 
+    const processed = await compressImageIfSupported(fileBuffer, filename, mimetype);
+
     // Upload to storage (MinIO, S3, etc.)
     const result = await uploadFile(
-      fileBuffer,
-      filename,
-      mimetype,
+      processed.buffer,
+      processed.filename,
+      processed.mimetype,
       'completion-proofs',
       {
         taskId: taskId,
@@ -164,19 +232,20 @@ export class UploadService {
     }
 
     // Upload all files
-    const uploadPromises = files.map(file =>
-      uploadFile(
-        file.buffer,
-        file.filename,
-        file.mimetype,
+    const uploadPromises = files.map(async (file) => {
+      const processed = await compressImageIfSupported(file.buffer, file.filename, file.mimetype);
+      return uploadFile(
+        processed.buffer,
+        processed.filename,
+        processed.mimetype,
         'completion-proofs',
         {
           taskId: taskId,
           userId: performerUid,
           type: 'completion-proof'
         }
-      )
-    );
+      );
+    });
 
     const results = await Promise.all(uploadPromises);
 

@@ -205,6 +205,67 @@ export class TaskController {
   }
 
   /**
+   * POST /api/v1/tasks/:id/start-otp/send
+   * Generate and send task start OTP to requester
+   */
+  static async sendStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await TaskService.requestStartOtp(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+      { isResend: false }
+    );
+
+    ApiResponse.success(res, result, 'Task start OTP sent to requester');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/start-otp/resend
+   * Resend a fresh task start OTP to requester
+   */
+  static async resendStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await TaskService.requestStartOtp(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+      { isResend: true }
+    );
+
+    ApiResponse.success(res, result, 'Task start OTP resent to requester');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/start-otp/verify
+   * Verify OTP and mark task as started
+   */
+  static async verifyStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { otp } = req.body;
+    if (!otp) {
+      throw new BadRequestError('OTP is required');
+    }
+
+    const task = await TaskService.verifyStartOtp(
+      req.params.id,
+      req.user!.profileId,
+      String(otp)
+    );
+
+    ApiResponse.success(res, task, 'OTP verified. Task started successfully');
+  }
+
+  /**
    * POST /api/v1/tasks/:id/submit-proof
    * Submit completion proof for review
    */

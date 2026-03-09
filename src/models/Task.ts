@@ -57,6 +57,8 @@ export interface ITask extends Document {
   scheduledDate?: Date;
   scheduledTimeStart?: string;
   scheduledTimeEnd?: string;
+  dateOption?: "flexible" | "on-date" | "before-date";
+  timeSlot?: "morning" | "midday" | "afternoon" | "evening";
   flexibility: "strict" | "flexible" | "anytime";
   timeFlexibilityValue?: "exact" | "1h" | "3h";
 
@@ -101,6 +103,16 @@ export interface ITask extends Document {
     createdById: mongoose.Types.ObjectId;
     createdAt: Date;
   }>;
+
+  startOtp?: {
+    codeHash: string;
+    requestedAt: Date;
+    expiresAt: Date;
+    verifiedAt?: Date;
+    attempts: number;
+    resendCount: number;
+    requestedById: mongoose.Types.ObjectId;
+  };
 
   completedAt?: Date;
   cancelledAt?: Date;
@@ -201,6 +213,14 @@ const TaskSchema = new Schema<ITask>(
     scheduledDate: Date,
     scheduledTimeStart: String,
     scheduledTimeEnd: String,
+    dateOption: {
+      type: String,
+      enum: ["flexible", "on-date", "before-date"],
+    },
+    timeSlot: {
+      type: String,
+      enum: ["morning", "midday", "afternoon", "evening"],
+    },
     flexibility: {
       type: String,
       enum: ["strict", "flexible", "anytime"],
@@ -277,6 +297,18 @@ const TaskSchema = new Schema<ITask>(
       },
       createdAt: { type: Date, default: Date.now },
     }],
+    startOtp: {
+      codeHash: String,
+      requestedAt: Date,
+      expiresAt: Date,
+      verifiedAt: Date,
+      attempts: { type: Number, default: 0 },
+      resendCount: { type: Number, default: 0 },
+      requestedById: {
+        type: Schema.Types.ObjectId,
+        ref: "Profile",
+      },
+    },
     completedAt: Date,
     cancelledAt: Date,
     cancelledById: {
