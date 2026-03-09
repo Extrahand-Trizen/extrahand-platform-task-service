@@ -12,6 +12,7 @@ import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { Fast2SMSClient } from "../clients/Fast2SMSClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -1775,6 +1776,27 @@ export class TaskService {
           error: err.message,
           taskId,
           to: requesterProfile.email
+        });
+      });
+    }
+
+    // Send OTP via SMS to requester (Fast2SMS)
+    if (requesterProfile.phone) {
+      logger.debug('[TaskService.requestStartOtp] Sending task_start_otp SMS', {
+        to: requesterProfile.phone,
+        taskId,
+        isResend: options?.isResend
+      });
+      
+      Fast2SMSClient.sendTaskStartOTP(
+        requesterProfile.phone,
+        otp,
+        task.title
+      ).catch(err => {
+        logger.warn('[TaskService.requestStartOtp] Failed to send OTP SMS', {
+          error: err.message,
+          taskId,
+          to: requesterProfile.phone
         });
       });
     }

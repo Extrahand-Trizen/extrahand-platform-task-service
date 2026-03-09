@@ -6,6 +6,7 @@ import { NotificationClient } from './services/NotificationClient';
 import { UserServiceClient } from './clients/UserServiceClient';
 import { EmailServiceClient } from './clients/EmailServiceClient';
 import { InAppNotificationClient } from './clients/InAppNotificationClient';
+import { Fast2SMSClient } from './clients/Fast2SMSClient';
 import { ReminderScheduler } from './schedulers/ReminderScheduler';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
@@ -25,6 +26,7 @@ async function startServer() {
     UserServiceClient.initialize();
     EmailServiceClient.initialize();
     InAppNotificationClient.initialize();
+    Fast2SMSClient.initialize();
 
     // Initialize schedulers
     await ReminderScheduler.initialize('task-service');
