@@ -1712,6 +1712,9 @@ export class TaskService {
 
     const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
 
+    // Get tasker profile for email
+    const taskerProfile = await Profile.findOne({ _id: profileId });
+
     // Event-driven notification via notification service (FCM/in-app delivery path).
     await NotificationClient.send({
       eventKey: "TASK_UPDATED",
@@ -1746,6 +1749,35 @@ export class TaskService {
         expiresAt: expiresAt.toISOString(),
       },
     });
+
+    // Send OTP via email to requester
+    if (requesterProfile.email) {
+      logger.debug('[TaskService.requestStartOtp] Sending task_start_otp email', {
+        to: requesterProfile.email,
+        taskId,
+        isResend: options?.isResend
+      });
+      
+      EmailServiceClient.sendTaskStartOtp(requesterProfile.email, {
+        requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
+        taskerName: taskerProfile?.name || taskerProfile?.fullName || 'Tasker',
+        taskTitle: task.title,
+        otp,
+        expiresAt: expiresAt.toLocaleString('en-IN', { 
+          timeZone: 'Asia/Kolkata',
+          dateStyle: 'medium',
+          timeStyle: 'short'
+        }),
+        taskUrl: `${config.WEB_APP_URL || 'https://extrahand.in'}/tasks/${taskId}/track`,
+        userId: requesterProfile.uid,
+      }).catch(err => {
+        logger.warn('[TaskService.requestStartOtp] Failed to send OTP email', {
+          error: err.message,
+          taskId,
+          to: requesterProfile.email
+        });
+      });
+    }
 
     if (!inAppSent) {
       throw new BadRequestError("Unable to deliver OTP right now. Please try again.");

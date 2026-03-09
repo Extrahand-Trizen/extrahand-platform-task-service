@@ -336,4 +336,22 @@ export class EmailServiceClient {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'changes_requested', { ...data, taskUrl });
   }
+
+  /**
+   * Send task start OTP to requester (poster)
+   * Sent when tasker clicks "Start Task" and OTP is generated
+   */
+  static sendTaskStartOtp(to: string, data: {
+    requesterName: string;
+    taskerName: string;
+    taskTitle: string;
+    otp: string;
+    expiresAt?: string;
+    taskUrl?: string;
+    platformName?: string;
+    userId?: string;
+  }): Promise<boolean> {
+    const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
+    return this.sendTemplate(to, 'task_start_otp', { ...data, taskUrl });
+  }
 }
