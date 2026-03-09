@@ -47,13 +47,10 @@ export class CompletionService {
       throw new ForbiddenError('Only the assigned performer can submit completion proof');
     }
 
-    // Validate proof URLs
-    if (!proofUrls || !Array.isArray(proofUrls) || proofUrls.length === 0) {
-      throw new BadRequestError('At least one proof image is required');
-    }
+    const normalizedProofUrls = Array.isArray(proofUrls) ? proofUrls : [];
 
-    // Update task with completion proof
-    const completionProof = proofUrls.map(url => ({
+    // Proof is optional: if no images are provided, still allow moving to review.
+    const completionProof = normalizedProofUrls.map(url => ({
       url,
       filename: url.split('/').pop() || 'proof.jpg',
       uploadedAt: new Date(),
