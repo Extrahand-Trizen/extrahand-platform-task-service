@@ -1490,6 +1490,11 @@ export class TaskService {
       }
     }
 
+    // Once work starts, cancellation is not allowed.
+    if (status === "cancelled" && task.status !== "assigned") {
+      throw new BadRequestError("Task can only be cancelled before it is started");
+    }
+
     const updateData: any = {
       status,
       updatedAt: new Date(),

@@ -394,6 +394,55 @@ export class CompletionService {
     // Emit real-time proof rejection
     emitProofRejected(taskId, { task: updatedTask, reason });
 
+    // Send notifications to tasker about rejection and request to resubmit
+    try {
+      const Profile = mongoose.connection.collection('profiles');
+      const assigneeProfile = task.assigneeId
+        ? await Profile.findOne({ _id: task.assigneeId })
+        : null;
+      const resubmitUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
+
+      // Notify tasker via FCM + in-app
+      if (assigneeProfile?.uid) {
+        // FCM Notification
+        await NotificationClient.send({
+          eventKey: 'TASK_UPDATED',
+          category: 'taskUpdates',
+          actorId: taskOwnerProfileId,
+          recipients: [assigneeProfile.uid],
+          entity: { type: 'task', id: taskId },
+          title: 'Changes requested on your submission',
+          body: `${reason || 'Please revise and resubmit your work.'}`,
+          data: {
+            taskId,
+            status: 'started',
+            action: 'resubmit_required',
+            taskUrl: resubmitUrl,
+          },
+        });
+
+        // In-app Notification
+        await InAppNotificationClient.send({
+       userId: task.assigneeId!.toString(),
+          title: 'Changes requested on your submission',
+          body: `${reason || 'Please revise and resubmit your work.'}`,
+          type: 'warning',
+          category: 'taskUpdates',
+          data: {
+            taskId,
+            status: 'started',
+            action: 'resubmit_required',
+            taskUrl: resubmitUrl,
+          },
+        });
+      }
+    } catch (error) {
+      logger.error('Error sending rejection notification', {
+        taskId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+
     TaskService.invalidateTaskCache(taskId);
     return updatedTask;
   }
