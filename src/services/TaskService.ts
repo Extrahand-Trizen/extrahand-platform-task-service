@@ -1962,7 +1962,7 @@ export class TaskService {
       throw new BadRequestError('Can only request changes when task is in review status');
     }
 
-    // Add feedback to task and revert status to "assigned"
+    // Add feedback to task and revert status to "started" for quick revise/resubmit flow.
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
@@ -1973,7 +1973,7 @@ export class TaskService {
             createdAt: new Date(),
           }
         },
-        status: 'assigned',
+        status: 'started',
         startOtp: undefined,
         updatedAt: new Date(),
       },

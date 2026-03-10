@@ -6,6 +6,7 @@ import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
 import { PaymentClient } from '../services/PaymentClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
+import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
 import { TaskService } from './TaskService';
@@ -81,13 +82,50 @@ export class CompletionService {
       const assigneeProfile = task.assigneeId
         ? await Profile.findOne({ _id: task.assigneeId })
         : null;
+      const approvalPath = `/tasks/${taskId}/track?pendingApproval=1`;
+      const approvalUrl = `${config.WEB_APP_URL}${approvalPath}`;
+
+      if (requesterProfile?.uid) {
+        await NotificationClient.send({
+          eventKey: 'TASK_UPDATED',
+          category: 'taskUpdates',
+          actorId: performerProfileId,
+          recipients: [requesterProfile.uid],
+          entity: { type: 'task', id: taskId },
+          title: 'Task ready for your approval',
+          body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
+          data: {
+            taskId,
+            status: 'review',
+            action: 'approve_completion',
+            actionUrl: approvalPath,
+            taskUrl: approvalUrl,
+          },
+        });
+      }
+
+      await InAppNotificationClient.send({
+        userId: task.requesterId.toString(),
+        title: 'Task ready for your approval',
+        body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
+        type: 'info',
+        category: 'taskUpdates',
+        data: {
+          taskId,
+          status: 'review',
+          action: 'approve_completion',
+          actionUrl: approvalPath,
+          taskUrl: approvalUrl,
+        },
+      });
+
       if (requesterProfile?.email) {
         EmailServiceClient.sendCompletionProofSubmitted(requesterProfile.email, {
           requesterName: requesterProfile.name || 'There',
           assigneeName: assigneeProfile?.name || 'Your tasker',
           taskTitle: task.title,
           submittedAt: new Date().toLocaleString(),
-          taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
+          taskUrl: approvalUrl,
           userId: requesterProfile.uid,
         }).catch((err) =>
           logger.error('Error sending completion_proof_submitted email', {
@@ -325,12 +363,12 @@ export class CompletionService {
       throw new BadRequestError('Task is not pending approval');
     }
 
-    // Update task status - move back to in_progress so performer can fix issues
+    // Update task status - move back to started so performer can revise and resubmit
     // and record feedback so both poster and tasker can see the requested changes
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
-        status: 'in_progress',
+        status: 'started',
         completionStatus: 'rejected',
         completionRejectedReason: reason,
         completionRejectedAt: new Date(),
