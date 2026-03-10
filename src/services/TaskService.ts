@@ -737,19 +737,33 @@ export class TaskService {
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-        await EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
-          requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
-          taskTitle: task.title,
-          taskUrl,
-          budget: task.budget?.amount,
-          category: mappedCategory,
-          location: task.location?.city || task.location?.address,
-          userId: requesterProfile.uid,
-        });
-        logger.info(`[TaskService.createTask] task_posted_confirmation email sent successfully`, {
-          taskId: task._id,
-          to: requesterProfile.email
-        });
+        const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+          requesterProfile.uid,
+          'taskUpdates'
+        );
+
+        if (emailEnabled) {
+          await EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
+            requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
+            taskTitle: task.title,
+            taskUrl,
+            budget: task.budget?.amount,
+            category: mappedCategory,
+            location: task.location?.city || task.location?.address,
+            userId: requesterProfile.uid,
+          });
+          logger.info(`[TaskService.createTask] task_posted_confirmation email sent successfully`, {
+            taskId: task._id,
+            to: requesterProfile.email,
+            userId: requesterProfile.uid
+          });
+        } else {
+          logger.info(`[TaskService.createTask] task_posted_confirmation email skipped - preferences disabled`, {
+            taskId: task._id,
+            userId: requesterProfile.uid,
+            category: 'taskUpdates'
+          });
+        }
 
         // 📬 In-App Notification: task posted confirmation → requester
         try {
