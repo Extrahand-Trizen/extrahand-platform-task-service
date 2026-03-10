@@ -1,6 +1,7 @@
 import axios, { AxiosError } from 'axios';
 import logger from '../config/logger';
 import { config } from '../config/env';
+import { NotificationPreferenceChecker } from '../services/NotificationPreferenceChecker';
 
 /**
  * EmailServiceClient – HTTP client for extrahand-email-service.
@@ -89,7 +90,46 @@ export class EmailServiceClient {
     }
   }
 
-  private static sendTemplate(to: string, template: string, data: Record<string, unknown>): Promise<boolean> {
+  private static resolveCategoryForTemplate(
+    template: string
+  ): 'taskUpdates' | 'taskReminders' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'transactional' {
+    switch (template) {
+      case 'task_created_recommended':
+        return 'recommendedTaskAlerts';
+      case 'task_created_keyword':
+        return 'keywordTaskAlerts';
+      case 'task_reminder':
+        return 'taskReminders';
+      case 'task_start_otp':
+        return 'transactional';
+      default:
+        return 'taskUpdates';
+    }
+  }
+
+  private static async sendTemplate(to: string, template: string, data: Record<string, unknown>): Promise<boolean> {
+    const userId = typeof data.userId === 'string' ? data.userId : '';
+    const category = this.resolveCategoryForTemplate(template);
+
+    if (!userId) {
+      logger.warn('EmailServiceClient: Skipping notification email because userId is missing', {
+        template,
+        to,
+        category,
+      });
+      return false;
+    }
+
+    const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(userId, category);
+    if (!emailEnabled) {
+      logger.info('EmailServiceClient: Skipping notification email due to user preferences', {
+        template,
+        userId,
+        category,
+      });
+      return false;
+    }
+
     return this.sendRequest('/send', {
       to,
       template,
