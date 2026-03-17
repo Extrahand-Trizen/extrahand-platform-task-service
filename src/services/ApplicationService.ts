@@ -94,11 +94,12 @@ export class ApplicationService {
         );
       }
 
-      // Check if user has already applied
+      // Check if user has an active application (withdrawn/rejected do not count; user may apply again)
       logger.debug(`[ApplicationService.submitApplication] Checking for existing application: taskId=${taskId}, applicantUid=${applicantUid}`);
       const existingApplication = await TaskApplication.findOne({
         taskId,
         applicantUid: applicantUid,
+        status: { $nin: ['withdrawn', 'rejected'] },
       });
 
       if (existingApplication) {
