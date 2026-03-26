@@ -293,44 +293,74 @@ export class CompletionService {
       });
     }
 
-    // Trigger payment auto-release workflow - Set auto-release date with grace period
-    // This allows for revisions before automatic payout
+    // Trigger direct payout workflow (RazorpayX-only, non-escrow)
     try {
-      // First, check if there's an escrow for this task
-      const escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      const Profile = mongoose.connection.collection('profiles');
+      const assigneeProfile = task.assigneeId
+        ? await Profile.findOne({ _id: task.assigneeId })
+        : null;
 
-      if (escrow && escrow.razorpayOrderId) {
-        // Calculate auto-release date (grace period: 1 minute for testing, ideally 12 hours)
-        // TODO: Make grace period configurable via environment variable
-        const gracePeriodMinutes = 1; // For testing - should be 720 (12 hours) in production
-        const autoReleaseDate = new Date();
-        autoReleaseDate.setMinutes(autoReleaseDate.getMinutes() + gracePeriodMinutes);
+      const performerUid = assigneeProfile?.uid;
+      const taskAmount = task.budget?.amount || 0;
 
-        // Set auto-release date instead of immediate release
-        const autoReleaseResult = await PaymentClient.setAutoReleaseDate(
-          escrow.razorpayOrderId,
-          autoReleaseDate
-        );
+      if (performerUid && taskAmount > 0) {
+        const payoutResult = await PaymentClient.processTaskCompletionPayout({
+          taskId,
+          performerUid,
+          amount: taskAmount,
+          taskTitle: task.title,
+        });
 
-        if (autoReleaseResult.success) {
-          logger.info(`✅ Escrow auto-release date set successfully for task ${taskId}`, {
-            escrowId: escrow.escrowId,
-            razorpayOrderId: escrow.razorpayOrderId,
-            amount: escrow.amountInRupees,
-            autoReleaseDate: autoReleaseDate.toISOString(),
-            gracePeriodMinutes,
+        if (payoutResult.success) {
+          logger.info(`✅ Task completion payout processed for task ${taskId}`, {
+            performerUid,
+            payoutId: payoutResult.payout?.payoutId,
+            netAmount: payoutResult.payout?.netAmount,
+          });
+
+          await InAppNotificationClient.send({
+            userId: task.assigneeId!.toString(),
+            title: 'Amount credited',
+            body: `Rs ${payoutResult.payout?.netAmount || taskAmount} credited for \"${task.title}\".`,
+            type: 'success',
+            category: 'payments',
+            data: {
+              taskId,
+              payoutId: payoutResult.payout?.payoutId,
+              actionUrl: '/profile?section=payments',
+            },
+          });
+        } else if (payoutResult.requiresBankAccount) {
+          logger.warn(`Payout pending bank account for task ${taskId}`, {
+            performerUid,
+            error: payoutResult.error,
+          });
+
+          await InAppNotificationClient.send({
+            userId: task.assigneeId!.toString(),
+            title: 'Add account to get amount',
+            body: 'Add and verify your bank account to receive your task payout.',
+            type: 'warning',
+            category: 'payments',
+            data: {
+              taskId,
+              actionUrl: '/profile/verify/bank',
+            },
           });
         } else {
-          logger.warn(`⚠️ Failed to set auto-release date for task ${taskId}:`, autoReleaseResult.error);
-          // Don't fail the request - task is still marked as completed
+          logger.warn(`Task payout failed for task ${taskId}`, {
+            performerUid,
+            error: payoutResult.error,
+          });
         }
       } else {
-        logger.info(`No escrow found for task ${taskId} - skipping payment auto-release setup`);
+        logger.warn(`Payout skipped for task ${taskId}: performer UID or task amount missing`, {
+          hasPerformerUid: Boolean(performerUid),
+          taskAmount,
+        });
       }
     } catch (paymentError) {
-      // Log payment error but don't fail the request
-      // Task is still marked as completed
-      logger.error(`Error setting auto-release date for task ${taskId}:`, paymentError);
+      logger.error(`Error processing payout for task ${taskId}:`, paymentError);
     }
 
     // Emit real-time proof approval

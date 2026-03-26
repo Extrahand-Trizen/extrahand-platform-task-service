@@ -242,6 +242,62 @@ export class PaymentClient {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to cancel auto-release' };
     }
   }
+
+  /**
+   * Process payout directly when task completion is approved (non-escrow flow)
+   */
+  static async processTaskCompletionPayout(params: {
+    taskId: string;
+    performerUid: string;
+    amount: number;
+    taskTitle?: string;
+  }): Promise<{ success: boolean; payout?: any; requiresBankAccount?: boolean; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payouts/task-completion`,
+        params,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        }
+      );
+
+      if (response.data.success) {
+        return {
+          success: true,
+          payout: response.data.payout,
+        };
+      }
+
+      return {
+        success: false,
+        requiresBankAccount: response.data.requiresBankAccount,
+        error: response.data.error || 'Failed to process payout',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<any>;
+        return {
+          success: false,
+          requiresBankAccount: Boolean(axiosError.response?.data?.requiresBankAccount),
+          error: axiosError.response?.data?.error || axiosError.message,
+        };
+      }
+
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to process payout',
+      };
+    }
+  }
 }
 
 
