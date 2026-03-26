@@ -59,9 +59,15 @@ export class TaskController {
       throw new BadRequestError('Latitude and longitude required');
     }
 
+    const parsedLat = parseFloat(lat as string);
+    const parsedLng = parseFloat(lng as string);
+    if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLng)) {
+      throw new BadRequestError('Invalid latitude/longitude');
+    }
+
     const result = await TaskService.getNearbyTasks({
-      lat: parseFloat(lat as string),
-      lng: parseFloat(lng as string),
+      lat: parsedLat,
+      lng: parsedLng,
       radiusKm: radiusKm ? parseFloat(radiusKm as string) : undefined,
       limit: limit ? parseInt(limit as string) : undefined,
       status: status as any,

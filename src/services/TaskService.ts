@@ -391,6 +391,9 @@ export class TaskService {
     status?: TaskStatus;
   }): Promise<{ tasks: ITask[]; pagination: any; location: any }> {
     const { lat, lng, radiusKm = 10, limit = 50, status = "open" } = params;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new BadRequestError("Invalid latitude/longitude");
+    }
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const radiusMeters = radiusKm * 1000;
 
@@ -413,7 +416,16 @@ export class TaskService {
       .sort({ createdAt: -1 })
       .lean();
 
-    const total = await Task.countDocuments(query);
+    // NOTE: countDocuments with $near can fail on some MongoDB versions/tiers.
+    // Use $geoWithin + $centerSphere for count instead.
+    const total = await Task.countDocuments({
+      status,
+      "location.coordinates": {
+        $geoWithin: {
+          $centerSphere: [[lng, lat], radiusKm / 6378.1], // Earth radius in km
+        },
+      },
+    });
 
     return {
       tasks: tasks as unknown as ITask[],
