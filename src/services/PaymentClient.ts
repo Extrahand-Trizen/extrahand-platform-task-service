@@ -257,6 +257,13 @@ export class PaymentClient {
         this.initialize();
       }
 
+      logger.info('➡️ Calling payment-service task completion payout', {
+        url: `${this.baseURL}/api/v1/payouts/task-completion`,
+        taskId: params.taskId,
+        performerUid: params.performerUid,
+        amount: params.amount,
+      });
+
       const response = await axios.post(
         `${this.baseURL}/api/v1/payouts/task-completion`,
         params,
@@ -269,6 +276,14 @@ export class PaymentClient {
           timeout: 15000,
         }
       );
+
+      logger.info('⬅️ payment-service payout response', {
+        taskId: params.taskId,
+        httpStatus: response.status,
+        responseSuccess: response.data?.success,
+        requiresBankAccount: response.data?.requiresBankAccount,
+        payoutId: response.data?.payout?.payoutId,
+      });
 
       if (response.data.success) {
         return {
@@ -285,6 +300,13 @@ export class PaymentClient {
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError<any>;
+        logger.error('❌ payment-service payout call failed', {
+          taskId: params.taskId,
+          performerUid: params.performerUid,
+          httpStatus: axiosError.response?.status,
+          responseData: axiosError.response?.data,
+          message: axiosError.message,
+        });
         return {
           success: false,
           requiresBankAccount: Boolean(axiosError.response?.data?.requiresBankAccount),

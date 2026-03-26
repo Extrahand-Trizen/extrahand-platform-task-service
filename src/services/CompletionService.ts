@@ -304,6 +304,12 @@ export class CompletionService {
       const taskAmount = task.budget?.amount || 0;
 
       if (performerUid && taskAmount > 0) {
+          logger.info(`🔔 Triggering task completion payout`, {
+            taskId,
+            performerUid,
+            taskAmount,
+            taskTitle: task.title,
+          });
         const payoutResult = await PaymentClient.processTaskCompletionPayout({
           taskId,
           performerUid,
