@@ -344,7 +344,7 @@ export class CompletionService {
             category: 'payments',
             data: {
               taskId,
-              actionUrl: '/profile/verify/bank',
+              actionUrl: '/profile?section=bank-account',
             },
           });
         } else {
