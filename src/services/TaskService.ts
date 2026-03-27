@@ -14,6 +14,7 @@ import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { Fast2SMSClient } from "../clients/Fast2SMSClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
+import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
@@ -1685,6 +1686,62 @@ export class TaskService {
           taskId,
           error: error instanceof Error ? error.message : "Unknown error",
         });
+      }
+
+      // Trigger direct payout workflow (same behavior as CompletionService.approveCompletion)
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const assigneeProfile = task.assigneeId
+          ? await Profile.findOne({ _id: task.assigneeId })
+          : null;
+
+        const performerUid = assigneeProfile?.uid;
+        const taskAmount = task.budget?.amount || 0;
+
+        if (performerUid && taskAmount > 0) {
+          logger.info(`🔔 Triggering task completion payout from updateTaskStatus`, {
+            taskId,
+            performerUid,
+            taskAmount,
+            statusTransition: `${task.status} -> ${status}`,
+          });
+
+          const payoutResult = await PaymentClient.processTaskCompletionPayout({
+            taskId,
+            performerUid,
+            amount: taskAmount,
+            taskTitle: task.title,
+          });
+
+          if (payoutResult.success) {
+            logger.info(`✅ Task completion payout processed from updateTaskStatus`, {
+              taskId,
+              performerUid,
+              payoutId: payoutResult.payout?.payoutId,
+              netAmount: payoutResult.payout?.netAmount,
+            });
+          } else if (payoutResult.requiresBankAccount) {
+            logger.warn(`Payout pending bank account from updateTaskStatus`, {
+              taskId,
+              performerUid,
+              error: payoutResult.error,
+            });
+          } else {
+            logger.warn(`Task payout failed from updateTaskStatus`, {
+              taskId,
+              performerUid,
+              error: payoutResult.error,
+            });
+          }
+        } else {
+          logger.warn(`Payout skipped from updateTaskStatus: performer UID or task amount missing`, {
+            taskId,
+            hasPerformerUid: Boolean(performerUid),
+            taskAmount,
+          });
+        }
+      } catch (paymentError) {
+        logger.error(`Error processing payout from updateTaskStatus for task ${taskId}:`, paymentError);
       }
     }
 
