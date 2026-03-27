@@ -5,6 +5,7 @@ import { ApplicationService } from '../services/ApplicationService';
 import { BadRequestError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
+import logger from '../config/logger';
 
 export class TaskController {
   /**
@@ -195,13 +196,21 @@ export class TaskController {
    */
   static async updateTaskStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { status, cancellationReason } = req.body;
+    const taskId = req.params.id;
+
+    logger.info('➡️ TaskController.updateTaskStatus called', {
+      taskId,
+      profileId: req.user?.profileId,
+      userUid: req.user?.uid,
+      status,
+    });
 
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
     const task = await TaskService.updateTaskStatus(
-      req.params.id,
+      taskId,
       req.user!.profileId,
       status,
       { cancellationReason }
