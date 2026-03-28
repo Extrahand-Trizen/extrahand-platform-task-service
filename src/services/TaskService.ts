@@ -1444,6 +1444,28 @@ export class TaskService {
     await Task.findByIdAndUpdate(taskId, { $inc: { views: 1 } });
   }
 
+  /** Scheduled start for cancellation fee policy (aligned with web tracking UI). */
+  private static getTaskStartDateForCancellationPolicy(task: ITask): Date {
+    const now = Date.now();
+    if (!task.scheduledDate) {
+      return new Date(now + 999 * 60 * 60 * 1000);
+    }
+    const d = new Date(task.scheduledDate);
+    const ts = task.scheduledTimeStart;
+    if (ts && typeof ts === "string") {
+      const timeMatch = ts.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+      if (timeMatch) {
+        let hours = parseInt(timeMatch[1], 10);
+        const mins = parseInt(timeMatch[2], 10);
+        const mod = timeMatch[3]?.toLowerCase();
+        if (mod === "pm" && hours < 12) hours += 12;
+        if (mod === "am" && hours === 12) hours = 0;
+        d.setHours(hours, mins, 0, 0);
+      }
+    }
+    return d;
+  }
+
   /**
    * Update task status
    */
@@ -1520,6 +1542,45 @@ export class TaskService {
     // Once work starts, cancellation is not allowed.
     if (status === "cancelled" && task.status !== "assigned") {
       throw new BadRequestError("Task can only be cancelled before it is started");
+    }
+
+    if (status === "cancelled") {
+      const escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      if (escrow) {
+        const isRequesterCancelled = task.requesterId.equals(profileId);
+        const Profile = mongoose.connection.collection("profiles");
+        const cancellerProfile = await Profile.findOne({ _id: profileId });
+        const rawUid =
+          cancellerProfile && typeof cancellerProfile === "object" && "uid" in cancellerProfile
+            ? (cancellerProfile as { uid?: unknown }).uid
+            : undefined;
+        const uid = typeof rawUid === "string" ? rawUid : undefined;
+        const taskStart = TaskService.getTaskStartDateForCancellationPolicy(task);
+        const taskBudgetAmount =
+          task.budget && typeof task.budget === "object" && "amount" in task.budget
+            ? Number((task.budget as { amount: number }).amount)
+            : undefined;
+        const payResult = await PaymentClient.cancelPaymentForTask({
+          taskId,
+          reason: options?.cancellationReason,
+          userId: uid,
+          cancelledBy: isRequesterCancelled ? "poster" : "performer",
+          taskStartDate: taskStart.toISOString(),
+          assignedAt: task.assignedAt
+            ? new Date(task.assignedAt).toISOString()
+            : undefined,
+          feeBaseAmount:
+            taskBudgetAmount !== undefined && Number.isFinite(taskBudgetAmount)
+              ? taskBudgetAmount
+              : undefined,
+        });
+        if (!payResult.success) {
+          throw new BadRequestError(
+            payResult.error ||
+              "Payment could not be cancelled or refunded. Please try again or contact support."
+          );
+        }
+      }
     }
 
     const updateData: any = {

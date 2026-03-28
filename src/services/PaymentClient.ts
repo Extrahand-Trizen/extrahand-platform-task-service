@@ -320,6 +320,81 @@ export class PaymentClient {
       };
     }
   }
+
+  /**
+   * Cancel escrow / trigger Razorpay payment refund when a task is cancelled (service-to-service).
+   * POST /api/v1/payment/cancel
+   */
+  static async cancelPaymentForTask(params: {
+    taskId: string;
+    reason?: string;
+    userId?: string;
+    cancelledBy: 'poster' | 'performer';
+    taskStartDate: string;
+    assignedAt?: string | null;
+    /** Task budget (rupees) — %-fee base to match cancel UI */
+    feeBaseAmount?: number;
+  }): Promise<{
+    success: boolean;
+    cancelled?: boolean;
+    refundRequired?: boolean;
+    refund?: unknown;
+    error?: string;
+  }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payment/cancel`,
+        {
+          taskId: params.taskId,
+          reason: params.reason,
+          userId: params.userId,
+          cancelledBy: params.cancelledBy,
+          taskStartDate: params.taskStartDate,
+          assignedAt: params.assignedAt ?? undefined,
+          feeBaseAmount: params.feeBaseAmount,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 30000,
+        }
+      );
+
+      const data = response.data;
+      if (data?.success) {
+        return {
+          success: true,
+          cancelled: data.cancelled,
+          refundRequired: data.refundRequired,
+          refund: data.refund,
+        };
+      }
+
+      return {
+        success: false,
+        error: data?.error || data?.message || 'Failed to cancel payment',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string; message?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.response?.data?.message || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to cancel payment',
+      };
+    }
+  }
 }
 
 
