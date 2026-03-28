@@ -334,6 +334,7 @@ export class PaymentClient {
     assignedAt?: string | null;
     /** Task budget (rupees) — %-fee base to match cancel UI */
     feeBaseAmount?: number;
+    taskTitle?: string;
   }): Promise<{
     success: boolean;
     cancelled?: boolean;
@@ -356,6 +357,7 @@ export class PaymentClient {
           taskStartDate: params.taskStartDate,
           assignedAt: params.assignedAt ?? undefined,
           feeBaseAmount: params.feeBaseAmount,
+          taskTitle: params.taskTitle,
         },
         {
           headers: {

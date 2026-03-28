@@ -1573,6 +1573,7 @@ export class TaskService {
             taskBudgetAmount !== undefined && Number.isFinite(taskBudgetAmount)
               ? taskBudgetAmount
               : undefined,
+          taskTitle: typeof task.title === "string" ? task.title : undefined,
         });
         if (!payResult.success) {
           throw new BadRequestError(
