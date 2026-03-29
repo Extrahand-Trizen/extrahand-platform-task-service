@@ -43,7 +43,8 @@ export class PaymentClient {
 
       return null;
     } catch (error) {
-      // Don't throw error - escrow lookup is non-critical for task completion
+      // 404 means no escrow exists for this task (allowed path).
+      // Any other failure must bubble up so cancellation doesn't silently skip refund logic.
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError;
         if (axiosError.response?.status === 404) {
@@ -56,13 +57,20 @@ export class PaymentClient {
           status: axiosError.response?.status,
           message: axiosError.message
         });
+        throw new Error(
+          axiosError.response?.data && typeof axiosError.response.data === 'object'
+            ? JSON.stringify(axiosError.response.data)
+            : `Failed to get escrow by task ID: ${axiosError.message}`
+        );
       } else {
         logger.error('Failed to get escrow by task ID', {
           taskId,
           error: error instanceof Error ? error.message : 'Unknown error'
         });
+        throw error instanceof Error
+          ? error
+          : new Error('Failed to get escrow by task ID');
       }
-      return null;
     }
   }
 
