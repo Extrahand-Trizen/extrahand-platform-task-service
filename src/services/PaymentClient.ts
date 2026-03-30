@@ -355,6 +355,15 @@ export class PaymentClient {
         this.initialize();
       }
 
+      logger.info('[PaymentClient.cancelPaymentForTask] Calling payment cancel API', {
+        baseURL: this.baseURL,
+        taskId: params.taskId,
+        cancelledBy: params.cancelledBy,
+        taskStartDate: params.taskStartDate,
+        hasAssignedAt: Boolean(params.assignedAt),
+        feeBaseAmount: params.feeBaseAmount,
+      });
+
       const response = await axios.post(
         `${this.baseURL}/api/v1/payment/cancel`,
         {
@@ -378,6 +387,15 @@ export class PaymentClient {
       );
 
       const data = response.data;
+      logger.info('[PaymentClient.cancelPaymentForTask] Cancel API response received', {
+        httpStatus: response.status,
+        success: Boolean(data?.success),
+        cancelled: data?.cancelled,
+        refundRequired: data?.refundRequired,
+        refund: data?.refund,
+        error: data?.error || data?.message,
+      });
+
       if (data?.success) {
         return {
           success: true,
@@ -394,11 +412,23 @@ export class PaymentClient {
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const ax = error as AxiosError<{ error?: string; message?: string }>;
+        logger.error('[PaymentClient.cancelPaymentForTask] Cancel API call failed', {
+          taskId: params.taskId,
+          cancelledBy: params.cancelledBy,
+          httpStatus: ax.response?.status,
+          responseData: ax.response?.data,
+          message: ax.message,
+        });
         return {
           success: false,
           error: ax.response?.data?.error || ax.response?.data?.message || ax.message,
         };
       }
+      logger.error('[PaymentClient.cancelPaymentForTask] Cancel API call failed (non-axios)', {
+        taskId: params.taskId,
+        cancelledBy: params.cancelledBy,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to cancel payment',
