@@ -6,6 +6,7 @@ import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
 import { PaymentClient } from '../services/PaymentClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
+import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
 import { TaskService } from './TaskService';
@@ -47,13 +48,10 @@ export class CompletionService {
       throw new ForbiddenError('Only the assigned performer can submit completion proof');
     }
 
-    // Validate proof URLs
-    if (!proofUrls || !Array.isArray(proofUrls) || proofUrls.length === 0) {
-      throw new BadRequestError('At least one proof image is required');
-    }
+    const normalizedProofUrls = Array.isArray(proofUrls) ? proofUrls : [];
 
-    // Update task with completion proof
-    const completionProof = proofUrls.map(url => ({
+    // Proof is optional: if no images are provided, still allow moving to review.
+    const completionProof = normalizedProofUrls.map(url => ({
       url,
       filename: url.split('/').pop() || 'proof.jpg',
       uploadedAt: new Date(),
@@ -84,13 +82,50 @@ export class CompletionService {
       const assigneeProfile = task.assigneeId
         ? await Profile.findOne({ _id: task.assigneeId })
         : null;
+      const approvalPath = `/tasks/${taskId}/track?pendingApproval=1`;
+      const approvalUrl = `${config.WEB_APP_URL}${approvalPath}`;
+
+      if (requesterProfile?.uid) {
+        await NotificationClient.send({
+          eventKey: 'TASK_UPDATED',
+          category: 'taskUpdates',
+          actorId: performerProfileId,
+          recipients: [requesterProfile.uid],
+          entity: { type: 'task', id: taskId },
+          title: 'Task ready for your approval',
+          body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
+          data: {
+            taskId,
+            status: 'review',
+            action: 'approve_completion',
+            actionUrl: approvalPath,
+            taskUrl: approvalUrl,
+          },
+        });
+      }
+
+      await InAppNotificationClient.send({
+        userId: task.requesterId.toString(),
+        title: 'Task ready for your approval',
+        body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
+        type: 'info',
+        category: 'taskUpdates',
+        data: {
+          taskId,
+          status: 'review',
+          action: 'approve_completion',
+          actionUrl: approvalPath,
+          taskUrl: approvalUrl,
+        },
+      });
+
       if (requesterProfile?.email) {
         EmailServiceClient.sendCompletionProofSubmitted(requesterProfile.email, {
           requesterName: requesterProfile.name || 'There',
           assigneeName: assigneeProfile?.name || 'Your tasker',
           taskTitle: task.title,
           submittedAt: new Date().toLocaleString(),
-          taskUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
+          taskUrl: approvalUrl,
           userId: requesterProfile.uid,
         }).catch((err) =>
           logger.error('Error sending completion_proof_submitted email', {
@@ -258,44 +293,80 @@ export class CompletionService {
       });
     }
 
-    // Trigger payment auto-release workflow - Set auto-release date with grace period
-    // This allows for revisions before automatic payout
+    // Trigger direct payout workflow (RazorpayX-only, non-escrow)
     try {
-      // First, check if there's an escrow for this task
-      const escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      const Profile = mongoose.connection.collection('profiles');
+      const assigneeProfile = task.assigneeId
+        ? await Profile.findOne({ _id: task.assigneeId })
+        : null;
 
-      if (escrow && escrow.razorpayOrderId) {
-        // Calculate auto-release date (grace period: 1 minute for testing, ideally 12 hours)
-        // TODO: Make grace period configurable via environment variable
-        const gracePeriodMinutes = 1; // For testing - should be 720 (12 hours) in production
-        const autoReleaseDate = new Date();
-        autoReleaseDate.setMinutes(autoReleaseDate.getMinutes() + gracePeriodMinutes);
+      const performerUid = assigneeProfile?.uid;
+      const taskAmount = task.budget?.amount || 0;
 
-        // Set auto-release date instead of immediate release
-        const autoReleaseResult = await PaymentClient.setAutoReleaseDate(
-          escrow.razorpayOrderId,
-          autoReleaseDate
-        );
+      if (performerUid && taskAmount > 0) {
+          logger.info(`🔔 Triggering task completion payout`, {
+            taskId,
+            performerUid,
+            taskAmount,
+            taskTitle: task.title,
+          });
+        const payoutResult = await PaymentClient.processTaskCompletionPayout({
+          taskId,
+          performerUid,
+          amount: taskAmount,
+          taskTitle: task.title,
+        });
 
-        if (autoReleaseResult.success) {
-          logger.info(`✅ Escrow auto-release date set successfully for task ${taskId}`, {
-            escrowId: escrow.escrowId,
-            razorpayOrderId: escrow.razorpayOrderId,
-            amount: escrow.amountInRupees,
-            autoReleaseDate: autoReleaseDate.toISOString(),
-            gracePeriodMinutes,
+        if (payoutResult.success) {
+          logger.info(`✅ Task completion payout processed for task ${taskId}`, {
+            performerUid,
+            payoutId: payoutResult.payout?.payoutId,
+            netAmount: payoutResult.payout?.netAmount,
+          });
+
+          await InAppNotificationClient.send({
+            userId: task.assigneeId!.toString(),
+            title: 'Amount credited',
+            body: `Rs ${payoutResult.payout?.netAmount || taskAmount} credited for \"${task.title}\".`,
+            type: 'success',
+            category: 'payments',
+            data: {
+              taskId,
+              payoutId: payoutResult.payout?.payoutId,
+              actionUrl: '/profile?section=payments',
+            },
+          });
+        } else if (payoutResult.requiresBankAccount) {
+          logger.warn(`Payout pending bank account for task ${taskId}`, {
+            performerUid,
+            error: payoutResult.error,
+          });
+
+          await InAppNotificationClient.send({
+            userId: task.assigneeId!.toString(),
+            title: 'Add account to get amount',
+            body: 'Add and verify your bank account to receive your task payout.',
+            type: 'warning',
+            category: 'payments',
+            data: {
+              taskId,
+              actionUrl: '/profile?section=bank-account',
+            },
           });
         } else {
-          logger.warn(`⚠️ Failed to set auto-release date for task ${taskId}:`, autoReleaseResult.error);
-          // Don't fail the request - task is still marked as completed
+          logger.warn(`Task payout failed for task ${taskId}`, {
+            performerUid,
+            error: payoutResult.error,
+          });
         }
       } else {
-        logger.info(`No escrow found for task ${taskId} - skipping payment auto-release setup`);
+        logger.warn(`Payout skipped for task ${taskId}: performer UID or task amount missing`, {
+          hasPerformerUid: Boolean(performerUid),
+          taskAmount,
+        });
       }
     } catch (paymentError) {
-      // Log payment error but don't fail the request
-      // Task is still marked as completed
-      logger.error(`Error setting auto-release date for task ${taskId}:`, paymentError);
+      logger.error(`Error processing payout for task ${taskId}:`, paymentError);
     }
 
     // Emit real-time proof approval
@@ -328,12 +399,12 @@ export class CompletionService {
       throw new BadRequestError('Task is not pending approval');
     }
 
-    // Update task status - move back to in_progress so performer can fix issues
+    // Update task status - move back to started so performer can revise and resubmit
     // and record feedback so both poster and tasker can see the requested changes
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
-        status: 'in_progress',
+        status: 'started',
         completionStatus: 'rejected',
         completionRejectedReason: reason,
         completionRejectedAt: new Date(),
@@ -358,6 +429,55 @@ export class CompletionService {
 
     // Emit real-time proof rejection
     emitProofRejected(taskId, { task: updatedTask, reason });
+
+    // Send notifications to tasker about rejection and request to resubmit
+    try {
+      const Profile = mongoose.connection.collection('profiles');
+      const assigneeProfile = task.assigneeId
+        ? await Profile.findOne({ _id: task.assigneeId })
+        : null;
+      const resubmitUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
+
+      // Notify tasker via FCM + in-app
+      if (assigneeProfile?.uid) {
+        // FCM Notification
+        await NotificationClient.send({
+          eventKey: 'TASK_UPDATED',
+          category: 'taskUpdates',
+          actorId: taskOwnerProfileId,
+          recipients: [assigneeProfile.uid],
+          entity: { type: 'task', id: taskId },
+          title: 'Changes requested on your submission',
+          body: `${reason || 'Please revise and resubmit your work.'}`,
+          data: {
+            taskId,
+            status: 'started',
+            action: 'resubmit_required',
+            taskUrl: resubmitUrl,
+          },
+        });
+
+        // In-app Notification
+        await InAppNotificationClient.send({
+       userId: task.assigneeId!.toString(),
+          title: 'Changes requested on your submission',
+          body: `${reason || 'Please revise and resubmit your work.'}`,
+          type: 'warning',
+          category: 'taskUpdates',
+          data: {
+            taskId,
+            status: 'started',
+            action: 'resubmit_required',
+            taskUrl: resubmitUrl,
+          },
+        });
+      }
+    } catch (error) {
+      logger.error('Error sending rejection notification', {
+        taskId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
 
     TaskService.invalidateTaskCache(taskId);
     return updatedTask;

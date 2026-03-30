@@ -5,6 +5,7 @@ import { ApplicationService } from '../services/ApplicationService';
 import { BadRequestError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
+import logger from '../config/logger';
 
 export class TaskController {
   /**
@@ -59,9 +60,15 @@ export class TaskController {
       throw new BadRequestError('Latitude and longitude required');
     }
 
+    const parsedLat = parseFloat(lat as string);
+    const parsedLng = parseFloat(lng as string);
+    if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLng)) {
+      throw new BadRequestError('Invalid latitude/longitude');
+    }
+
     const result = await TaskService.getNearbyTasks({
-      lat: parseFloat(lat as string),
-      lng: parseFloat(lng as string),
+      lat: parsedLat,
+      lng: parsedLng,
       radiusKm: radiusKm ? parseFloat(radiusKm as string) : undefined,
       limit: limit ? parseInt(limit as string) : undefined,
       status: status as any,
@@ -189,19 +196,88 @@ export class TaskController {
    */
   static async updateTaskStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { status, cancellationReason } = req.body;
+    const taskId = req.params.id;
+
+    logger.info('➡️ TaskController.updateTaskStatus called', {
+      taskId,
+      profileId: req.user?.profileId,
+      userUid: req.user?.uid,
+      status,
+    });
 
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
     const task = await TaskService.updateTaskStatus(
-      req.params.id,
+      taskId,
       req.user!.profileId,
       status,
       { cancellationReason }
     );
 
     ApiResponse.success(res, task, 'Task status updated successfully');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/start-otp/send
+   * Generate and send task start OTP to requester
+   */
+  static async sendStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await TaskService.requestStartOtp(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+      { isResend: false }
+    );
+
+    ApiResponse.success(res, result, 'Task start OTP sent to requester');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/start-otp/resend
+   * Resend a fresh task start OTP to requester
+   */
+  static async resendStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await TaskService.requestStartOtp(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+      { isResend: true }
+    );
+
+    ApiResponse.success(res, result, 'Task start OTP resent to requester');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/start-otp/verify
+   * Verify OTP and mark task as started
+   */
+  static async verifyStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { otp } = req.body;
+    if (!otp) {
+      throw new BadRequestError('OTP is required');
+    }
+
+    const task = await TaskService.verifyStartOtp(
+      req.params.id,
+      req.user!.profileId,
+      String(otp)
+    );
+
+    ApiResponse.success(res, task, 'OTP verified. Task started successfully');
   }
 
   /**

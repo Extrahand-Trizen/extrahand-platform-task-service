@@ -1,6 +1,7 @@
 import axios, { AxiosError } from 'axios';
 import logger from '../config/logger';
 import { config } from '../config/env';
+import { NotificationPreferenceChecker } from '../services/NotificationPreferenceChecker';
 
 /**
  * EmailServiceClient – HTTP client for extrahand-email-service.
@@ -89,7 +90,46 @@ export class EmailServiceClient {
     }
   }
 
-  private static sendTemplate(to: string, template: string, data: Record<string, unknown>): Promise<boolean> {
+  private static resolveCategoryForTemplate(
+    template: string
+  ): 'taskUpdates' | 'taskReminders' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'transactional' {
+    switch (template) {
+      case 'task_created_recommended':
+        return 'recommendedTaskAlerts';
+      case 'task_created_keyword':
+        return 'keywordTaskAlerts';
+      case 'task_reminder':
+        return 'taskReminders';
+      case 'task_start_otp':
+        return 'transactional';
+      default:
+        return 'taskUpdates';
+    }
+  }
+
+  private static async sendTemplate(to: string, template: string, data: Record<string, unknown>): Promise<boolean> {
+    const userId = typeof data.userId === 'string' ? data.userId : '';
+    const category = this.resolveCategoryForTemplate(template);
+
+    if (!userId) {
+      logger.warn('EmailServiceClient: Skipping notification email because userId is missing', {
+        template,
+        to,
+        category,
+      });
+      return false;
+    }
+
+    const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(userId, category);
+    if (!emailEnabled) {
+      logger.info('EmailServiceClient: Skipping notification email due to user preferences', {
+        template,
+        userId,
+        category,
+      });
+      return false;
+    }
+
     return this.sendRequest('/send', {
       to,
       template,
@@ -335,5 +375,23 @@ export class EmailServiceClient {
   }): Promise<boolean> {
     const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
     return this.sendTemplate(to, 'changes_requested', { ...data, taskUrl });
+  }
+
+  /**
+   * Send task start OTP to requester (poster)
+   * Sent when tasker clicks "Start Task" and OTP is generated
+   */
+  static sendTaskStartOtp(to: string, data: {
+    requesterName: string;
+    taskerName: string;
+    taskTitle: string;
+    otp: string;
+    expiresAt?: string;
+    taskUrl?: string;
+    platformName?: string;
+    userId?: string;
+  }): Promise<boolean> {
+    const taskUrl = data.taskUrl || `${this.webAppUrl || 'https://extrahand.in'}/my-tasks`;
+    return this.sendTemplate(to, 'task_start_otp', { ...data, taskUrl });
   }
 }

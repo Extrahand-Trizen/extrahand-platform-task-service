@@ -7,19 +7,36 @@ export class NotificationPreferenceChecker {
   private static serviceAuthToken: string = validateEnv().SERVICE_AUTH_TOKEN || '';
 
   /**
-   * Check if a user has enabled email notifications for a specific category
+   * Check if a user has enabled email notifications for a specific category.
+   *
+   * Strategy: fail-open.
+   * - We BLOCK only when user-service explicitly returns canSend=false.
+   * - If the service is unreachable or misconfigured, we allow the email through.
+   *   This avoids blocking all task emails during user-service downtime.
+   * - The /can-send endpoint has no auth requirement, so a missing
+   *   SERVICE_AUTH_TOKEN no longer silently blocks all emails.
+   *
    * @param userUid - Firebase UID of the user
-   * @param category - Notification category (e.g., 'taskUpdates', 'keywordTaskAlerts')
-   * @returns true if notifications should be sent, false otherwise
+   * @param category - Notification category (e.g., 'taskUpdates')
+   * @returns true if email should be sent, false if user has disabled it
    */
   static async isEmailNotificationEnabled(
     userUid: string,
     category: 'taskUpdates' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'payments' | 'transactional' | 'system' | 'taskReminders'
   ): Promise<boolean> {
     try {
-      if (!this.userServiceUrl || !this.serviceAuthToken) {
-        logger.warn('NotificationPreferenceChecker: User service not configured');
-        return false; // Do not send if preferences cannot be checked
+      if (!this.userServiceUrl) {
+        logger.warn('NotificationPreferenceChecker: USER_SERVICE_URL not configured — allowing email (fail-open)');
+        return true;
+      }
+
+      const headers: Record<string, string> = {
+        'X-Service-Name': 'task-service',
+      };
+
+      // Include auth token only if available — /can-send doesn't require it
+      if (this.serviceAuthToken) {
+        headers['X-Service-Auth'] = this.serviceAuthToken;
       }
 
       const response = await axios.get(
@@ -27,37 +44,40 @@ export class NotificationPreferenceChecker {
         {
           params: {
             channel: 'email',
-            category: category,
+            category,
           },
-          headers: {
-            'X-Service-Auth': this.serviceAuthToken,
-            'X-Service-Name': 'task-service',
-          },
+          headers,
           timeout: 5000,
         }
       );
 
       const canSend = response.data?.data?.canSend;
-      
-      if (canSend === undefined) {
-        logger.warn('NotificationPreferenceChecker: Invalid response format', { userUid });
-        return false; // Do not send if response format is unclear
+
+      // Only block when user-service explicitly returns false
+      if (canSend === false) {
+        logger.info('NotificationPreferenceChecker: Email blocked — user preference is OFF', {
+          userUid,
+          category,
+        });
+        return false;
       }
 
-      logger.info('NotificationPreferenceChecker: Permission check result', {
+      logger.info('NotificationPreferenceChecker: Email allowed', {
         userUid,
         category,
         canSend,
       });
 
-      return canSend;
+      return true;
+
     } catch (error) {
-      logger.warn('NotificationPreferenceChecker: Failed to check preferences (blocking to avoid unwanted sends)', {
+      // fail-open: don't block emails when user-service is temporarily unreachable
+      logger.warn('NotificationPreferenceChecker: Could not reach user-service — allowing email (fail-open)', {
         userUid,
         category,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
-      return false; // Do not send if preferences cannot be checked
+      return true;
     }
   }
 }

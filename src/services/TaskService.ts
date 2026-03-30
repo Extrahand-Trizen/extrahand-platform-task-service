@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import crypto from "crypto";
 import Task, { ITask } from "../models/Task";
 import {
   BadRequestError,
@@ -11,7 +12,9 @@ import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { Fast2SMSClient } from "../clients/Fast2SMSClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
+import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
@@ -155,7 +158,18 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate flexibility createdAt updatedAt';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt';
+
+const START_OTP_TTL_MS = 10 * 60 * 1000;
+const START_OTP_MAX_ATTEMPTS = 5;
+
+function generateStartOtpCode(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function hashStartOtp(taskId: string, otp: string): string {
+  return crypto.createHash("sha256").update(`${taskId}:${otp}`).digest("hex");
+}
 
 export class TaskService {
   /**
@@ -382,6 +396,9 @@ export class TaskService {
     status?: TaskStatus;
   }): Promise<{ tasks: ITask[]; pagination: any; location: any }> {
     const { lat, lng, radiusKm = 10, limit = 50, status = "open" } = params;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new BadRequestError("Invalid latitude/longitude");
+    }
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const radiusMeters = radiusKm * 1000;
 
@@ -404,7 +421,16 @@ export class TaskService {
       .sort({ createdAt: -1 })
       .lean();
 
-    const total = await Task.countDocuments(query);
+    // NOTE: countDocuments with $near can fail on some MongoDB versions/tiers.
+    // Use $geoWithin + $centerSphere for count instead.
+    const total = await Task.countDocuments({
+      status,
+      "location.coordinates": {
+        $geoWithin: {
+          $centerSphere: [[lng, lat], radiusKm / 6378.1], // Earth radius in km
+        },
+      },
+    });
 
     return {
       tasks: tasks as unknown as ITask[],
@@ -587,6 +613,8 @@ export class TaskService {
         : undefined,
       scheduledTimeStart: taskData.scheduledTimeStart,
       scheduledTimeEnd: taskData.scheduledTimeEnd,
+      dateOption: taskData.dateOption,
+      timeSlot: taskData.timeSlot,
       flexibility: taskData.flexibility || "flexible",
       timeFlexibilityValue: taskData.timeFlexibilityValue,
       requirements: taskData.requirements || taskData.skillsRequired || [],
@@ -726,19 +754,33 @@ export class TaskService {
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-        await EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
-          requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
-          taskTitle: task.title,
-          taskUrl,
-          budget: task.budget?.amount,
-          category: mappedCategory,
-          location: task.location?.city || task.location?.address,
-          userId: requesterProfile.uid,
-        });
-        logger.info(`[TaskService.createTask] task_posted_confirmation email sent successfully`, {
-          taskId: task._id,
-          to: requesterProfile.email
-        });
+        const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
+          requesterProfile.uid,
+          'taskUpdates'
+        );
+
+        if (emailEnabled) {
+          await EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
+            requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
+            taskTitle: task.title,
+            taskUrl,
+            budget: task.budget?.amount,
+            category: mappedCategory,
+            location: task.location?.city || task.location?.address,
+            userId: requesterProfile.uid,
+          });
+          logger.info(`[TaskService.createTask] task_posted_confirmation email sent successfully`, {
+            taskId: task._id,
+            to: requesterProfile.email,
+            userId: requesterProfile.uid
+          });
+        } else {
+          logger.info(`[TaskService.createTask] task_posted_confirmation email skipped - preferences disabled`, {
+            taskId: task._id,
+            userId: requesterProfile.uid,
+            category: 'taskUpdates'
+          });
+        }
 
         // 📬 In-App Notification: task posted confirmation → requester
         try {
@@ -1406,6 +1448,28 @@ export class TaskService {
     await Task.findByIdAndUpdate(taskId, { $inc: { views: 1 } });
   }
 
+  /** Scheduled start for cancellation fee policy (aligned with web tracking UI). */
+  private static getTaskStartDateForCancellationPolicy(task: ITask): Date {
+    const now = Date.now();
+    if (!task.scheduledDate) {
+      return new Date(now + 999 * 60 * 60 * 1000);
+    }
+    const d = new Date(task.scheduledDate);
+    const ts = task.scheduledTimeStart;
+    if (ts && typeof ts === "string") {
+      const timeMatch = ts.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+      if (timeMatch) {
+        let hours = parseInt(timeMatch[1], 10);
+        const mins = parseInt(timeMatch[2], 10);
+        const mod = timeMatch[3]?.toLowerCase();
+        if (mod === "pm" && hours < 12) hours += 12;
+        if (mod === "am" && hours === 12) hours = 0;
+        d.setHours(hours, mins, 0, 0);
+      }
+    }
+    return d;
+  }
+
   /**
    * Update task status
    */
@@ -1413,7 +1477,7 @@ export class TaskService {
     taskId: string,
     profileId: mongoose.Types.ObjectId,
     status: TaskStatus,
-    options?: { cancellationReason?: string }
+    options?: { cancellationReason?: string; skipStartOtpValidation?: boolean }
   ): Promise<ITask> {
     const validStatuses: TaskStatus[] = [
       "open",
@@ -1462,6 +1526,68 @@ export class TaskService {
       }
     }
 
+    // OTP gate: performer cannot move assigned -> started/in_progress without successful OTP verification.
+    if (
+      (status === "started" || status === "in_progress") &&
+      task.status === "assigned" &&
+      isPerformer &&
+      !options?.skipStartOtpValidation
+    ) {
+      const startOtp = task.startOtp;
+      if (!startOtp?.verifiedAt) {
+        throw new BadRequestError("Start OTP verification required before starting task");
+      }
+
+      if (startOtp.expiresAt && new Date(startOtp.expiresAt).getTime() < Date.now()) {
+        throw new BadRequestError("Start OTP expired. Please resend and verify OTP again");
+      }
+    }
+
+    // Once work starts, cancellation is not allowed.
+    if (status === "cancelled" && task.status !== "assigned") {
+      throw new BadRequestError("Task can only be cancelled before it is started");
+    }
+
+    if (status === "cancelled") {
+      const escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      if (escrow) {
+        const isRequesterCancelled = task.requesterId.equals(profileId);
+        const Profile = mongoose.connection.collection("profiles");
+        const cancellerProfile = await Profile.findOne({ _id: profileId });
+        const rawUid =
+          cancellerProfile && typeof cancellerProfile === "object" && "uid" in cancellerProfile
+            ? (cancellerProfile as { uid?: unknown }).uid
+            : undefined;
+        const uid = typeof rawUid === "string" ? rawUid : undefined;
+        const taskStart = TaskService.getTaskStartDateForCancellationPolicy(task);
+        const taskBudgetAmount =
+          task.budget && typeof task.budget === "object" && "amount" in task.budget
+            ? Number((task.budget as { amount: number }).amount)
+            : undefined;
+        const payResult = await PaymentClient.cancelPaymentForTask({
+          taskId,
+          reason: options?.cancellationReason,
+          userId: uid,
+          cancelledBy: isRequesterCancelled ? "poster" : "performer",
+          taskStartDate: taskStart.toISOString(),
+          assignedAt: task.assignedAt
+            ? new Date(task.assignedAt).toISOString()
+            : undefined,
+          feeBaseAmount:
+            taskBudgetAmount !== undefined && Number.isFinite(taskBudgetAmount)
+              ? taskBudgetAmount
+              : undefined,
+          taskTitle: typeof task.title === "string" ? task.title : undefined,
+        });
+        if (!payResult.success) {
+          throw new BadRequestError(
+            payResult.error ||
+              "Payment could not be cancelled or refunded. Please try again or contact support."
+          );
+        }
+      }
+    }
+
     const updateData: any = {
       status,
       updatedAt: new Date(),
@@ -1475,6 +1601,11 @@ export class TaskService {
       updateData.cancelledAt = new Date();
       updateData.cancelledById = profileId; // ✅ Updated from cancelledBy
       updateData.cancellationReason = options?.cancellationReason;
+    }
+
+    // Clear OTP state once task leaves assigned state.
+    if (task.status === "assigned" && status !== "assigned") {
+      updateData.startOtp = undefined;
     }
 
     const updatedTask = await Task.findByIdAndUpdate(taskId, updateData, {
@@ -1622,10 +1753,277 @@ export class TaskService {
           error: error instanceof Error ? error.message : "Unknown error",
         });
       }
+
+      // Trigger direct payout workflow (same behavior as CompletionService.approveCompletion)
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const assigneeProfile = task.assigneeId
+          ? await Profile.findOne({ _id: task.assigneeId })
+          : null;
+
+        const performerUid = assigneeProfile?.uid;
+        const taskAmount = task.budget?.amount || 0;
+
+        if (performerUid && taskAmount > 0) {
+          logger.info(`🔔 Triggering task completion payout from updateTaskStatus`, {
+            taskId,
+            performerUid,
+            taskAmount,
+            statusTransition: `${task.status} -> ${status}`,
+          });
+
+          const payoutResult = await PaymentClient.processTaskCompletionPayout({
+            taskId,
+            performerUid,
+            amount: taskAmount,
+            taskTitle: task.title,
+          });
+
+          if (payoutResult.success) {
+            logger.info(`✅ Task completion payout processed from updateTaskStatus`, {
+              taskId,
+              performerUid,
+              payoutId: payoutResult.payout?.payoutId,
+              netAmount: payoutResult.payout?.netAmount,
+            });
+          } else if (payoutResult.requiresBankAccount) {
+            logger.warn(`Payout pending bank account from updateTaskStatus`, {
+              taskId,
+              performerUid,
+              error: payoutResult.error,
+            });
+          } else {
+            logger.warn(`Task payout failed from updateTaskStatus`, {
+              taskId,
+              performerUid,
+              error: payoutResult.error,
+            });
+          }
+        } else {
+          logger.warn(`Payout skipped from updateTaskStatus: performer UID or task amount missing`, {
+            taskId,
+            hasPerformerUid: Boolean(performerUid),
+            taskAmount,
+          });
+        }
+      } catch (paymentError) {
+        logger.error(`Error processing payout from updateTaskStatus for task ${taskId}:`, paymentError);
+      }
     }
 
     TaskService.invalidateTaskCache(taskId);
     return updatedTask as unknown as ITask;
+  }
+
+  /**
+   * Request or resend task start OTP.
+   * OTP is sent to requester (poster) and must be shared with tasker in person.
+   */
+  static async requestStartOtp(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    uid: string,
+    options?: { isResend?: boolean }
+  ): Promise<{ expiresAt: Date; sentTo: string }> {
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can request start OTP");
+    }
+
+    if (task.status !== "assigned") {
+      throw new BadRequestError("OTP can only be requested when task is in assigned status");
+    }
+
+    const Profile = mongoose.connection.collection("profiles");
+    const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+
+    if (!requesterProfile?.uid) {
+      throw new BadRequestError("Requester notification channel unavailable");
+    }
+
+    const otp = generateStartOtpCode();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + START_OTP_TTL_MS);
+
+    const nextResendCount = options?.isResend
+      ? (task.startOtp?.resendCount || 0) + 1
+      : task.startOtp?.resendCount || 0;
+
+    task.startOtp = {
+      codeHash: hashStartOtp(taskId, otp),
+      requestedAt: now,
+      expiresAt,
+      attempts: 0,
+      resendCount: nextResendCount,
+      requestedById: profileId,
+    };
+
+    await task.save();
+
+    const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
+
+    // Get tasker profile for email
+    const taskerProfile = await Profile.findOne({ _id: profileId });
+
+    // Event-driven notification via notification service (FCM/in-app delivery path).
+    await NotificationClient.send({
+      eventKey: "TASK_UPDATED",
+      category: "taskUpdates",
+      actorId: uid,
+      recipients: [requesterProfile.uid],
+      entity: {
+        type: "task",
+        id: taskId,
+      },
+      title: "Task Start OTP",
+      body: otpBody,
+      data: {
+        taskId,
+        otp,
+        otpType: "task_start",
+        expiresAt: expiresAt.toISOString(),
+      },
+    });
+
+    // Direct in-app notification fallback for requester.
+    const inAppSent = await InAppNotificationClient.send({
+      userId: task.requesterId.toString(),
+      title: "Task Start OTP",
+      body: otpBody,
+      type: "info",
+      category: "taskUpdates",
+      data: {
+        taskId,
+        otp,
+        otpType: "task_start",
+        expiresAt: expiresAt.toISOString(),
+      },
+    });
+
+    // Send OTP via email to requester
+    if (requesterProfile.email) {
+      logger.debug('[TaskService.requestStartOtp] Sending task_start_otp email', {
+        to: requesterProfile.email,
+        taskId,
+        isResend: options?.isResend
+      });
+      
+      EmailServiceClient.sendTaskStartOtp(requesterProfile.email, {
+        requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
+        taskerName: taskerProfile?.name || taskerProfile?.fullName || 'Tasker',
+        taskTitle: task.title,
+        otp,
+        expiresAt: expiresAt.toLocaleString('en-IN', { 
+          timeZone: 'Asia/Kolkata',
+          dateStyle: 'medium',
+          timeStyle: 'short'
+        }),
+        taskUrl: `${config.WEB_APP_URL || 'https://extrahand.in'}/tasks/${taskId}/track`,
+        userId: requesterProfile.uid,
+      }).catch(err => {
+        logger.warn('[TaskService.requestStartOtp] Failed to send OTP email', {
+          error: err.message,
+          taskId,
+          to: requesterProfile.email
+        });
+      });
+    }
+
+    // Send OTP via SMS to requester (Fast2SMS)
+    if (requesterProfile.phone) {
+      logger.debug('[TaskService.requestStartOtp] Sending task_start_otp SMS', {
+        to: requesterProfile.phone,
+        taskId,
+        isResend: options?.isResend
+      });
+      
+      Fast2SMSClient.sendTaskStartOTP(
+        requesterProfile.phone,
+        otp,
+        task.title
+      ).catch(err => {
+        logger.warn('[TaskService.requestStartOtp] Failed to send OTP SMS', {
+          error: err.message,
+          taskId,
+          to: requesterProfile.phone
+        });
+      });
+    }
+
+    if (!inAppSent) {
+      throw new BadRequestError("Unable to deliver OTP right now. Please try again.");
+    }
+
+    TaskService.invalidateTaskCache(taskId);
+
+    return {
+      expiresAt,
+      sentTo: requesterProfile.name || requesterProfile.fullName || "requester",
+    };
+  }
+
+  /**
+   * Verify task start OTP and mark task as started.
+   */
+  static async verifyStartOtp(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    otp: string
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can verify start OTP");
+    }
+
+    if (task.status !== "assigned") {
+      throw new BadRequestError("Task is not in assigned state");
+    }
+
+    const sanitizedOtp = (otp || "").trim();
+    if (!/^\d{6}$/.test(sanitizedOtp)) {
+      throw new BadRequestError("Please enter a valid 6-digit OTP");
+    }
+
+    if (!task.startOtp?.codeHash || !task.startOtp?.expiresAt) {
+      throw new BadRequestError("Start OTP not requested. Please request OTP first");
+    }
+
+    if (task.startOtp.expiresAt.getTime() < Date.now()) {
+      throw new BadRequestError("OTP expired. Please resend OTP");
+    }
+
+    if ((task.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
+      throw new BadRequestError("Too many invalid attempts. Please resend OTP");
+    }
+
+    const expectedHash = hashStartOtp(taskId, sanitizedOtp);
+    if (task.startOtp.codeHash !== expectedHash) {
+      task.startOtp.attempts = (task.startOtp.attempts || 0) + 1;
+      await task.save();
+
+      if (task.startOtp.attempts >= START_OTP_MAX_ATTEMPTS) {
+        throw new BadRequestError("OTP mismatch. Max attempts reached. Please resend OTP");
+      }
+
+      throw new BadRequestError("OTP mismatch");
+    }
+
+    task.startOtp.verifiedAt = new Date();
+    await task.save();
+
+    return TaskService.updateTaskStatus(taskId, profileId, "started", {
+      skipStartOtpValidation: true,
+    });
   }
 
   /**
@@ -1718,7 +2116,7 @@ export class TaskService {
       throw new BadRequestError('Can only request changes when task is in review status');
     }
 
-    // Add feedback to task and revert status to "assigned"
+    // Add feedback to task and revert status to "started" for quick revise/resubmit flow.
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
@@ -1729,7 +2127,8 @@ export class TaskService {
             createdAt: new Date(),
           }
         },
-        status: 'assigned',
+        status: 'started',
+        startOtp: undefined,
         updatedAt: new Date(),
       },
       { new: true, runValidators: true }

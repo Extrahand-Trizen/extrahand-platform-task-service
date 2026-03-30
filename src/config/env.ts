@@ -45,6 +45,9 @@ const envSchema = z.object({
   EMAIL_SERVICE_URL: z.string().url().optional(),
   WEB_APP_URL: z.string().url().optional(),
   
+  // SMS Configuration
+  FAST2SMS_API_KEY: z.string().optional(),
+  
   // Storage Configuration
   STORAGE_PROVIDER: z.enum(['minio', 's3', 'local']).default('local'),
   
@@ -261,6 +264,10 @@ export class Config {
 
   static get WEB_APP_URL(): string {
     return this.env.WEB_APP_URL || 'https://extrahand.in';
+  }
+
+  static get FAST2SMS_API_KEY(): string | undefined {
+    return this.env.FAST2SMS_API_KEY;
   }
 
   static get STORAGE_PROVIDER(): 'minio' | 's3' | 'local' {

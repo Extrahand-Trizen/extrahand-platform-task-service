@@ -43,7 +43,8 @@ export class PaymentClient {
 
       return null;
     } catch (error) {
-      // Don't throw error - escrow lookup is non-critical for task completion
+      // 404 means no escrow exists for this task (allowed path).
+      // Any other failure must bubble up so cancellation doesn't silently skip refund logic.
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError;
         if (axiosError.response?.status === 404) {
@@ -56,13 +57,20 @@ export class PaymentClient {
           status: axiosError.response?.status,
           message: axiosError.message
         });
+        throw new Error(
+          axiosError.response?.data && typeof axiosError.response.data === 'object'
+            ? JSON.stringify(axiosError.response.data)
+            : `Failed to get escrow by task ID: ${axiosError.message}`
+        );
       } else {
         logger.error('Failed to get escrow by task ID', {
           taskId,
           error: error instanceof Error ? error.message : 'Unknown error'
         });
+        throw error instanceof Error
+          ? error
+          : new Error('Failed to get escrow by task ID');
       }
-      return null;
     }
   }
 
@@ -240,6 +248,161 @@ export class PaymentClient {
         });
       }
       return { success: false, error: error instanceof Error ? error.message : 'Failed to cancel auto-release' };
+    }
+  }
+
+  /**
+   * Process payout directly when task completion is approved (non-escrow flow)
+   */
+  static async processTaskCompletionPayout(params: {
+    taskId: string;
+    performerUid: string;
+    amount: number;
+    taskTitle?: string;
+  }): Promise<{ success: boolean; payout?: any; requiresBankAccount?: boolean; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      logger.info('➡️ Calling payment-service task completion payout', {
+        url: `${this.baseURL}/api/v1/payouts/task-completion`,
+        taskId: params.taskId,
+        performerUid: params.performerUid,
+        amount: params.amount,
+      });
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payouts/task-completion`,
+        params,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        }
+      );
+
+      logger.info('⬅️ payment-service payout response', {
+        taskId: params.taskId,
+        httpStatus: response.status,
+        responseSuccess: response.data?.success,
+        requiresBankAccount: response.data?.requiresBankAccount,
+        payoutId: response.data?.payout?.payoutId,
+      });
+
+      if (response.data.success) {
+        return {
+          success: true,
+          payout: response.data.payout,
+        };
+      }
+
+      return {
+        success: false,
+        requiresBankAccount: response.data.requiresBankAccount,
+        error: response.data.error || 'Failed to process payout',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<any>;
+        logger.error('❌ payment-service payout call failed', {
+          taskId: params.taskId,
+          performerUid: params.performerUid,
+          httpStatus: axiosError.response?.status,
+          responseData: axiosError.response?.data,
+          message: axiosError.message,
+        });
+        return {
+          success: false,
+          requiresBankAccount: Boolean(axiosError.response?.data?.requiresBankAccount),
+          error: axiosError.response?.data?.error || axiosError.message,
+        };
+      }
+
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to process payout',
+      };
+    }
+  }
+
+  /**
+   * Cancel escrow / trigger Razorpay payment refund when a task is cancelled (service-to-service).
+   * POST /api/v1/payment/cancel
+   */
+  static async cancelPaymentForTask(params: {
+    taskId: string;
+    reason?: string;
+    userId?: string;
+    cancelledBy: 'poster' | 'performer';
+    taskStartDate: string;
+    assignedAt?: string | null;
+    /** Task budget (rupees) — %-fee base to match cancel UI */
+    feeBaseAmount?: number;
+    taskTitle?: string;
+  }): Promise<{
+    success: boolean;
+    cancelled?: boolean;
+    refundRequired?: boolean;
+    refund?: unknown;
+    error?: string;
+  }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payment/cancel`,
+        {
+          taskId: params.taskId,
+          reason: params.reason,
+          userId: params.userId,
+          cancelledBy: params.cancelledBy,
+          taskStartDate: params.taskStartDate,
+          assignedAt: params.assignedAt ?? undefined,
+          feeBaseAmount: params.feeBaseAmount,
+          taskTitle: params.taskTitle,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 30000,
+        }
+      );
+
+      const data = response.data;
+      if (data?.success) {
+        return {
+          success: true,
+          cancelled: data.cancelled,
+          refundRequired: data.refundRequired,
+          refund: data.refund,
+        };
+      }
+
+      return {
+        success: false,
+        error: data?.error || data?.message || 'Failed to cancel payment',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string; message?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.response?.data?.message || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to cancel payment',
+      };
     }
   }
 }
