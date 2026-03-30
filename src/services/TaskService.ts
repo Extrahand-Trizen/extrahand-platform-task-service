@@ -16,6 +16,10 @@ import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
 
+const START_OTP_TTL_MS = 10 * 60 * 1000;
+const START_OTP_RESEND_COOLDOWN_MS = 45 * 1000;
+const START_OTP_MAX_SENDS = 5;
+
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
   if (!frontendCategory) return "other";
