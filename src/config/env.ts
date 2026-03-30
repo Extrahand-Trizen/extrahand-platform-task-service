@@ -38,6 +38,9 @@ const envSchema = z.object({
   
   // Service-to-Service Communication
   SERVICE_AUTH_TOKEN: z.string().min(1, 'SERVICE_AUTH_TOKEN is required for service-to-service communication').optional(),
+
+  /** Comma-separated *poster* Firebase UIDs (test); assignee may use 123123 to start */
+  TASK_START_OTP_BYPASS_UIDS: z.string().optional(),
   USER_SERVICE_URL: z.string().url().default('http://localhost:4001'),
   MESSAGING_SERVICE_URL: z.string().url().default('http://localhost:4006'),
   NOTIFICATION_SERVICE_URL: z.string().url().default('http://localhost:4005'),
@@ -244,6 +247,10 @@ export class Config {
 
   static get SERVICE_AUTH_TOKEN(): string | undefined {
     return this.env.SERVICE_AUTH_TOKEN;
+  }
+
+  static get TASK_START_OTP_BYPASS_UIDS(): string | undefined {
+    return this.env.TASK_START_OTP_BYPASS_UIDS;
   }
 
   static get USER_SERVICE_URL(): string {

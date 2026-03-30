@@ -18,6 +18,7 @@ import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
+import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -1985,9 +1986,27 @@ export class TaskService {
       throw new BadRequestError("Task is not in assigned state");
     }
 
-    const sanitizedOtp = (otp || "").trim();
-    if (!/^\d{6}$/.test(sanitizedOtp)) {
+    const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 6);
+    if (sanitizedOtp.length !== 6) {
       throw new BadRequestError("Please enter a valid 6-digit OTP");
+    }
+
+    const Profile = mongoose.connection.collection("profiles");
+    const posterProfile = await Profile.findOne({ _id: task.requesterId });
+    const rawPosterUid =
+      posterProfile && typeof posterProfile === "object" && "uid" in posterProfile
+        ? (posterProfile as { uid?: unknown }).uid
+        : undefined;
+    const posterUid = typeof rawPosterUid === "string" ? rawPosterUid : undefined;
+
+    if (acceptsPosterDummyStartOtp(posterUid, sanitizedOtp)) {
+      logger.warn("start_otp_poster_dummy_accepted", {
+        taskId,
+        posterUid: posterUid ?? null,
+      });
+      return TaskService.updateTaskStatus(taskId, profileId, "started", {
+        skipStartOtpValidation: true,
+      });
     }
 
     if (!task.startOtp?.codeHash || !task.startOtp?.expiresAt) {
