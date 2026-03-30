@@ -265,6 +265,9 @@ export class TaskController {
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
+    if (!req.user!.uid) {
+      throw new BadRequestError('User id missing. Please sign in again.');
+    }
 
     const { otp } = req.body;
     if (!otp) {
@@ -274,7 +277,8 @@ export class TaskController {
     const task = await TaskService.verifyStartOtp(
       req.params.id,
       req.user!.profileId,
-      String(otp)
+      String(otp),
+      req.user!.uid
     );
 
     ApiResponse.success(res, task, 'OTP verified. Task started successfully');

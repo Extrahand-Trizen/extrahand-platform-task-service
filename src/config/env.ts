@@ -38,6 +38,13 @@ const envSchema = z.object({
   
   // Service-to-Service Communication
   SERVICE_AUTH_TOKEN: z.string().min(1, 'SERVICE_AUTH_TOKEN is required for service-to-service communication').optional(),
+
+  /** Fixed 6-digit start OTP for TASK_START_OTP_BYPASS_UIDs (test taskers) */
+  TASK_START_DUMMY_OTP: z.string().optional(),
+  /** Comma-separated performer Firebase UIDs allowed to use TASK_START_DUMMY_OTP */
+  TASK_START_OTP_BYPASS_UIDS: z.string().optional(),
+  /** Production: set "true" to allow dummy start OTP (still requires bypass UID list) */
+  ALLOW_TASK_START_DUMMY_OTP: z.string().optional(),
   USER_SERVICE_URL: z.string().url().default('http://localhost:4001'),
   MESSAGING_SERVICE_URL: z.string().url().default('http://localhost:4006'),
   NOTIFICATION_SERVICE_URL: z.string().url().default('http://localhost:4005'),
@@ -244,6 +251,18 @@ export class Config {
 
   static get SERVICE_AUTH_TOKEN(): string | undefined {
     return this.env.SERVICE_AUTH_TOKEN;
+  }
+
+  static get TASK_START_DUMMY_OTP(): string | undefined {
+    return this.env.TASK_START_DUMMY_OTP;
+  }
+
+  static get TASK_START_OTP_BYPASS_UIDS(): string | undefined {
+    return this.env.TASK_START_OTP_BYPASS_UIDS;
+  }
+
+  static get ALLOW_TASK_START_DUMMY_OTP(): boolean {
+    return this.env.ALLOW_TASK_START_DUMMY_OTP === 'true';
   }
 
   static get USER_SERVICE_URL(): string {
