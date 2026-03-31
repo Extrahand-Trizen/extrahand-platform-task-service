@@ -92,7 +92,7 @@ export class EmailServiceClient {
 
   private static resolveCategoryForTemplate(
     template: string
-  ): 'taskUpdates' | 'taskReminders' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'transactional' {
+  ): 'taskUpdates' | 'taskReminders' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'payments' {
     switch (template) {
       case 'task_created_recommended':
         return 'recommendedTaskAlerts';
@@ -101,7 +101,7 @@ export class EmailServiceClient {
       case 'task_reminder':
         return 'taskReminders';
       case 'task_start_otp':
-        return 'transactional';
+        return 'payments';
       default:
         return 'taskUpdates';
     }

@@ -1644,6 +1644,40 @@ export class TaskService {
             );
           }
         }
+
+        // Notify the performer about the penalty if they cancelled
+        if (!isRequesterCancelled && cancellerProfile && cancellerProfile.uid) {
+          try {
+            await InAppNotificationClient.send({
+              userId: cancellerProfile.uid,
+              title: 'Cancellation Penalty',
+              body: `A penalty has been recorded for cancelling "${task.title}". It will be deducted from your future payouts.`,
+              type: 'warning',
+              category: 'payments',
+              data: {
+                taskId: taskId.toString(),
+                actionUrl: '/profile?section=payments'
+              }
+            });
+            
+            if (cancellerProfile.email) {
+               // We will use task_cancelled template but indicating it's about penalty
+               EmailServiceClient.sendTaskCancelled(cancellerProfile.email, {
+                  recipientName: cancellerProfile.name || cancellerProfile.fullName || "There",
+                  taskTitle: task.title,
+                  cancelledByName: "You",
+                  reason: "A penalty has been applied to your account for this cancellation.",
+                  browseUrl: `${config.WEB_APP_URL}/profile?section=payments`,
+                  userId: cancellerProfile.uid,
+               }).catch(e => logger.error("Penalty email failed", { error: e }));
+            }
+          } catch (e) {
+            logger.error("Penalty notification failed", {
+              taskId,
+              error: e instanceof Error ? e.message : "Unknown error",
+            });
+          }
+        }
       } catch (error) {
         logger.error("Error sending task_cancelled email", {
           taskId,

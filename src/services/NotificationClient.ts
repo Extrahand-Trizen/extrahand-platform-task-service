@@ -435,7 +435,7 @@ export class NotificationClient {
     // Forward to send() with new payload format
     await this.send({
       eventKey: notification.type || 'UNKNOWN',
-      category: (notification.category || 'transactional') as NotificationCategory,
+      category: (notification.category || 'payments') as NotificationCategory,
       recipients: [userId],
       entity: { type: 'task', id: 'unknown' },
       title: notification.title,
@@ -467,7 +467,7 @@ export class NotificationClient {
     await this.sendBatch(
       {
         eventKey: notification.type || 'UNKNOWN',
-        category: (notification.category || 'transactional') as NotificationCategory,
+        category: (notification.category || 'payments') as NotificationCategory,
         entity: { type: 'task', id: 'unknown' },
         title: notification.title,
         body: notification.body,

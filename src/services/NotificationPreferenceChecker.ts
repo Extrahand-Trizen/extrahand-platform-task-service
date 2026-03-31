@@ -22,7 +22,7 @@ export class NotificationPreferenceChecker {
    */
   static async isEmailNotificationEnabled(
     userUid: string,
-    category: 'taskUpdates' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'payments' | 'transactional' | 'system' | 'taskReminders'
+    category: 'taskUpdates' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'payments' | 'system' | 'taskReminders'
   ): Promise<boolean> {
     try {
       if (!this.userServiceUrl) {

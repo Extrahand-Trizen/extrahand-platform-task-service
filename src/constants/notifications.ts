@@ -12,7 +12,7 @@
  * These must exactly match NotificationPreferences schema keys
  */
 export const NOTIFICATION_CATEGORIES = [
-  'transactional',
+  'payments',
   'taskUpdates',
   'taskReminders',
   'keywordTaskAlerts',
