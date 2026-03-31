@@ -13,6 +13,7 @@ import { NotificationClient } from "./NotificationClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
+import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 
 export class ApplicationService {
   /**
@@ -302,6 +303,20 @@ export class ApplicationService {
               }
             }
           );
+
+          // Polling in-app notification for task owner (taskUpdates category)
+          await InAppNotificationClient.send({
+            userId: requesterProfile.uid,
+            title: 'New offer on your task',
+            body: `${applicantProfileSnapshot?.name || 'A tasker'} applied to "${task.title}"`,
+            category: 'taskUpdates',
+            type: 'info',
+            data: {
+              taskId,
+              applicationId: application._id.toString(),
+              applicantUid,
+            },
+          });
         }
         
         // Email: application submitted → requester
