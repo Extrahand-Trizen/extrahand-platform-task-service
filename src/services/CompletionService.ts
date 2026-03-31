@@ -181,8 +181,16 @@ export class CompletionService {
 
     // EMIT: TASK_COMPLETED and REVIEW_REQUEST notifications
     try {
-      // Get assignee info for context
-      const assigneeUid = updatedTask?.assigneeId?.toString();
+      const Profiles = mongoose.connection.collection('profiles');
+      const assigneeProfile = updatedTask?.assigneeId
+        ? await Profiles.findOne({ _id: new mongoose.Types.ObjectId(updatedTask.assigneeId) })
+        : null;
+      const requesterProfile = updatedTask?.requesterId
+        ? await Profiles.findOne({ _id: new mongoose.Types.ObjectId(updatedTask.requesterId) })
+        : null;
+
+      const assigneeUid = assigneeProfile?.uid || updatedTask?.assigneeId?.toString();
+      const requesterUid = requesterProfile?.uid || taskOwnerProfileId;
       const taskTitle = updatedTask?.title;
 
       // TASK_COMPLETED - Notify requester that task is done
@@ -190,8 +198,8 @@ export class CompletionService {
         {
           eventKey: 'TASK_COMPLETED',
           category: 'taskUpdates',
-          actorId: taskOwnerProfileId,
-          recipients: [taskOwnerProfileId],
+          actorId: requesterUid,
+          recipients: [requesterUid],
           entity: { type: 'task', id: taskId },
           title: `Task Completed: ${taskTitle}`,
           body: `Your task has been completed successfully. Thank you for using ExtraHand!`,
@@ -207,7 +215,7 @@ export class CompletionService {
         await NotificationClient.send({
           eventKey: 'TASK_COMPLETED_TASKER',
           category: 'taskUpdates',
-          actorId: taskOwnerProfileId,
+          actorId: requesterUid,
           recipients: [assigneeUid],
           entity: { type: 'task', id: taskId },
           title: 'Task approved',
@@ -236,8 +244,8 @@ export class CompletionService {
         {
           eventKey: 'REVIEW_REQUEST',
           category: 'taskUpdates',
-          actorId: taskOwnerProfileId,
-          recipients: [taskOwnerProfileId],
+          actorId: requesterUid,
+          recipients: [requesterUid],
           entity: { type: 'task', id: taskId },
           title: `Please review your tasker`,
           body: `Share your experience with the tasker who completed "${taskTitle}". Your review helps the community!`,
