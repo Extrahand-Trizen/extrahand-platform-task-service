@@ -202,6 +202,35 @@ export class CompletionService {
         }
       );
 
+      // TASK_COMPLETED_FOR_TASKER - Notify performer that poster approved
+      if (assigneeUid) {
+        await NotificationClient.send({
+          eventKey: 'TASK_COMPLETED_TASKER',
+          category: 'taskUpdates',
+          actorId: taskOwnerProfileId,
+          recipients: [assigneeUid],
+          entity: { type: 'task', id: taskId },
+          title: 'Task approved',
+          body: `Your work on "${taskTitle}" was approved. Great job!`,
+          data: {
+            taskId,
+            status: 'completed'
+          }
+        });
+
+        await InAppNotificationClient.send({
+          userId: assigneeUid,
+          title: 'Task approved',
+          body: `Your work on "${taskTitle}" was approved. Great job!`,
+          category: 'taskUpdates',
+          type: 'success',
+          data: {
+            taskId,
+            status: 'completed'
+          }
+        });
+      }
+
       // REVIEW_REQUEST - Prompt requester to review the tasker
       await NotificationClient.send(
         {

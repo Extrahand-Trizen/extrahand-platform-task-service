@@ -755,6 +755,20 @@ export class ApplicationService {
               }
             }
           );
+
+          // Polling in-app notification to tasker (applicant)
+          await InAppNotificationClient.send({
+            userId: applicantUid,
+            title: 'Offer accepted',
+            body: `Your offer for "${task.title}" was accepted. Coordinate and get started!`,
+            category: 'taskUpdates',
+            type: 'success',
+            data: {
+              taskId: task._id.toString(),
+              applicationId,
+              status: 'accepted'
+            }
+          });
         } catch (error) {
           logger.error('Error sending APPLICATION_ACCEPTED notification', {
             applicationId,
