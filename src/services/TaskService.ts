@@ -1665,6 +1665,28 @@ export class TaskService {
               })
             );
           }
+
+          if (otherProfile?.uid) {
+            logger.info('[TaskService.updateTaskStatus] Sending task cancelled in-app notification', {
+              taskId,
+              recipientUid: otherProfile.uid,
+              recipientRole: isRequesterCancelled ? 'tasker' : 'poster',
+              cancelledBy: isRequesterCancelled ? 'poster' : 'performer',
+              actionUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
+            });
+
+            await InAppNotificationClient.send({
+              userId: otherProfile.uid,
+              title: 'Task cancelled',
+              body: `The task "${task.title}" has been cancelled. Open the task track page for details.`,
+              type: 'warning',
+              category: 'taskUpdates',
+              data: {
+                taskId: taskId.toString(),
+                actionUrl: `/tasks/${taskId}/track`,
+              },
+            });
+          }
         }
 
         // Notify the performer about the penalty if they cancelled
