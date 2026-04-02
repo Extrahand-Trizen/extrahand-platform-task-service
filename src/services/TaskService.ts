@@ -1561,6 +1561,19 @@ export class TaskService {
           task.budget && typeof task.budget === "object" && "amount" in task.budget
             ? Number((task.budget as { amount: number }).amount)
             : undefined;
+        logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow started', {
+          taskId,
+          actorProfileId: profileId.toString(),
+          actorRole: isRequesterCancelled ? 'poster' : 'performer',
+          actorUid: uid,
+          hasEscrow: true,
+          taskStartDate: taskStart.toISOString(),
+          assignedAt: task.assignedAt ? new Date(task.assignedAt).toISOString() : undefined,
+          feeBaseAmount:
+            taskBudgetAmount !== undefined && Number.isFinite(taskBudgetAmount)
+              ? taskBudgetAmount
+              : undefined,
+        });
         const payResult = await PaymentClient.cancelPaymentForTask({
           taskId,
           reason: options?.cancellationReason,
@@ -1575,6 +1588,15 @@ export class TaskService {
               ? taskBudgetAmount
               : undefined,
           taskTitle: typeof task.title === "string" ? task.title : undefined,
+        });
+        logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow completed', {
+          taskId,
+          actorRole: isRequesterCancelled ? 'poster' : 'performer',
+          success: payResult.success,
+          cancelled: payResult.cancelled,
+          refundRequired: payResult.refundRequired,
+          refund: payResult.refund,
+          error: payResult.error,
         });
         if (!payResult.success) {
           throw new BadRequestError(
