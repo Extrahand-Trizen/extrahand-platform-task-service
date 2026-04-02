@@ -1545,6 +1545,10 @@ export class TaskService {
       throw new BadRequestError("Task can only be cancelled before it is started");
     }
 
+    let cancellationPaymentResult:
+      | { success: boolean; cancelled?: boolean; refundRequired?: boolean; refund?: unknown; error?: string }
+      | null = null;
+
     if (status === "cancelled") {
       const escrow = await PaymentClient.getEscrowByTaskId(taskId);
       if (escrow) {
@@ -1589,6 +1593,7 @@ export class TaskService {
               : undefined,
           taskTitle: typeof task.title === "string" ? task.title : undefined,
         });
+        cancellationPaymentResult = payResult;
         logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow completed', {
           taskId,
           actorRole: isRequesterCancelled ? 'poster' : 'performer',
@@ -1648,6 +1653,32 @@ export class TaskService {
         const isRequesterCancelled = task.requesterId.equals(profileId);
         const otherPartyId = isRequesterCancelled ? task.assigneeId : task.requesterId;
         const cancellerProfile = await Profile.findOne({ _id: profileId });
+
+        // Fallback for poster: ensure cancellation + refund timeline notification is created
+        // even if payment-service in-app notification fails.
+        if (isRequesterCancelled && cancellationPaymentResult?.refundRequired) {
+          const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+          if (requesterProfile?.uid) {
+            logger.info('[TaskService.updateTaskStatus] Sending poster refund fallback in-app notification', {
+              taskId,
+              posterUid: requesterProfile.uid,
+              actionUrl: `/tasks/${taskId}/track`,
+            });
+
+            await InAppNotificationClient.send({
+              userId: requesterProfile.uid,
+              title: 'Task cancelled',
+              body: `The task "${task.title}" has been cancelled. Amount will be refunded within 5-7 days.`,
+              type: 'warning',
+              category: 'payments',
+              data: {
+                taskId: taskId.toString(),
+                actionUrl: `/tasks/${taskId}/track`,
+              },
+            });
+          }
+        }
+
         if (otherPartyId) {
           const otherProfile = await Profile.findOne({ _id: otherPartyId });
           if (otherProfile?.email) {
