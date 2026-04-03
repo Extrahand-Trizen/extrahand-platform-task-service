@@ -1,10 +1,8 @@
 # Use Node.js 18 LTS Alpine image for smaller size
 FROM node:18-alpine AS base
 
-# Install security updates and necessary packages
-RUN apk update && apk upgrade && \
-    apk add --no-cache dumb-init curl && \
-    rm -rf /var/cache/apk/*
+# Install runtime utilities
+RUN apk add --no-cache dumb-init curl
 
 # Create app directory with proper permissions
 WORKDIR /app
@@ -12,19 +10,6 @@ WORKDIR /app
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodeuser -u 1001
-
-# Dependencies stage
-FROM base AS dependencies
-
-# Copy package files
-COPY package.json package-lock.json* ./
-
-# Install production dependencies only
-RUN if [ -f package-lock.json ]; then \
-      npm ci --omit=dev && npm cache clean --force; \
-    else \
-      npm install --omit=dev && npm cache clean --force; \
-    fi
 
 # Build stage
 FROM base AS build
@@ -37,9 +22,9 @@ COPY package.json package-lock.json* ./
 
 # Install all dependencies (including dev dependencies for TypeScript)
 RUN if [ -f package-lock.json ]; then \
-      npm ci; \
+      npm ci --no-audit --no-fund; \
     else \
-      npm install; \
+      npm install --no-audit --no-fund; \
     fi
 
 # Copy TypeScript configuration
@@ -55,8 +40,8 @@ COPY src ./src
 # Build TypeScript to JavaScript
 RUN npm run build
 
-# Remove dev dependencies after build
-RUN npm prune --production
+# Remove dev dependencies after build (keep only production deps for final image)
+RUN npm prune --omit=dev
 
 # Production stage
 FROM base AS production
@@ -86,8 +71,8 @@ ENV RATE_LIMIT_MAX_REQUESTS=100
 # - MESSAGING_SERVICE_URL
 # - PAYMENT_SERVICE_URL
 
-# Copy production dependencies from dependencies stage
-COPY --from=dependencies --chown=nodeuser:nodejs /app/node_modules ./node_modules
+# Copy production dependencies from build stage
+COPY --from=build --chown=nodeuser:nodejs /app/node_modules ./node_modules
 
 # Copy compiled JavaScript from build stage
 COPY --from=build --chown=nodeuser:nodejs /app/dist ./dist
