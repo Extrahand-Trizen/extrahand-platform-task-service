@@ -1971,7 +1971,12 @@ export class TaskService {
     const Profile = mongoose.connection.collection("profiles");
     const requesterProfile = await Profile.findOne({ _id: task.requesterId });
 
-    if (!requesterProfile?.uid) {
+    const requesterUid =
+      requesterProfile && typeof requesterProfile === "object" && "uid" in requesterProfile
+        ? (requesterProfile as { uid?: unknown }).uid
+        : undefined;
+
+    if (!requesterUid || typeof requesterUid !== "string") {
       throw new BadRequestError("Requester notification channel unavailable");
     }
 
@@ -2019,7 +2024,7 @@ export class TaskService {
         taskTitle: task.title,
         otp,
         expiresAt: expiresAt.toISOString(),
-        userId: task.requesterId.toString(),
+        userId: requesterUid,
       });
     } catch (emailError) {
       logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
@@ -2028,7 +2033,7 @@ export class TaskService {
     // Send in-app notification for immediate visibility
     try {
       await InAppNotificationClient.send({
-        userId: task.requesterId.toString(),
+        userId: requesterUid,
         title: "Task Start OTP",
         body: otpBody,
         type: "info",
