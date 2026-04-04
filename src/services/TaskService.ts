@@ -1996,30 +1996,59 @@ export class TaskService {
 
     const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
 
-    // Polling-first delivery: write directly to in-app notifications.
-    const inAppSent = await InAppNotificationClient.send({
-      userId: task.requesterId.toString(),
-      title: "Task Start OTP",
-      body: otpBody,
-      type: "info",
-      category: "taskUpdates",
-      data: {
-        taskId,
-        otp,
-        otpType: "task_start",
-        expiresAt: expiresAt.toISOString(),
-      },
-    });
+    // Send via both email and in-app notifications for redundancy
+    let taskerName = "tasker";
+    if (task.assigneeId && typeof task.assigneeId === "object") {
+      try {
+        const assigneeId = task.assigneeId as mongoose.Types.ObjectId;
+        const assigneeProfile = await Profile.findOne({ _id: assigneeId });
+        if (assigneeProfile) {
+          taskerName = (assigneeProfile as any).name || (assigneeProfile as any).fullName || "tasker";
+        }
+      } catch (err) {
+        logger.warn("Failed to fetch assignee profile for task start OTP", { taskId, error: err });
+      }
+    }
+    const requesterName = requesterProfile?.name || requesterProfile?.fullName || "requester";
 
-    if (!inAppSent) {
-      throw new BadRequestError("Unable to deliver OTP right now. Please try again.");
+    // Send email
+    try {
+      await EmailServiceClient.sendTaskStartOtp(requesterProfile.email, {
+        requesterName,
+        taskerName,
+        taskTitle: task.title,
+        otp,
+        expiresAt: expiresAt.toISOString(),
+        userId: task.requesterId.toString(),
+      });
+    } catch (emailError) {
+      logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
+    }
+
+    // Send in-app notification for immediate visibility
+    try {
+      await InAppNotificationClient.send({
+        userId: task.requesterId.toString(),
+        title: "Task Start OTP",
+        body: otpBody,
+        type: "info",
+        category: "taskUpdates",
+        data: {
+          taskId,
+          otp,
+          otpType: "task_start",
+          expiresAt: expiresAt.toISOString(),
+        },
+      });
+    } catch (inAppError) {
+      logger.warn("Failed to send task start OTP via in-app notification", { taskId, error: inAppError });
     }
 
     TaskService.invalidateTaskCache(taskId);
 
     return {
       expiresAt,
-      sentTo: requesterProfile.name || requesterProfile.fullName || "requester",
+      sentTo: requesterName,
     };
   }
 
