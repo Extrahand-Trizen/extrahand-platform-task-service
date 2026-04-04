@@ -1030,6 +1030,65 @@ export class ApplicationService {
       applicationStatus: application.status,
     });
 
+    // Polling in-app notification for negotiation updates (price counter / accept / reject)
+    try {
+      const Profile = mongoose.connection.collection("profiles");
+      const posterProfile = await Profile.findOne({ _id: task.requesterId });
+      const posterUid =
+        posterProfile && typeof posterProfile === "object" && "uid" in posterProfile
+          ? (posterProfile as { uid?: unknown }).uid
+          : undefined;
+
+      const counterpartyUid =
+        actorRole === "poster"
+          ? application.applicantUid
+          : typeof posterUid === "string"
+          ? posterUid
+          : undefined;
+
+      if (counterpartyUid) {
+        const amount = application.negotiation.currentAmount;
+        let title = "Offer update";
+        let body = `Offer updated for "${task.title}".`;
+        let type: "info" | "warning" | "error" | "success" = "info";
+
+        if (action === "counter") {
+          title = "Offer updated";
+          body = `A new counter offer of Rs ${amount} was proposed for "${task.title}".`;
+          type = "info";
+        } else if (action === "accept") {
+          title = "Offer accepted";
+          body = `Your negotiated offer for "${task.title}" was accepted at Rs ${amount}.`;
+          type = "success";
+        } else if (action === "reject") {
+          title = "Offer rejected";
+          body = `The negotiated offer for "${task.title}" was rejected.`;
+          type = "warning";
+        }
+
+        await InAppNotificationClient.send({
+          userId: counterpartyUid,
+          title,
+          body,
+          category: "taskUpdates",
+          type,
+          data: {
+            taskId: task._id.toString(),
+            applicationId: application._id.toString(),
+            negotiationAction: action,
+            negotiationStatus: application.negotiation.status,
+            amount,
+          },
+        });
+      }
+    } catch (notificationError) {
+      logger.warn("Failed to send in-app negotiation update notification", {
+        applicationId,
+        action,
+        error: notificationError instanceof Error ? notificationError.message : "Unknown error",
+      });
+    }
+
     return application;
   }
 
