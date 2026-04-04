@@ -1,5 +1,5 @@
 import mongoose, { Schema, Model, Document } from "mongoose";
-import { ApplicationStatus } from "../types";
+import { ApplicationStatus, ApplicationNegotiationStatus } from "../types";
 
 export interface ITaskApplication extends Document {
   taskId: mongoose.Types.ObjectId;
@@ -30,6 +30,17 @@ export interface ITaskApplication extends Document {
   relevantExperience?: string[];
   portfolio?: string[];
   status: ApplicationStatus;
+  negotiation?: {
+    currentAmount: number;
+    status: ApplicationNegotiationStatus;
+    lastActionBy?: "poster" | "tasker";
+    history: Array<{
+      amount: number;
+      action: "counter" | "accept" | "reject";
+      by: "poster" | "tasker";
+      at: Date;
+    }>;
+  };
   messages?: Array<{
     senderId: mongoose.Types.ObjectId; // ObjectId reference to Profile
     message: string;
@@ -98,6 +109,39 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
       enum: ["pending", "accepted", "rejected", "withdrawn"],
       default: "pending",
       index: true,
+    },
+
+    negotiation: {
+      currentAmount: { type: Number, min: 0 },
+      status: {
+        type: String,
+        enum: ["none", "countered_by_poster", "countered_by_tasker", "accepted", "rejected"],
+        default: "none",
+      },
+      lastActionBy: {
+        type: String,
+        enum: ["poster", "tasker"],
+        required: false,
+      },
+      history: {
+        type: [
+          {
+            amount: { type: Number, required: true, min: 0 },
+            action: {
+              type: String,
+              enum: ["counter", "accept", "reject"],
+              required: true,
+            },
+            by: {
+              type: String,
+              enum: ["poster", "tasker"],
+              required: true,
+            },
+            at: { type: Date, default: Date.now },
+          },
+        ],
+        default: [],
+      },
     },
 
     messages: {

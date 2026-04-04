@@ -5,6 +5,7 @@ import { ApplicationService } from '../services/ApplicationService';
 import { BadRequestError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
+import { getMeaningfulTextError } from '../utils/textValidation';
 import logger from '../config/logger';
 
 export class TaskController {
@@ -122,6 +123,29 @@ export class TaskController {
     }
 
     const { title, description } = req.body;
+    const titleError = getMeaningfulTextError(title, {
+      fieldName: 'Title',
+      minLength: 3,
+      minWords: 2,
+      allowSingleWord: true,
+      minSingleWordLength: 4,
+      minSingleWordVowelRatio: 0.25,
+      minVowelRatio: 0.25,
+    });
+    if (titleError) {
+      throw new BadRequestError(titleError);
+    }
+
+    const descriptionError = getMeaningfulTextError(description, {
+      fieldName: 'Description',
+      minLength: 10,
+      minWords: 3,
+      minVowelRatio: 0.25,
+    });
+    if (descriptionError) {
+      throw new BadRequestError(descriptionError);
+    }
+
     if (containsPhoneNumber(title) || containsPhoneNumber(description)) {
       throw new BadRequestError(PHONE_NUMBER_ERROR);
     }

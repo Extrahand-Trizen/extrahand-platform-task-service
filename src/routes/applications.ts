@@ -23,6 +23,9 @@ router.get("/:id", asyncHandler(ApplicationController.getApplication));
 // PUT /api/v1/applications/:id - Update application status (accept/reject)
 router.put("/:id", asyncHandler(ApplicationController.updateApplication));
 
+// POST /api/v1/applications/:id/negotiate - Counter/accept/reject negotiation
+router.post("/:id/negotiate", asyncHandler(ApplicationController.negotiateApplication));
+
 // POST /api/v1/applications/:id/accept - Accept an application (legacy)
 router.post(
   "/:id/accept",

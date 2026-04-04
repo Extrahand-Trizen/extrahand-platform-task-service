@@ -34,6 +34,12 @@ export type CompletionStatus = 'pending_approval' | 'approved' | 'rejected';
 
 // Application types
 export type ApplicationStatus = 'pending' | 'accepted' | 'rejected' | 'withdrawn';
+export type ApplicationNegotiationStatus =
+  | 'none'
+  | 'countered_by_poster'
+  | 'countered_by_tasker'
+  | 'accepted'
+  | 'rejected';
 
 // Review types
 export interface ReviewRatings {

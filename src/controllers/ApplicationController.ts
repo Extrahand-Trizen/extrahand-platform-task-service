@@ -165,6 +165,25 @@ export class ApplicationController {
     ApiResponse.success(res, application, 'Application updated successfully');
   }
 
+  static async negotiateApplication(
+    req: AuthenticatedRequest,
+    res: Response
+  ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { action, amount } = req.body || {};
+    const application = await ApplicationService.negotiateApplication(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+      { action, amount }
+    );
+
+    ApiResponse.success(res, application, 'Application negotiation updated successfully');
+  }
+
   /**
    * POST /api/v1/applications/:id/accept
    * Accept an application (legacy endpoint, redirects to PUT)

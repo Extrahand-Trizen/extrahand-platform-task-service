@@ -178,18 +178,23 @@ export class ApplicationService {
 
       // Create application
       logger.debug(`[ApplicationService.submitApplication] Creating new application for taskId=${taskId}`);
+      const proposedAmount = Number(
+        applicationData.proposedBudget?.amount || applicationData.proposedBudget
+      );
       const application = await TaskApplication.create({
         taskId,
         applicantId: applicantProfileId,
         applicantUid: applicantUid,
         applicantProfile: applicantProfileSnapshot,
         proposedBudget: {
-          amount: Number(
-            applicationData.proposedBudget?.amount ||
-              applicationData.proposedBudget
-          ),
+          amount: proposedAmount,
           currency: applicationData.proposedBudget?.currency || "INR",
           isNegotiable: applicationData.proposedBudget?.isNegotiable !== false,
+        },
+        negotiation: {
+          currentAmount: proposedAmount,
+          status: "none",
+          history: [],
         },
         proposedTime: applicationData.proposedTime || { flexible: true },
         selectedDates: selectedDates,
@@ -711,6 +716,34 @@ export class ApplicationService {
     // STEP 2: Update application status
     application.status = status || application.status;
     application.updatedAt = new Date();
+    if (!application.negotiation) {
+      application.negotiation = {
+        currentAmount: application.proposedBudget.amount,
+        status: "none",
+        history: [],
+      };
+    }
+    if (application.status === "accepted") {
+      application.negotiation.currentAmount = application.proposedBudget.amount;
+      application.negotiation.status = "accepted";
+      application.negotiation.lastActionBy = "poster";
+      application.negotiation.history.push({
+        amount: application.proposedBudget.amount,
+        action: "accept",
+        by: "poster",
+        at: new Date(),
+      });
+    }
+    if (application.status === "rejected") {
+      application.negotiation.status = "rejected";
+      application.negotiation.lastActionBy = "poster";
+      application.negotiation.history.push({
+        amount: application.proposedBudget.amount,
+        action: "reject",
+        by: "poster",
+        at: new Date(),
+      });
+    }
 
     // Add message if provided
     if (message) {
@@ -889,6 +922,115 @@ export class ApplicationService {
     return this.updateApplication(applicationId, taskOwnerProfileId, taskOwnerUid, {
       status: "rejected",
     });
+  }
+
+  static async negotiateApplication(
+    applicationId: string,
+    actorProfileId: mongoose.Types.ObjectId,
+    actorUid: string,
+    payload: { action: "counter" | "accept" | "reject"; amount?: number }
+  ): Promise<ITaskApplication> {
+    const application = await TaskApplication.findById(applicationId).populate(
+      "taskId",
+      "requesterId status title"
+    );
+
+    if (!application) {
+      throw new NotFoundError("Application not found");
+    }
+
+    const task = application.taskId as any;
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const isPoster = task.requesterId?.equals(actorProfileId);
+    const isTasker = application.applicantId.equals(actorProfileId);
+
+    if (!isPoster && !isTasker) {
+      throw new ForbiddenError("Not authorized to negotiate this offer");
+    }
+
+    if (application.status !== "pending") {
+      throw new BadRequestError("Only pending offers can be negotiated");
+    }
+
+    if (!application.negotiation) {
+      application.negotiation = {
+        currentAmount: application.proposedBudget.amount,
+        status: "none",
+        history: [],
+      };
+    }
+
+    const actorRole: "poster" | "tasker" = isPoster ? "poster" : "tasker";
+    const { action } = payload;
+
+    if (action === "counter") {
+      if (application.proposedBudget.isNegotiable === false) {
+        throw new BadRequestError("This offer is not negotiable");
+      }
+
+      const rawAmount = Number(payload.amount);
+      if (!Number.isInteger(rawAmount) || rawAmount <= 0) {
+        throw new BadRequestError("Counter amount must be a valid whole number");
+      }
+      if (rawAmount > 50000) {
+        throw new BadRequestError("Counter amount cannot exceed 50000");
+      }
+
+      application.proposedBudget.amount = rawAmount;
+      application.negotiation.currentAmount = rawAmount;
+      application.negotiation.status =
+        actorRole === "poster" ? "countered_by_poster" : "countered_by_tasker";
+      application.negotiation.lastActionBy = actorRole;
+      application.negotiation.history.push({
+        amount: rawAmount,
+        action: "counter",
+        by: actorRole,
+        at: new Date(),
+      });
+    } else if (action === "accept") {
+      if (
+        (actorRole === "tasker" && application.negotiation.status !== "countered_by_poster") ||
+        (actorRole === "poster" && application.negotiation.status !== "countered_by_tasker")
+      ) {
+        throw new BadRequestError("No pending counter offer to accept");
+      }
+
+      application.negotiation.status = "accepted";
+      application.negotiation.lastActionBy = actorRole;
+      application.negotiation.history.push({
+        amount: application.negotiation.currentAmount,
+        action: "accept",
+        by: actorRole,
+        at: new Date(),
+      });
+    } else if (action === "reject") {
+      application.status = "rejected";
+      application.negotiation.status = "rejected";
+      application.negotiation.lastActionBy = actorRole;
+      application.negotiation.history.push({
+        amount: application.negotiation.currentAmount,
+        action: "reject",
+        by: actorRole,
+        at: new Date(),
+      });
+    }
+
+    application.updatedAt = new Date();
+    await application.save();
+
+    logger.info("Application negotiation updated", {
+      applicationId,
+      actorUid,
+      action,
+      amount: application.proposedBudget.amount,
+      negotiationStatus: application.negotiation.status,
+      applicationStatus: application.status,
+    });
+
+    return application;
   }
 
   /**

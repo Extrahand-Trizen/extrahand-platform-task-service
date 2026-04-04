@@ -12,13 +12,13 @@ import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
-import { Fast2SMSClient } from "../clients/Fast2SMSClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
 import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
+import { getMeaningfulTextError } from '../utils/textValidation';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -540,6 +540,29 @@ export class TaskService {
     taskData: any,
     uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
+    const titleError = getMeaningfulTextError(taskData.title, {
+      fieldName: 'Title',
+      minLength: 3,
+      minWords: 2,
+      allowSingleWord: true,
+      minSingleWordLength: 4,
+      minSingleWordVowelRatio: 0.25,
+      minVowelRatio: 0.25,
+    });
+    if (titleError) {
+      throw new BadRequestError(titleError);
+    }
+
+    const descriptionError = getMeaningfulTextError(taskData.description, {
+      fieldName: 'Description',
+      minLength: 10,
+      minWords: 3,
+      minVowelRatio: 0.25,
+    });
+    if (descriptionError) {
+      throw new BadRequestError(descriptionError);
+    }
+
     logger.info(`[TaskService.createTask] Starting task creation`, {
       profileId: profileId.toString(),
       profileIdType: typeof profileId,
@@ -1928,7 +1951,7 @@ export class TaskService {
   static async requestStartOtp(
     taskId: string,
     profileId: mongoose.Types.ObjectId,
-    uid: string,
+    _uid: string,
     options?: { isResend?: boolean }
   ): Promise<{ expiresAt: Date; sentTo: string }> {
     const task = await Task.findById(taskId);
@@ -1973,30 +1996,7 @@ export class TaskService {
 
     const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
 
-    // Get tasker profile for email
-    const taskerProfile = await Profile.findOne({ _id: profileId });
-
-    // Event-driven notification via notification service (FCM/in-app delivery path).
-    await NotificationClient.send({
-      eventKey: "TASK_UPDATED",
-      category: "taskUpdates",
-      actorId: uid,
-      recipients: [requesterProfile.uid],
-      entity: {
-        type: "task",
-        id: taskId,
-      },
-      title: "Task Start OTP",
-      body: otpBody,
-      data: {
-        taskId,
-        otp,
-        otpType: "task_start",
-        expiresAt: expiresAt.toISOString(),
-      },
-    });
-
-    // Direct in-app notification fallback for requester.
+    // Polling-first delivery: write directly to in-app notifications.
     const inAppSent = await InAppNotificationClient.send({
       userId: task.requesterId.toString(),
       title: "Task Start OTP",
@@ -2010,56 +2010,6 @@ export class TaskService {
         expiresAt: expiresAt.toISOString(),
       },
     });
-
-    // Send OTP via email to requester
-    if (requesterProfile.email) {
-      logger.debug('[TaskService.requestStartOtp] Sending task_start_otp email', {
-        to: requesterProfile.email,
-        taskId,
-        isResend: options?.isResend
-      });
-      
-      EmailServiceClient.sendTaskStartOtp(requesterProfile.email, {
-        requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
-        taskerName: taskerProfile?.name || taskerProfile?.fullName || 'Tasker',
-        taskTitle: task.title,
-        otp,
-        expiresAt: expiresAt.toLocaleString('en-IN', { 
-          timeZone: 'Asia/Kolkata',
-          dateStyle: 'medium',
-          timeStyle: 'short'
-        }),
-        taskUrl: `${config.WEB_APP_URL || 'https://extrahand.in'}/tasks/${taskId}/track`,
-        userId: requesterProfile.uid,
-      }).catch(err => {
-        logger.warn('[TaskService.requestStartOtp] Failed to send OTP email', {
-          error: err.message,
-          taskId,
-          to: requesterProfile.email
-        });
-      });
-    }
-
-    // Send OTP via SMS to requester (Fast2SMS)
-    if (requesterProfile.phone) {
-      logger.debug('[TaskService.requestStartOtp] Sending task_start_otp SMS', {
-        to: requesterProfile.phone,
-        taskId,
-        isResend: options?.isResend
-      });
-      
-      Fast2SMSClient.sendTaskStartOTP(
-        requesterProfile.phone,
-        otp,
-        task.title
-      ).catch(err => {
-        logger.warn('[TaskService.requestStartOtp] Failed to send OTP SMS', {
-          error: err.message,
-          taskId,
-          to: requesterProfile.phone
-        });
-      });
-    }
 
     if (!inAppSent) {
       throw new BadRequestError("Unable to deliver OTP right now. Please try again.");
