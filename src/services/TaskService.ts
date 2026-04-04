@@ -2015,17 +2015,25 @@ export class TaskService {
       }
     }
     const requesterName = requesterProfile?.name || requesterProfile?.fullName || "requester";
+    const requesterEmail =
+      requesterProfile && typeof requesterProfile === "object" && "email" in requesterProfile
+        ? (requesterProfile as { email?: unknown }).email
+        : undefined;
 
     // Send email
     try {
-      await EmailServiceClient.sendTaskStartOtp(requesterProfile.email, {
-        requesterName,
-        taskerName,
-        taskTitle: task.title,
-        otp,
-        expiresAt: expiresAt.toISOString(),
-        userId: requesterUid,
-      });
+      if (typeof requesterEmail === "string" && requesterEmail.trim().length > 0) {
+        await EmailServiceClient.sendTaskStartOtp(requesterEmail, {
+          requesterName,
+          taskerName,
+          taskTitle: task.title,
+          otp,
+          expiresAt: expiresAt.toISOString(),
+          userId: requesterUid,
+        });
+      } else {
+        logger.warn("Skipping task start OTP email: requester email missing", { taskId, requesterUid });
+      }
     } catch (emailError) {
       logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
     }
