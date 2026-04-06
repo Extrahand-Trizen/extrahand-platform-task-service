@@ -911,6 +911,73 @@ export class ApplicationService {
     });
   }
 
+  static async editApplication(
+    applicationId: string,
+    applicantProfileId: mongoose.Types.ObjectId,
+    payload: {
+      coverLetter?: string;
+      proposedBudget?: {
+        amount?: number;
+        currency?: string;
+      };
+    }
+  ): Promise<ITaskApplication> {
+    const application = await TaskApplication.findById(applicationId);
+
+    if (!application) {
+      throw new NotFoundError("Application not found");
+    }
+
+    if (!application.applicantId.equals(applicantProfileId)) {
+      throw new ForbiddenError("Not authorized to edit this application");
+    }
+
+    if (application.status !== "pending") {
+      throw new BadRequestError("Only pending offers can be edited");
+    }
+
+    let changed = false;
+
+    if (payload.coverLetter !== undefined) {
+      application.coverLetter = String(payload.coverLetter).trim();
+      changed = true;
+    }
+
+    if (payload.proposedBudget !== undefined) {
+      const { amount, currency } = payload.proposedBudget;
+
+      if (amount !== undefined) {
+        const rawAmount = Number(amount);
+        if (!Number.isInteger(rawAmount) || rawAmount <= 0) {
+          throw new BadRequestError("Proposed budget amount must be a positive whole number");
+        }
+        if (rawAmount > 50000) {
+          throw new BadRequestError("Proposed budget amount cannot exceed 50000");
+        }
+
+        application.proposedBudget.amount = rawAmount;
+        if (application.negotiation) {
+          application.negotiation.currentAmount = rawAmount;
+        }
+        changed = true;
+      }
+
+      if (currency !== undefined) {
+        application.proposedBudget.currency = String(currency).trim() || application.proposedBudget.currency;
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      throw new BadRequestError("No valid fields provided to edit");
+    }
+
+    application.updatedAt = new Date();
+    await application.save();
+
+    return application;
+  }
+
   /**
    * Reject an application
    */
