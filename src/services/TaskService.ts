@@ -844,10 +844,30 @@ export class TaskService {
     // Find taskers with matching skill category
     if (uid) {
       try {
-        const recommendedTaskers = await UserServiceClient.matchUsers('skill', {
+        const recommendedTaskersRaw = await UserServiceClient.matchUsers('skill', {
           category: mappedCategory
         });
+        const recommendedTaskers = Array.from(
+          new Set(
+            recommendedTaskersRaw.filter(
+              (matchedUid): matchedUid is string =>
+                typeof matchedUid === 'string' && matchedUid.trim().length > 0 && matchedUid !== uid
+            )
+          )
+        );
+
+        logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Matched users by category only', {
+          taskId: task._id,
+          category: mappedCategory,
+          matchedCount: recommendedTaskers.length,
+          matchedUsers: recommendedTaskers,
+          excludedRequesterUid: uid,
+        });
+
         if (recommendedTaskers.length > 0) {
+          const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+          const taskRoute = `/tasks/${task._id}`;
+
           await NotificationClient.sendBatch(
             {
               eventKey: 'TASK_CREATED_RECOMMENDED',
@@ -859,7 +879,10 @@ export class TaskService {
               data: {
                 taskId: task._id.toString(),
                 category: mappedCategory,
-                budget: task.budget.amount
+                budget: task.budget.amount,
+                taskUrl,
+                route: taskRoute,
+                actionUrl: taskRoute,
               }
             },
             recommendedTaskers
@@ -870,14 +893,52 @@ export class TaskService {
 
             // ✅ FIX: query profiles by uid (string), not _id (ObjectId)
             const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
-            const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
             const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
 
             for (const p of recommendedProfiles) {
+              if (!p?.uid || p.uid === uid) {
+                logger.debug('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Skipping invalid/owner recipient', {
+                  taskId: task._id,
+                  uid: p?.uid,
+                });
+                continue;
+              }
+
+              // In-app must be sent for every category-matched recipient.
+              try {
+                await InAppNotificationClient.send({
+                  userId: p.uid,
+                  title: '🎯 Task Matching Your Skills',
+                  body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
+                  category: 'recommendedTaskAlerts',
+                  type: 'info',
+                  data: {
+                    taskId: task._id.toString(),
+                    taskUrl,
+                    route: taskRoute,
+                    actionUrl: taskRoute,
+                    category: mappedCategory,
+                    budget: task.budget?.amount
+                  }
+                });
+                logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - In-app sent', {
+                  taskId: task._id,
+                  userId: p.uid,
+                  category: mappedCategory,
+                  route: taskRoute,
+                });
+              } catch (inAppError) {
+                logger.warn('Failed to send in-app notification to recommended tasker', {
+                  taskId: task._id,
+                  userId: p.uid,
+                  error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+                });
+              }
+
+              // Email for category-matched recipient (if email exists and preference enabled).
               if (p.email) {
                 try {
                   logger.debug(`[TaskService.createTask] Sending task_created_recommended email to ${p.email}`);
-                  // Check if user has enabled recommended task alert emails
                   const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
                     p.uid,
                     'recommendedTaskAlerts'
@@ -896,41 +957,17 @@ export class TaskService {
                       taskUrl,
                       userId: p.uid,
                     });
-                    logger.info(`[TaskService.createTask] task_created_recommended email sent successfully`, {
+                    logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Email sent', {
                       taskId: task._id,
                       to: p.email,
-                      userId: p.uid
+                      userId: p.uid,
+                      category: mappedCategory,
                     });
-
-                    // 📬 In-App Notification: recommended task → tasker
-                    try {
-                      await InAppNotificationClient.send({
-                        userId: p.uid,
-                        title: '🎯 Task Matching Your Skills',
-                        body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
-                        category: 'recommendedTaskAlerts',
-                        type: 'info',
-                        data: {
-                          taskId: task._id.toString(),
-                          taskUrl,
-                          category: mappedCategory,
-                          budget: task.budget?.amount
-                        }
-                      });
-                      logger.info(`[TaskService.createTask] In-app notification sent to recommended tasker`, {
-                        taskId: task._id,
-                        userId: p.uid
-                      });
-                    } catch (inAppError) {
-                      logger.warn('Failed to send in-app notification to recommended tasker', {
-                        taskId: task._id,
-                        userId: p.uid,
-                        error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
-                      });
-                    }
                   } else {
-                    logger.info(`[TaskService.createTask] Email notifications disabled for recommended task alerts`, {
-                      userId: p.uid
+                    logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Email skipped by preferences', {
+                      taskId: task._id,
+                      userId: p.uid,
+                      category: 'recommendedTaskAlerts',
                     });
                   }
                 } catch (err) {
@@ -942,6 +979,11 @@ export class TaskService {
                     stack: err instanceof Error ? err.stack : undefined
                   });
                 }
+              } else {
+                logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Email skipped (missing email)', {
+                  taskId: task._id,
+                  userId: p.uid,
+                });
               }
             }
           } catch (emailErr) {
@@ -986,8 +1028,11 @@ export class TaskService {
             keywords: taskKeywords
           });
 
-          const keywordMatchedUsers = await UserServiceClient.matchUsers('keywords', {
-            keywords: taskKeywords
+          const keywordMatchedUsers: string[] = [];
+
+          logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Keyword pipeline disabled by category-only policy', {
+            taskId: task._id,
+            keywords: taskKeywords,
           });
 
           logger.info(`[TaskService.createTask] KEYWORD ALERTS - User matching result`, {
@@ -1175,8 +1220,11 @@ export class TaskService {
           .filter((slug) => slug.length > 0);
 
         if (categorySlugs.length > 0) {
-          const categoryMatchedUsers = await UserServiceClient.matchUsers('categories', {
-            categorySlugs
+          const categoryMatchedUsers: string[] = [];
+
+          logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Category-slug pipeline disabled by category-only policy', {
+            taskId: task._id,
+            categorySlugs,
           });
 
           if (categoryMatchedUsers.length > 0) {
