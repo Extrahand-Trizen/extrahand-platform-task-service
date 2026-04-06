@@ -887,6 +887,40 @@ export class TaskService {
             },
             recommendedTaskers
           );
+
+          // In-app notification must be delivered directly to all matched UIDs.
+          for (const matchedUid of recommendedTaskers) {
+            try {
+              await InAppNotificationClient.send({
+                userId: matchedUid,
+                title: '🎯 Task Matching Your Skills',
+                body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
+                category: 'recommendedTaskAlerts',
+                type: 'info',
+                data: {
+                  taskId: task._id.toString(),
+                  taskUrl,
+                  route: taskRoute,
+                  actionUrl: taskRoute,
+                  category: mappedCategory,
+                  budget: task.budget?.amount
+                }
+              });
+              logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - In-app sent (uid-level)', {
+                taskId: task._id,
+                userId: matchedUid,
+                category: mappedCategory,
+                route: taskRoute,
+              });
+            } catch (inAppError) {
+              logger.warn('[TaskService.createTask] CATEGORY_SKILL_ALERTS - In-app failed (uid-level)', {
+                taskId: task._id,
+                userId: matchedUid,
+                error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+              });
+            }
+          }
+
           // Email: task_created_recommended → matched taskers
           try {
             const Profile = mongoose.connection.collection('profiles');
@@ -895,6 +929,12 @@ export class TaskService {
             const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
             const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
 
+            logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Profile lookup for email', {
+              taskId: task._id,
+              matchedUidCount: recommendedTaskers.length,
+              profileCount: recommendedProfiles.length,
+            });
+
             for (const p of recommendedProfiles) {
               if (!p?.uid || p.uid === uid) {
                 logger.debug('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Skipping invalid/owner recipient', {
@@ -902,37 +942,6 @@ export class TaskService {
                   uid: p?.uid,
                 });
                 continue;
-              }
-
-              // In-app must be sent for every category-matched recipient.
-              try {
-                await InAppNotificationClient.send({
-                  userId: p.uid,
-                  title: '🎯 Task Matching Your Skills',
-                  body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
-                  category: 'recommendedTaskAlerts',
-                  type: 'info',
-                  data: {
-                    taskId: task._id.toString(),
-                    taskUrl,
-                    route: taskRoute,
-                    actionUrl: taskRoute,
-                    category: mappedCategory,
-                    budget: task.budget?.amount
-                  }
-                });
-                logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - In-app sent', {
-                  taskId: task._id,
-                  userId: p.uid,
-                  category: mappedCategory,
-                  route: taskRoute,
-                });
-              } catch (inAppError) {
-                logger.warn('Failed to send in-app notification to recommended tasker', {
-                  taskId: task._id,
-                  userId: p.uid,
-                  error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
-                });
               }
 
               // Email for category-matched recipient (if email exists and preference enabled).
