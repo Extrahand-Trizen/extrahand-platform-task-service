@@ -866,7 +866,7 @@ export class TaskService {
 
         if (recommendedTaskers.length > 0) {
           const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-          const taskRoute = `/tasks?tab=mytasks`;
+          const taskRoute = `/tasks/${task._id}`;
 
           await NotificationClient.sendBatch(
             {
@@ -1100,7 +1100,7 @@ export class TaskService {
               });
 
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-              const taskRoute = `/tasks?tab=mytasks`;
+              const taskRoute = `/tasks/${task._id}`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
 
