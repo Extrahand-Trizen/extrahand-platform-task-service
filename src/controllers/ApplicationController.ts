@@ -165,6 +165,33 @@ export class ApplicationController {
     ApiResponse.success(res, application, 'Application updated successfully');
   }
 
+  static async editApplication(
+    req: AuthenticatedRequest,
+    res: Response
+  ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { coverLetter, proposedBudget } = req.body;
+    if (coverLetter === undefined && proposedBudget === undefined) {
+      throw new BadRequestError(
+        'Provide at least one editable field: coverLetter or proposedBudget.'
+      );
+    }
+
+    const application = await ApplicationService.editApplication(
+      req.params.id,
+      req.user!.profileId,
+      {
+        coverLetter,
+        proposedBudget,
+      }
+    );
+
+    ApiResponse.success(res, application, 'Application edited successfully');
+  }
+
   static async negotiateApplication(
     req: AuthenticatedRequest,
     res: Response

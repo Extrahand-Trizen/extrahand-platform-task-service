@@ -23,6 +23,9 @@ router.get("/:id", asyncHandler(ApplicationController.getApplication));
 // PUT /api/v1/applications/:id - Update application status (accept/reject)
 router.put("/:id", asyncHandler(ApplicationController.updateApplication));
 
+// PATCH /api/v1/applications/:id - Edit own pending offer
+router.patch("/:id", asyncHandler(ApplicationController.editApplication));
+
 // POST /api/v1/applications/:id/negotiate - Counter/accept/reject negotiation
 router.post("/:id/negotiate", asyncHandler(ApplicationController.negotiateApplication));
 
