@@ -866,7 +866,7 @@ export class TaskService {
 
         if (recommendedTaskers.length > 0) {
           const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-          const taskRoute = `/tasks/${task._id}`;
+          const taskRoute = `/tasks?tab=mytasks`;
 
           await NotificationClient.sendBatch(
             {
@@ -1013,14 +1013,22 @@ export class TaskService {
       // STEP 2: Emit TASK_CREATED_KEYWORD notification
       // Find users who have saved keywords matching this task (ONLY matching category, not title/description)
       try {
-        // Extract keywords ONLY from category, subcategory, and categoryLabel
-        // Users save keywords as CATEGORIES, not individual words from task content
+        // Extract search keywords from category plus the user-facing title/label.
+        // This lets keyword alerts fire even when the skill category does not match.
         const taskKeywords: string[] = [
           task.category?.toLowerCase(),
           task.subcategory?.toLowerCase(),
-          task.categoryLabel?.toLowerCase()
+          task.categoryLabel?.toLowerCase(),
+          task.title?.toLowerCase(),
         ]
-          .filter((word): word is string => typeof word === 'string' && word.length > 0); // Filter null/undefined only
+          .filter((word): word is string => typeof word === 'string' && word.length > 0)
+          .flatMap((word) => [
+            word,
+            word.replace(/\//g, ' '),
+            word.replace(/\s+/g, ' ').trim(),
+          ])
+          .map((word) => word.toLowerCase().trim())
+          .filter((word, index, arr) => word.length > 0 && arr.indexOf(word) === index);
 
         logger.info(`[TaskService.createTask] KEYWORD ALERTS - Extracted keywords`, {
           taskId: task._id,
@@ -1037,11 +1045,24 @@ export class TaskService {
             keywords: taskKeywords
           });
 
-          const keywordMatchedUsers: string[] = [];
+          const keywordMatchedUsersRaw = await UserServiceClient.matchUsers('keywords', {
+            keywords: taskKeywords,
+          });
+          const keywordMatchedUsers = Array.from(
+            new Set(
+              keywordMatchedUsersRaw.filter(
+                (matchedUid): matchedUid is string =>
+                  typeof matchedUid === 'string' && matchedUid.trim().length > 0 && matchedUid !== uid
+              )
+            )
+          );
 
-          logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Keyword pipeline disabled by category-only policy', {
+          logger.info('[TaskService.createTask] KEYWORD ALERTS - Matched users by keyword only', {
             taskId: task._id,
             keywords: taskKeywords,
+            matchedCount: keywordMatchedUsers.length,
+            matchedUsers: keywordMatchedUsers,
+            excludedRequesterUid: uid,
           });
 
           logger.info(`[TaskService.createTask] KEYWORD ALERTS - User matching result`, {
@@ -1079,6 +1100,7 @@ export class TaskService {
               });
 
               const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+              const taskRoute = `/tasks?tab=mytasks`;
               const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
               const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
 
@@ -1147,6 +1169,8 @@ export class TaskService {
                           data: {
                             taskId: task._id.toString(),
                             taskUrl,
+                            route: taskRoute,
+                            actionUrl: taskRoute,
                             keywords: taskKeywords,
                             matchedKeyword: matchedKeywordStr,
                             budget: task.budget?.amount
@@ -1231,7 +1255,7 @@ export class TaskService {
         if (categorySlugs.length > 0) {
           const categoryMatchedUsers: string[] = [];
 
-          logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Category-slug pipeline disabled by category-only policy', {
+          logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Category-slug pipeline remains disabled', {
             taskId: task._id,
             categorySlugs,
           });
