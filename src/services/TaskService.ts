@@ -390,52 +390,171 @@ export class TaskService {
     lng: number;
     radiusKm?: number;
     limit?: number;
-    status?: TaskStatus;
+    page?: number;
+    status?: TaskStatus | TaskStatus[] | string | string[];
+    category?: TaskCategory | string | string[];
+    city?: string;
+    minBudget?: number;
+    maxBudget?: number;
+    search?: string;
+    suburb?: string;
+    remotely?: boolean | null;
+    sortBy?: string;
+    excludeRequesterId?: string;
+    assigneeId?: string;
+    posterUid?: string;
   }): Promise<{ tasks: ITask[]; pagination: any; location: any }> {
-    const { lat, lng, radiusKm = 10, limit = 50, status = "open" } = params;
+    const {
+      lat,
+      lng,
+      radiusKm = 10,
+      limit = 50,
+      page = 1,
+      status = "open",
+      category,
+      city,
+      minBudget,
+      maxBudget,
+      search,
+      suburb,
+      remotely,
+      sortBy,
+      excludeRequesterId,
+      assigneeId,
+      posterUid,
+    } = params;
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       throw new BadRequestError("Invalid latitude/longitude");
     }
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
+    const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
+    const skip = (effectivePage - 1) * effectiveLimit;
     const radiusMeters = radiusKm * 1000;
 
-    const query: any = {
-      "location.coordinates": {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [lng, lat],
+    const andClauses: any[] = [
+      {
+        "location.coordinates": {
+          $near: {
+            $geometry: {
+              type: "Point",
+              coordinates: [lng, lat],
+            },
+            $maxDistance: radiusMeters,
           },
-          $maxDistance: radiusMeters,
         },
       },
-      status,
-    };
+    ];
+
+    // Status filter: support single value or array
+    if (status) {
+      if (Array.isArray(status) && status.length > 1) {
+        andClauses.push({ status: { $in: status } });
+      } else if (Array.isArray(status) && status.length === 1) {
+        andClauses.push({ status: status[0] });
+      } else if (typeof status === "string") {
+        andClauses.push({ status });
+      }
+    }
+
+    if (excludeRequesterId && mongoose.Types.ObjectId.isValid(excludeRequesterId)) {
+      andClauses.push({
+        requesterId: { $ne: new mongoose.Types.ObjectId(excludeRequesterId) },
+      });
+    }
+
+    if (assigneeId && mongoose.Types.ObjectId.isValid(assigneeId)) {
+      andClauses.push({ assigneeId: new mongoose.Types.ObjectId(assigneeId) });
+    }
+
+    if (posterUid) {
+      andClauses.push({ posterUid });
+    }
+
+    if (category) {
+      if (Array.isArray(category)) {
+        const mapped = category.map((c) => mapCategoryToEnum(c));
+        andClauses.push({ category: { $in: mapped } });
+      } else {
+        andClauses.push({ category: mapCategoryToEnum(category as string) });
+      }
+    }
+
+    if (city) andClauses.push({ "location.city": city });
+
+    if (typeof minBudget === "number" || typeof maxBudget === "number") {
+      const budgetFilter: any = {};
+      if (typeof minBudget === "number") budgetFilter.$gte = minBudget;
+      if (typeof maxBudget === "number") budgetFilter.$lte = maxBudget;
+      andClauses.push({ "budget.amount": budgetFilter });
+    }
+
+    if (suburb) {
+      const escaped = suburb.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(escaped, "i");
+      andClauses.push({ $or: [{ "location.address": re }, { "location.city": re }] });
+    }
+
+    if (typeof remotely === "boolean") {
+      if (remotely === true) {
+        andClauses.push({
+          $or: [
+            { location: { $exists: false } },
+            { "location.coordinates.0": { $exists: false } },
+            { "location.address": { $exists: false } },
+          ],
+        });
+      } else {
+        andClauses.push({ "location.coordinates.0": { $exists: true } });
+      }
+    }
+
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(escaped, "i");
+      andClauses.push({
+        $or: [{ title: re }, { description: re }, { "location.city": re }, { category: re }],
+      });
+    }
+
+    let sortObj: any = { createdAt: -1 };
+    if (sortBy) {
+      if (sortBy === "price-low") sortObj = { "budget.amount": 1 };
+      else if (sortBy === "price-high") sortObj = { "budget.amount": -1 };
+      else if (sortBy === "date") sortObj = { createdAt: 1 };
+    }
+
+    const query = andClauses.length > 0 ? { $and: andClauses } : {};
 
     const tasks = await Task.find(query)
       .select(TASK_LIST_SELECT)
+      .skip(skip)
       .limit(effectiveLimit)
-      .sort({ createdAt: -1 })
+      .sort(sortObj)
       .lean();
 
     // NOTE: countDocuments with $near can fail on some MongoDB versions/tiers.
     // Use $geoWithin + $centerSphere for count instead.
-    const total = await Task.countDocuments({
-      status,
-      "location.coordinates": {
-        $geoWithin: {
-          $centerSphere: [[lng, lat], radiusKm / 6378.1], // Earth radius in km
+    const countAndClauses = andClauses.map((clause) => {
+      if (!clause["location.coordinates"]?.$near) return clause;
+      return {
+        "location.coordinates": {
+          $geoWithin: {
+            $centerSphere: [[lng, lat], radiusKm / 6378.1], // Earth radius in km
+          },
         },
-      },
+      };
+    });
+    const total = await Task.countDocuments({
+      $and: countAndClauses,
     });
 
     return {
       tasks: tasks as unknown as ITask[],
       pagination: {
-        page: 1,
+        page: effectivePage,
         limit: effectiveLimit,
         total,
-        pages: Math.ceil(total / effectiveLimit),
+        totalPages: Math.ceil(total / effectiveLimit),
       },
       location: {
         latitude: lat,
