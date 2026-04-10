@@ -87,6 +87,7 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "driver-chauffeur": "delivery",
     "cooking-home-chef": "other",
     "laundry-ironing": "cleaning",
+    "senior-care-elder-care": "other",
   };
 
   // Try exact match first, then case-insensitive match
