@@ -55,7 +55,25 @@ export class TaskController {
    * Get nearby tasks using geospatial query
    */
   static async getNearbyTasks(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { lat, lng, radiusKm, limit, status } = req.query;
+    const {
+      lat,
+      lng,
+      radiusKm,
+      limit,
+      page,
+      status,
+      category,
+      city,
+      minBudget,
+      maxBudget,
+      search,
+      suburb,
+      remotely,
+      sortBy,
+      excludeRequesterId,
+      assigneeId,
+      posterUid,
+    } = req.query;
 
     if (!lat || !lng) {
       throw new BadRequestError('Latitude and longitude required');
@@ -67,15 +85,42 @@ export class TaskController {
       throw new BadRequestError('Invalid latitude/longitude');
     }
 
+    // Allow comma-separated statuses and categories for parity with GET /tasks
+    const statusParam = status ? (status as string) : undefined;
+    const statuses = statusParam && statusParam.includes(',')
+      ? statusParam.split(',').map(s => s.trim()).filter(Boolean)
+      : statusParam;
+    const categoriesParam = category ? (category as string) : undefined;
+    const categories = categoriesParam && categoriesParam.includes(',')
+      ? categoriesParam.split(',').map(s => s.trim()).filter(Boolean)
+      : categoriesParam;
+
+    let remotelyBool: boolean | null = null;
+    if (typeof remotely !== 'undefined') {
+      remotelyBool = remotely === 'true' ? true : remotely === 'false' ? false : null;
+    }
+
     const result = await TaskService.getNearbyTasks({
       lat: parsedLat,
       lng: parsedLng,
       radiusKm: radiusKm ? parseFloat(radiusKm as string) : undefined,
       limit: limit ? parseInt(limit as string) : undefined,
-      status: status as any,
+      page: page ? parseInt(page as string) : undefined,
+      status: statuses as any,
+      category: categories as any,
+      city: city as string,
+      minBudget: minBudget ? parseFloat(minBudget as string) : undefined,
+      maxBudget: maxBudget ? parseFloat(maxBudget as string) : undefined,
+      search: search ? (search as string) : undefined,
+      suburb: suburb ? (suburb as string) : undefined,
+      remotely: remotelyBool,
+      sortBy: sortBy ? (sortBy as string) : undefined,
+      excludeRequesterId: excludeRequesterId ? (excludeRequesterId as string) : undefined,
+      assigneeId: assigneeId ? (assigneeId as string) : undefined,
+      posterUid: posterUid ? (posterUid as string) : undefined,
     });
 
-    ApiResponse.success(res, result, 'Nearby tasks retrieved successfully');
+    ApiResponse.paginated(res, result.tasks, 'Nearby tasks retrieved successfully', result.pagination);
   }
 
   /**
