@@ -186,11 +186,10 @@ export class TaskService {
     excludeRequesterId?: string;
     assigneeId?: string;
     posterUid?: string;
-    requesterId?: string;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, requesterId, limit = 50, page = 1 } = filters;
+    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -203,7 +202,7 @@ export class TaskService {
     const hasSearchOrSuburb = !!search || !!suburb;
     const hasRemotelyFilter = typeof remotely === "boolean";
     const hasUserSpecificFilter =
-      !!excludeRequesterId || !!assigneeId || !!posterUid || !!requesterId;
+      !!excludeRequesterId || !!assigneeId || !!posterUid;
     const hasNonDefaultSort =
       !!sortBy && sortBy !== "recent";
 
@@ -273,14 +272,9 @@ export class TaskService {
       andClauses.push({ assigneeId: new mongoose.Types.ObjectId(assigneeId) });
     }
 
-    // Filter by poster UID (for legacy/cross-service compatibility)
+    // Filter by poster UID (for posted tasks)
     if (posterUid) {
       andClauses.push({ posterUid: posterUid });
-    }
-
-    // Filter by requester profile ID (preferred way for user-owned tasks)
-    if (requesterId && mongoose.Types.ObjectId.isValid(requesterId)) {
-      andClauses.push({ requesterId: new mongoose.Types.ObjectId(requesterId) });
     }
 
     // Support multi-category (comma separated from query) or single category mapping
