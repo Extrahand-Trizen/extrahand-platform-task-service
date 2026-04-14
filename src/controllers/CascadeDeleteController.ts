@@ -6,6 +6,26 @@ import logger from '../config/logger';
 
 export class CascadeDeleteController {
   /**
+   * DELETE /api/v1/cascade-delete/user/:uid/open-tasks
+   * Service-to-service endpoint to delete only open posted tasks for a user.
+   * Caller should send X-Profile-Id (profile ObjectId) so requester-owned tasks are removed.
+   */
+  static async deleteOpenPostedTasks(req: Request, res: Response): Promise<void> {
+    const { uid } = req.params;
+    const profileId = req.headers['x-profile-id'] as string | undefined;
+
+    if (!uid) {
+      throw new BadRequestError('User ID (uid) is required');
+    }
+
+    logger.info(`🗑️ Received open-task delete request for user: ${uid}, profileId: ${profileId ?? 'not provided'}`);
+
+    const result = await CascadeDeleteService.deleteOpenPostedTasks(uid, profileId);
+
+    ApiResponse.success(res, result, 'Open tasks deleted successfully');
+  }
+
+  /**
    * DELETE /api/v1/cascade-delete/user/:uid
    * Service-to-service endpoint to delete all user-related data.
    * Caller should send X-Profile-Id (profile ObjectId) so tasks and other profile-keyed data are deleted.
