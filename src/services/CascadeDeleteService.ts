@@ -180,5 +180,69 @@ export class CascadeDeleteService {
       throw error;
     }
   }
+
+  /**
+   * Diagnostic: Get all tasks for a user (both as poster and as assignee)
+   * Helps debug why deletion is blocked
+   */
+  static async getUserTasksDiagnostic(uid: string, profileIdStr?: string) {
+    logger.info(`🔍 Fetching all tasks for user ${uid}`, { profileId: profileIdStr });
+
+    const profileId = profileIdStr ? new mongoose.Types.ObjectId(profileIdStr) : undefined;
+
+    try {
+      // Get all tasks where user is poster
+      const posterTasks = await Task.find({ requesterId: profileId })
+        .select('_id title status requesterId assigneeId createdAt assignedAt')
+        .lean();
+
+      // Get all tasks where user is assigned
+      const assignedTasks = await Task.find({ assigneeId: profileId })
+        .select('_id title status requesterId assigneeId createdAt assignedAt')
+        .lean();
+
+      // Get all applications where user is applicant
+      const applications = await TaskApplication.find({ applicantId: profileId })
+        .select('_id taskId applicantId status createdAt')
+        .lean();
+
+      logger.info(`📊 Task diagnostic result:`, {
+        posterTasksCount: posterTasks.length,
+        assignedTasksCount: assignedTasks.length,
+        applicationsCount: applications.length,
+        posterTasksStatus: posterTasks.map(t => ({ id: t._id, title: t.title, status: t.status })),
+        assignedTasksStatus: assignedTasks.map(t => ({ id: t._id, title: t.title, status: t.status })),
+        applicationsStatus: applications.map(a => ({ id: a._id, taskId: a.taskId, status: a.status }))
+      });
+
+      return {
+        posterTasks: posterTasks.map(t => ({
+          id: t._id,
+          title: t.title,
+          status: t.status,
+          role: 'poster',
+          createdAt: t.createdAt,
+          assignedAt: t.assignedAt
+        })),
+        assignedTasks: assignedTasks.map(t => ({
+          id: t._id,
+          title: t.title,
+          status: t.status,
+          role: 'assignee',
+          createdAt: t.createdAt,
+          assignedAt: t.assignedAt
+        })),
+        applications: applications.map(a => ({
+          id: a._id,
+          taskId: a.taskId,
+          status: a.status,
+          createdAt: a.createdAt
+        }))
+      };
+    } catch (error: any) {
+      logger.error(`❌ Error fetching task diagnostic for user ${uid}:`, error);
+      throw error;
+    }
+  }
 }
 

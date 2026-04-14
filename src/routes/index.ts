@@ -42,6 +42,13 @@ router.delete(
   asyncHandler(CascadeDeleteController.deleteUserData.bind(CascadeDeleteController))
 );
 
+// Diagnostic endpoint: Get all tasks for user (debug why deletion is blocked)
+router.get(
+  '/cascade-delete/user/:uid/tasks-diagnostic',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.getUserTasksDiagnostic.bind(CascadeDeleteController))
+);
+
 // API routes
 router.use('/tasks', taskRoutes);
 router.use('/applications', applicationRoutes);

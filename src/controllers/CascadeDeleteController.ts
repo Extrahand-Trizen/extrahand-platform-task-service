@@ -44,5 +44,25 @@ export class CascadeDeleteController {
 
     ApiResponse.success(res, result, 'User data deleted successfully');
   }
+
+  /**
+   * GET /api/v1/cascade-delete/user/:uid/tasks-diagnostic
+   * Diagnostic endpoint: Returns all tasks for a user (across all statuses)
+   * Used to debug why account deletion is being blocked
+   */
+  static async getUserTasksDiagnostic(req: Request, res: Response): Promise<void> {
+    const { uid } = req.params;
+    const profileId = req.headers['x-profile-id'] as string | undefined;
+
+    if (!uid) {
+      throw new BadRequestError('User ID (uid) is required');
+    }
+
+    logger.info(`🔍 Diagnostic request for tasks of user: ${uid}, profileId: ${profileId ?? 'not provided'}`);
+
+    const result = await CascadeDeleteService.getUserTasksDiagnostic(uid, profileId);
+
+    ApiResponse.success(res, result, 'User tasks diagnostic data retrieved');
+  }
 }
 
