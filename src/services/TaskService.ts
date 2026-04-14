@@ -964,8 +964,16 @@ export class TaskService {
     // Find taskers with matching skill category
     if (uid) {
       try {
+        const skillMatchCategory = [
+          task.categoryLabel,
+          task.subcategory,
+          categorySlug,
+          frontendCategory,
+          mappedCategory,
+        ].find((value) => typeof value === 'string' && value.trim().length > 0) as string;
+
         const recommendedTaskersRaw = await UserServiceClient.matchUsers('skill', {
-          category: mappedCategory
+          category: skillMatchCategory
         });
         const recommendedTaskers = Array.from(
           new Set(
@@ -978,6 +986,7 @@ export class TaskService {
 
         logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Matched users by category only', {
           taskId: task._id,
+          skillMatchCategory,
           category: mappedCategory,
           matchedCount: recommendedTaskers.length,
           matchedUsers: recommendedTaskers,
@@ -995,10 +1004,11 @@ export class TaskService {
               actorId: uid, // Suppress notification to task creator
               entity: { type: 'task', id: task._id.toString() },
               title: `New task matching your skills: ${task.title}`,
-              body: `A ${mappedCategory} task has been posted that matches your skills.`,
+              body: `A ${skillMatchCategory} task has been posted that matches your skills.`,
               data: {
                 taskId: task._id.toString(),
                 category: mappedCategory,
+                skillMatchCategory,
                 budget: task.budget.amount,
                 taskUrl,
                 route: taskRoute,
@@ -1014,7 +1024,7 @@ export class TaskService {
               await InAppNotificationClient.send({
                 userId: matchedUid,
                 title: '🎯 Task Matching Your Skills',
-                body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
+                body: `A new "${skillMatchCategory}" task "${task.title}" has been posted`,
                 category: 'recommendedTaskAlerts',
                 type: 'info',
                 data: {
@@ -1023,6 +1033,7 @@ export class TaskService {
                   route: taskRoute,
                   actionUrl: taskRoute,
                   category: mappedCategory,
+                  skillMatchCategory,
                   budget: task.budget?.amount
                 }
               });
