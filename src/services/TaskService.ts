@@ -186,10 +186,11 @@ export class TaskService {
     excludeRequesterId?: string;
     assigneeId?: string;
     posterUid?: string;
+    requesterId?: string;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, limit = 50, page = 1 } = filters;
+    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, requesterId, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -202,7 +203,7 @@ export class TaskService {
     const hasSearchOrSuburb = !!search || !!suburb;
     const hasRemotelyFilter = typeof remotely === "boolean";
     const hasUserSpecificFilter =
-      !!excludeRequesterId || !!assigneeId || !!posterUid;
+      !!excludeRequesterId || !!assigneeId || !!posterUid || !!requesterId;
     const hasNonDefaultSort =
       !!sortBy && sortBy !== "recent";
 
@@ -270,6 +271,11 @@ export class TaskService {
     // Filter by assignee ID (for completed task stats)
     if (assigneeId && mongoose.Types.ObjectId.isValid(assigneeId)) {
       andClauses.push({ assigneeId: new mongoose.Types.ObjectId(assigneeId) });
+    }
+
+    // Filter by requester profile ID
+    if (requesterId && mongoose.Types.ObjectId.isValid(requesterId)) {
+      andClauses.push({ requesterId: new mongoose.Types.ObjectId(requesterId) });
     }
 
     // Filter by poster UID (for posted tasks)
