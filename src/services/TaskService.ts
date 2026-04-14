@@ -611,6 +611,20 @@ export class TaskService {
   }
 
   /**
+   * Fast count for open tasks by requester profile id.
+   */
+  static async getOpenTaskCountByRequesterId(requesterId: string): Promise<number> {
+    if (!mongoose.Types.ObjectId.isValid(requesterId)) {
+      throw new BadRequestError("Invalid requesterId");
+    }
+
+    return Task.countDocuments({
+      requesterId: new mongoose.Types.ObjectId(requesterId),
+      status: "open",
+    });
+  }
+
+  /**
    * Get a single task by ID (with Redis cache to reduce DB load under concurrency)
    */
   static async getTaskById(taskId: string): Promise<ITask> {
