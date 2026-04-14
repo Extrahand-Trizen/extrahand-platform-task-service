@@ -14,7 +14,7 @@ export class TaskController {
    * Get all tasks with optional filtering
    */
   static async getTasks(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { status, category, city, limit, page, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid } = req.query;
+    const { status, category, city, limit, page, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, requesterId } = req.query;
 
     // Allow comma-separated statuses (frontend may send multiple, e.g. "open,assigned")
     const statusParam = status ? (status as string) : undefined;
@@ -43,6 +43,7 @@ export class TaskController {
       excludeRequesterId: excludeRequesterId ? (excludeRequesterId as string) : undefined,
       assigneeId: assigneeId ? (assigneeId as string) : undefined,
       posterUid: posterUid ? (posterUid as string) : undefined,
+      requesterId: requesterId ? (requesterId as string) : undefined,
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
     });
