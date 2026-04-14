@@ -9,6 +9,8 @@ import reportRoutes from './reports';
 import matchRoutes from './matches';
 import uploadRoutes from './uploads';
 import testReminderRoutes from './test-reminders';
+import analyticsRoutes from './analytics';
+import statsRoutes from './stats';
 import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
@@ -47,6 +49,8 @@ router.use('/', reportRoutes); // Report routes are already prefixed with /tasks
 router.use('/matches', matchRoutes);
 router.use('/uploads', uploadRoutes);
 router.use('/test/reminders', testReminderRoutes); // Test endpoints (dev only)
+router.use('/analytics', analyticsRoutes);
+router.use('/stats', statsRoutes);
 
 export default router;
 
