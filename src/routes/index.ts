@@ -33,9 +33,22 @@ router.use(gatewayAuthMiddleware);
 
 // Service-to-service cascade delete endpoint (requires service auth)
 router.delete(
+  '/cascade-delete/user/:uid/open-tasks',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.deleteOpenPostedTasks.bind(CascadeDeleteController))
+);
+
+router.delete(
   '/cascade-delete/user/:uid',
   serviceAuthMiddleware,
   asyncHandler(CascadeDeleteController.deleteUserData.bind(CascadeDeleteController))
+);
+
+// Diagnostic endpoint: Get all tasks for user (debug why deletion is blocked)
+router.get(
+  '/cascade-delete/user/:uid/tasks-diagnostic',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.getUserTasksDiagnostic.bind(CascadeDeleteController))
 );
 
 // API routes

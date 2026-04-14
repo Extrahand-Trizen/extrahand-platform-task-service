@@ -87,6 +87,7 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "driver-chauffeur": "delivery",
     "cooking-home-chef": "other",
     "laundry-ironing": "cleaning",
+    "senior-care-elder-care": "other",
 
     // Post-a-task grouped categories (web app)
     "it-computer-support": "repair",
@@ -195,10 +196,11 @@ export class TaskService {
     excludeRequesterId?: string;
     assigneeId?: string;
     posterUid?: string;
+    requesterId?: string;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, limit = 50, page = 1 } = filters;
+    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, requesterId, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -211,7 +213,7 @@ export class TaskService {
     const hasSearchOrSuburb = !!search || !!suburb;
     const hasRemotelyFilter = typeof remotely === "boolean";
     const hasUserSpecificFilter =
-      !!excludeRequesterId || !!assigneeId || !!posterUid;
+      !!excludeRequesterId || !!assigneeId || !!posterUid || !!requesterId;
     const hasNonDefaultSort =
       !!sortBy && sortBy !== "recent";
 
@@ -279,6 +281,11 @@ export class TaskService {
     // Filter by assignee ID (for completed task stats)
     if (assigneeId && mongoose.Types.ObjectId.isValid(assigneeId)) {
       andClauses.push({ assigneeId: new mongoose.Types.ObjectId(assigneeId) });
+    }
+
+    // Filter by requester profile ID
+    if (requesterId && mongoose.Types.ObjectId.isValid(requesterId)) {
+      andClauses.push({ requesterId: new mongoose.Types.ObjectId(requesterId) });
     }
 
     // Filter by poster UID (for posted tasks)
@@ -973,8 +980,16 @@ export class TaskService {
     // Find taskers with matching skill category
     if (uid) {
       try {
+        const skillMatchCategory = [
+          task.categoryLabel,
+          task.subcategory,
+          categorySlug,
+          frontendCategory,
+          mappedCategory,
+        ].find((value) => typeof value === 'string' && value.trim().length > 0) as string;
+
         const recommendedTaskersRaw = await UserServiceClient.matchUsers('skill', {
-          category: mappedCategory
+          category: skillMatchCategory
         });
         const recommendedTaskers = Array.from(
           new Set(
@@ -987,6 +1002,7 @@ export class TaskService {
 
         logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Matched users by category only', {
           taskId: task._id,
+          skillMatchCategory,
           category: mappedCategory,
           matchedCount: recommendedTaskers.length,
           matchedUsers: recommendedTaskers,
@@ -1004,10 +1020,11 @@ export class TaskService {
               actorId: uid, // Suppress notification to task creator
               entity: { type: 'task', id: task._id.toString() },
               title: `New task matching your skills: ${task.title}`,
-              body: `A ${mappedCategory} task has been posted that matches your skills.`,
+              body: `A ${skillMatchCategory} task has been posted that matches your skills.`,
               data: {
                 taskId: task._id.toString(),
                 category: mappedCategory,
+                skillMatchCategory,
                 budget: task.budget.amount,
                 taskUrl,
                 route: taskRoute,
@@ -1023,7 +1040,7 @@ export class TaskService {
               await InAppNotificationClient.send({
                 userId: matchedUid,
                 title: '🎯 Task Matching Your Skills',
-                body: `A new "${mappedCategory}" task "${task.title}" has been posted`,
+                body: `A new "${skillMatchCategory}" task "${task.title}" has been posted`,
                 category: 'recommendedTaskAlerts',
                 type: 'info',
                 data: {
@@ -1032,6 +1049,7 @@ export class TaskService {
                   route: taskRoute,
                   actionUrl: taskRoute,
                   category: mappedCategory,
+                  skillMatchCategory,
                   budget: task.budget?.amount
                 }
               });

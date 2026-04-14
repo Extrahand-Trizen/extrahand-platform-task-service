@@ -9,6 +9,58 @@ import logger from '../config/logger';
 
 export class CascadeDeleteService {
   /**
+   * Delete only open posted tasks for a user.
+   * Used by user-service before account deletion so open tasks are removed first.
+   */
+  static async deleteOpenPostedTasks(uid: string, profileIdStr?: string): Promise<{
+    tasksDeleted: number;
+    applicationsDeleted: number;
+    totalDeleted: number;
+  }> {
+    const profileId = profileIdStr && mongoose.Types.ObjectId.isValid(profileIdStr)
+      ? new mongoose.Types.ObjectId(profileIdStr)
+      : null;
+
+    logger.info(`🗑️ Starting open-task delete for user: ${uid}, profileId: ${profileId?.toString() ?? 'not provided'}`);
+
+    try {
+      if (!profileId) {
+        logger.warn(`⚠️ No valid profileId provided; skipping open task deletion`);
+        return { tasksDeleted: 0, applicationsDeleted: 0, totalDeleted: 0 };
+      }
+
+      const openTasks = await Task.find({ requesterId: profileId, status: 'open' }).select('_id').lean();
+      const taskIds = openTasks.map((task) => task._id);
+      logger.info(`📋 Found ${taskIds.length} open tasks to delete for profileId ${profileId}`);
+
+      let tasksDeleted = 0;
+      let applicationsDeleted = 0;
+
+      if (taskIds.length > 0) {
+        const taskDeleteResult = await Task.deleteMany({ _id: { $in: taskIds } });
+        tasksDeleted = taskDeleteResult.deletedCount || 0;
+        logger.info(`✅ Deleted ${tasksDeleted} open tasks`);
+
+        const applicationDeleteResult = await TaskApplication.deleteMany({ taskId: { $in: taskIds } });
+        applicationsDeleted = applicationDeleteResult.deletedCount || 0;
+        logger.info(`✅ Deleted ${applicationsDeleted} applications linked to deleted open tasks`);
+      }
+
+      const totalDeleted = tasksDeleted + applicationsDeleted;
+      logger.info(`✅ Open-task delete completed for user ${uid}. Total records deleted: ${totalDeleted}`);
+
+      return {
+        tasksDeleted,
+        applicationsDeleted,
+        totalDeleted
+      };
+    } catch (error: any) {
+      logger.error(`❌ Error during open-task delete for user ${uid}:`, error);
+      throw error;
+    }
+  }
+
+  /**
    * Delete all data associated with a user.
    * Uses uid (Firebase UID) for TaskFollow; uses profileId (Profile ObjectId) for Task, TaskApplication,
    * Review, TaskReport, TaskQuestion when provided.
@@ -125,6 +177,70 @@ export class CascadeDeleteService {
       };
     } catch (error: any) {
       logger.error(`❌ Error during cascading delete for user ${uid}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Diagnostic: Get all tasks for a user (both as poster and as assignee)
+   * Helps debug why deletion is blocked
+   */
+  static async getUserTasksDiagnostic(uid: string, profileIdStr?: string) {
+    logger.info(`🔍 Fetching all tasks for user ${uid}`, { profileId: profileIdStr });
+
+    const profileId = profileIdStr ? new mongoose.Types.ObjectId(profileIdStr) : undefined;
+
+    try {
+      // Get all tasks where user is poster
+      const posterTasks = await Task.find({ requesterId: profileId })
+        .select('_id title status requesterId assigneeId createdAt assignedAt')
+        .lean();
+
+      // Get all tasks where user is assigned
+      const assignedTasks = await Task.find({ assigneeId: profileId })
+        .select('_id title status requesterId assigneeId createdAt assignedAt')
+        .lean();
+
+      // Get all applications where user is applicant
+      const applications = await TaskApplication.find({ applicantId: profileId })
+        .select('_id taskId applicantId status createdAt')
+        .lean();
+
+      logger.info(`📊 Task diagnostic result:`, {
+        posterTasksCount: posterTasks.length,
+        assignedTasksCount: assignedTasks.length,
+        applicationsCount: applications.length,
+        posterTasksStatus: posterTasks.map(t => ({ id: t._id, title: t.title, status: t.status })),
+        assignedTasksStatus: assignedTasks.map(t => ({ id: t._id, title: t.title, status: t.status })),
+        applicationsStatus: applications.map(a => ({ id: a._id, taskId: a.taskId, status: a.status }))
+      });
+
+      return {
+        posterTasks: posterTasks.map(t => ({
+          id: t._id,
+          title: t.title,
+          status: t.status,
+          role: 'poster',
+          createdAt: t.createdAt,
+          assignedAt: t.assignedAt
+        })),
+        assignedTasks: assignedTasks.map(t => ({
+          id: t._id,
+          title: t.title,
+          status: t.status,
+          role: 'assignee',
+          createdAt: t.createdAt,
+          assignedAt: t.assignedAt
+        })),
+        applications: applications.map(a => ({
+          id: a._id,
+          taskId: a.taskId,
+          status: a.status,
+          createdAt: a.createdAt
+        }))
+      };
+    } catch (error: any) {
+      logger.error(`❌ Error fetching task diagnostic for user ${uid}:`, error);
       throw error;
     }
   }
