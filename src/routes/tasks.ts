@@ -34,6 +34,14 @@ router.get(
   asyncHandler(TaskController.getMyTasks)
 );
 
+// GET /api/v1/tasks/count/open - Fast open-task count by requesterId
+router.get(
+  "/count/open",
+  serviceAuthMiddleware,
+  optionalAuthMiddleware,
+  asyncHandler(TaskController.getOpenTaskCount)
+);
+
 // GET /api/v1/tasks/:id - Get a single task (public route)
 router.get(
   "/:id",

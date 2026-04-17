@@ -10,6 +10,25 @@ import logger from '../config/logger';
 
 export class TaskController {
   /**
+   * GET /api/v1/tasks/count/open
+   * Fast open-task count by requesterId
+   */
+  static async getOpenTaskCount(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { requesterId } = req.query;
+
+    if (!requesterId || typeof requesterId !== 'string') {
+      throw new BadRequestError('requesterId is required');
+    }
+
+    const openTasksCount = await TaskService.getOpenTaskCountByRequesterId(requesterId);
+
+    res.json({
+      success: true,
+      openTasksCount,
+    });
+  }
+
+  /**
    * GET /api/v1/tasks
    * Get all tasks with optional filtering
    */
