@@ -1042,6 +1042,9 @@ export class ApplicationService {
       if (!Number.isInteger(rawAmount) || rawAmount <= 0) {
         throw new BadRequestError("Counter amount must be a valid whole number");
       }
+      if (rawAmount < 50) {
+        throw new BadRequestError("Counter amount must be at least 50");
+      }
       if (rawAmount > 50000) {
         throw new BadRequestError("Counter amount cannot exceed 50000");
       }
