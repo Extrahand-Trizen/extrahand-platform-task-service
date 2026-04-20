@@ -1032,12 +1032,25 @@ export class ApplicationService {
 
     const actorRole: "poster" | "tasker" = isPoster ? "poster" : "tasker";
     const { action } = payload;
+    const negotiationHistory = application.negotiation.history || [];
 
-    if (action === "counter") {
+    const getCounterCount = (): number =>
+      negotiationHistory.filter((entry) => entry.action === "counter").length;
+
+    const assertCanCounter = () => {
       if (application.proposedBudget.isNegotiable === false) {
         throw new BadRequestError("This offer is not negotiable");
       }
+      // Business rule: only poster can counter, and only once in total.
+      if (actorRole !== "poster") {
+        throw new BadRequestError("Only task owner can send a counter offer");
+      }
+      if (getCounterCount() >= 1) {
+        throw new BadRequestError("Only one counter offer is allowed");
+      }
+    };
 
+    const parseAndValidateCounterAmount = (): number => {
       const rawAmount = Number(payload.amount);
       if (!Number.isInteger(rawAmount) || rawAmount <= 0) {
         throw new BadRequestError("Counter amount must be a valid whole number");
@@ -1048,11 +1061,16 @@ export class ApplicationService {
       if (rawAmount > 50000) {
         throw new BadRequestError("Counter amount cannot exceed 50000");
       }
+      return rawAmount;
+    };
+
+    if (action === "counter") {
+      assertCanCounter();
+      const rawAmount = parseAndValidateCounterAmount();
 
       application.proposedBudget.amount = rawAmount;
       application.negotiation.currentAmount = rawAmount;
-      application.negotiation.status =
-        actorRole === "poster" ? "countered_by_poster" : "countered_by_tasker";
+      application.negotiation.status = "countered_by_poster";
       application.negotiation.lastActionBy = actorRole;
       application.negotiation.history.push({
         amount: rawAmount,
