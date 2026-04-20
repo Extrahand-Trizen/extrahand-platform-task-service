@@ -107,6 +107,15 @@ export class ApplicationService {
         throw new BadRequestError("You have already applied to this task");
       }
 
+      // Re-application flow:
+      // Because of the unique index on (taskId, applicantUid), creating a new row after
+      // withdrawal/rejection can fail with duplicate key. Reuse the latest withdrawn/rejected row.
+      const recyclableApplication = await TaskApplication.findOne({
+        taskId,
+        applicantUid: applicantUid,
+        status: { $in: ["withdrawn", "rejected"] },
+      }).sort({ updatedAt: -1 });
+
       // Snapshot applicant profile at time of application
       logger.debug(`[ApplicationService.submitApplication] Creating profile snapshot for applicantId=${applicantProfileId}`);
       
@@ -176,12 +185,10 @@ export class ApplicationService {
         }
       }
 
-      // Create application
-      logger.debug(`[ApplicationService.submitApplication] Creating new application for taskId=${taskId}`);
       const proposedAmount = Number(
         applicationData.proposedBudget?.amount || applicationData.proposedBudget
       );
-      const application = await TaskApplication.create({
+      const baseApplicationPayload = {
         taskId,
         applicantId: applicantProfileId,
         applicantUid: applicantUid,
@@ -205,7 +212,46 @@ export class ApplicationService {
         portfolio: Array.isArray(applicationData.portfolio)
           ? applicationData.portfolio
           : [],
-      });
+      };
+
+      let application: ITaskApplication;
+      if (recyclableApplication) {
+        const previousStatus = recyclableApplication.status;
+        const currentReofferCount = Number((recyclableApplication as any).reofferCount || 0);
+
+        // Business rule: allow only one re-offer after a withdrawal/rejection.
+        // First re-offer: reofferCount 0 -> 1 (allowed)
+        // Subsequent re-offer attempts after another withdrawal/rejection: blocked.
+        if ((previousStatus === "withdrawn" || previousStatus === "rejected") && currentReofferCount >= 1) {
+          throw new BadRequestError(
+            "You can re-offer only once after your offer was withdrawn or rejected for this task"
+          );
+        }
+
+        logger.info(`[ApplicationService.submitApplication] Reusing withdrawn/rejected application for resubmission`, {
+          taskId,
+          applicantUid,
+          previousApplicationId: recyclableApplication._id.toString(),
+          previousStatus,
+          currentReofferCount,
+        });
+        Object.assign(recyclableApplication, {
+          ...baseApplicationPayload,
+          status: "pending",
+          respondedAt: undefined,
+          messages: [],
+          reofferCount:
+            previousStatus === "withdrawn" || previousStatus === "rejected"
+              ? currentReofferCount + 1
+              : currentReofferCount,
+          updatedAt: new Date(),
+        });
+        application = await recyclableApplication.save();
+      } else {
+        // Create application
+        logger.debug(`[ApplicationService.submitApplication] Creating new application for taskId=${taskId}`);
+        application = await TaskApplication.create(baseApplicationPayload);
+      }
 
       logger.info(`[ApplicationService.submitApplication] Application created with snapshot`, {
         applicationId: application._id,
