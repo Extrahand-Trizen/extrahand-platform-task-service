@@ -117,4 +117,38 @@ export class UserServiceClient {
       return [];
     }
   }
+
+  /**
+   * Update performer profile stats after task completion
+   * Increments completedTasks and totalTasks on the user-service profile.
+   *
+   * @param profileId - MongoDB ObjectId of the performer's profile
+   */
+  static async updatePerformerStats(profileId: string): Promise<void> {
+    if (!this.isInitialized) {
+      this.initialize();
+    }
+
+    try {
+      await axios.patch(
+        `${this.baseURL}/api/v1/profiles/${profileId}/internal/stats-increment`,
+        { completedTasks: 1, totalTasks: 1 },
+        {
+          headers: {
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+            'Content-Type': 'application/json',
+          },
+          timeout: 8000,
+        }
+      );
+      logger.info('UserServiceClient: Performer stats incremented', { profileId });
+    } catch (error) {
+      // Non-critical – log and continue so task completion isn't blocked
+      logger.warn('UserServiceClient: Failed to update performer stats (non-critical)', {
+        profileId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
 }
