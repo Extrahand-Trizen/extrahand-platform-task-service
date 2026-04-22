@@ -1038,6 +1038,18 @@ export class ApplicationService {
         throw new BadRequestError("This offer is not negotiable");
       }
 
+      // Check if actor has already sent one counter offer (limit one counter per side)
+      const actorCounterCount = application.negotiation.history.filter(
+        (record) => record.action === "counter" && record.by === actorRole
+      ).length;
+
+      if (actorCounterCount >= 1) {
+        const actorName = actorRole === "poster" ? "Poster" : "Tasker";
+        throw new BadRequestError(
+          `${actorName} has already sent one counter offer. Maximum one counter offer per side allowed.`
+        );
+      }
+
       const rawAmount = Number(payload.amount);
       if (!Number.isInteger(rawAmount) || rawAmount <= 0) {
         throw new BadRequestError("Counter amount must be a valid whole number");
