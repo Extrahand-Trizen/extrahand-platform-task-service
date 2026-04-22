@@ -50,6 +50,11 @@ export interface ITaskApplication extends Document {
   createdAt: Date;
   updatedAt: Date;
   respondedAt?: Date;
+  /**
+   * Number of times this withdrawn application was re-submitted by the same applicant.
+   * Business rule: allow only one re-offer after withdrawal.
+   */
+  reofferCount?: number;
 }
 
 const TaskApplicationSchema = new Schema<ITaskApplication>(
@@ -109,6 +114,11 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
       enum: ["pending", "accepted", "rejected", "withdrawn"],
       default: "pending",
       index: true,
+    },
+    reofferCount: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
 
     negotiation: {
