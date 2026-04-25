@@ -58,6 +58,7 @@ export class CompletionService {
       uploadedAt: new Date(),
       uploadedBy: performerProfileId,
     }));
+    const submittedAt = new Date();
 
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
@@ -66,7 +67,9 @@ export class CompletionService {
         completionProof,
         completionNotes: notes || '',
         completionStatus: 'pending_approval',
-        updatedAt: new Date(),
+        reviewAt: submittedAt,
+        completionSubmittedAt: submittedAt,
+        updatedAt: submittedAt,
       },
       { new: true, runValidators: true }
     ).lean();

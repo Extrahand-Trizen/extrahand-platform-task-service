@@ -219,14 +219,14 @@ export class ApplicationService {
         const previousStatus = recyclableApplication.status;
         const currentReofferCount = Number((recyclableApplication as any).reofferCount || 0);
 
-        // Business rule: allow only one re-offer after a withdrawal/rejection.
-        // First re-offer: reofferCount 0 -> 1 (allowed)
-        // Subsequent re-offer attempts after another withdrawal/rejection: blocked.
-        if ((previousStatus === "withdrawn" || previousStatus === "rejected") && currentReofferCount >= 1) {
-          throw new BadRequestError(
-            "You can re-offer only once after your offer was withdrawn or rejected for this task"
-          );
-        }
+
+        // if ((previousStatus === "withdrawn" || previousStatus === "rejected") && currentReofferCount >= 1) {
+        //   throw new BadRequestError(
+        //     "You can re-offer only once after your offer was withdrawn or rejected for this task"
+        //   );
+        // }
+        // Allow re-offers after withdrawal/rejection. We reuse the same application row
+        // (unique index on taskId+applicantUid) and keep a counter for analytics.
 
         logger.info(`[ApplicationService.submitApplication] Reusing withdrawn/rejected application for resubmission`, {
           taskId,
