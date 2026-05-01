@@ -179,6 +179,13 @@ function hashStartOtp(taskId: string, otp: string): string {
   return crypto.createHash("sha256").update(`${taskId}:${otp}`).digest("hex");
 }
 
+function getPendingAdditionalQuoteRequest(task: ITask): any | null {
+  const requests = Array.isArray((task as any)?.additionalQuoteRequests)
+    ? ((task as any).additionalQuoteRequests as any[])
+    : [];
+  return requests.find((request) => request?.status === "pending") || null;
+}
+
 export class TaskService {
   /**
    * Get all tasks with optional filtering
@@ -1795,6 +1802,13 @@ export class TaskService {
       isPerformer &&
       !options?.skipStartOtpValidation
     ) {
+      const pendingQuoteRequest = getPendingAdditionalQuoteRequest(task);
+      if (pendingQuoteRequest) {
+        throw new BadRequestError(
+          "Resolve pending additional payment request before starting task"
+        );
+      }
+
       const startOtp = task.startOtp;
       if (!startOtp?.verifiedAt) {
         throw new BadRequestError("Start OTP verification required before starting task");
@@ -2210,6 +2224,13 @@ export class TaskService {
       throw new BadRequestError("OTP can only be requested when task is in assigned status");
     }
 
+    const pendingQuoteRequest = getPendingAdditionalQuoteRequest(task);
+    if (pendingQuoteRequest) {
+      throw new BadRequestError(
+        "Cannot request OTP while additional payment request is pending"
+      );
+    }
+
     const Profile = mongoose.connection.collection("profiles");
     const requesterProfile = await Profile.findOne({ _id: task.requesterId });
 
@@ -2327,6 +2348,13 @@ export class TaskService {
 
     if (task.status !== "assigned") {
       throw new BadRequestError("Task is not in assigned state");
+    }
+
+    const pendingQuoteRequest = getPendingAdditionalQuoteRequest(task);
+    if (pendingQuoteRequest) {
+      throw new BadRequestError(
+        "Cannot verify OTP while additional payment request is pending"
+      );
     }
 
     const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 6);
@@ -2548,5 +2576,252 @@ export class TaskService {
 
     TaskService.invalidateTaskCache(taskId);
     return updatedTask as unknown as ITask;
+  }
+
+  static async createAdditionalQuoteRequest(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    payload: {
+      requestedAdditionalAmount: number;
+      reason: string;
+      selfieImageUrl: string;
+      workImageUrl: string;
+      extraImageUrls?: string[];
+    }
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can request additional payment");
+    }
+    if (task.status !== "assigned") {
+      throw new BadRequestError("Additional payment request is only allowed before task start");
+    }
+
+    const pending = getPendingAdditionalQuoteRequest(task);
+    if (pending) {
+      throw new BadRequestError("An additional payment request is already pending");
+    }
+
+    const requestedAdditionalAmount = Number(payload.requestedAdditionalAmount || 0);
+    if (!Number.isFinite(requestedAdditionalAmount) || requestedAdditionalAmount <= 0) {
+      throw new BadRequestError("Requested additional amount must be greater than zero");
+    }
+    const reason = String(payload.reason || "").trim();
+    if (reason.length < 10) {
+      throw new BadRequestError("Reason must be at least 10 characters");
+    }
+    const selfieImageUrl = String(payload.selfieImageUrl || "").trim();
+    const workImageUrl = String(payload.workImageUrl || "").trim();
+    if (!selfieImageUrl || !workImageUrl) {
+      throw new BadRequestError("Selfie and work image are required");
+    }
+
+    const baseBudgetAmount = Number((task as any)?.budget?.amount || 0);
+    const requestId = new mongoose.Types.ObjectId().toString();
+    const quoteRequest = {
+      requestId,
+      requestedById: profileId,
+      baseBudgetAmount,
+      requestedAdditionalAmount,
+      requestedTotalAmount: baseBudgetAmount + requestedAdditionalAmount,
+      currency: "INR" as const,
+      reason,
+      evidence: {
+        selfieImageUrl,
+        workImageUrl,
+        extraImageUrls: Array.isArray(payload.extraImageUrls)
+          ? payload.extraImageUrls.filter(Boolean)
+          : [],
+      },
+      status: "pending" as const,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    (task as any).additionalQuoteRequests = [
+      ...(Array.isArray((task as any).additionalQuoteRequests)
+        ? (task as any).additionalQuoteRequests
+        : []),
+      quoteRequest,
+    ];
+    (task as any).activeAdditionalQuoteRequestId = requestId;
+    await task.save();
+
+    try {
+      const Profile = mongoose.connection.collection("profiles");
+      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+      const requesterUid =
+        requesterProfile && typeof requesterProfile === "object" && "uid" in requesterProfile
+          ? (requesterProfile as { uid?: unknown }).uid
+          : undefined;
+      if (typeof requesterUid === "string" && requesterUid.trim()) {
+        await InAppNotificationClient.send({
+          userId: requesterUid,
+          title: "Additional payment requested",
+          body: `Performer requested +₹${requestedAdditionalAmount} for "${task.title}"`,
+          type: "info",
+          category: "taskUpdates",
+          data: {
+            taskId: taskId.toString(),
+            requestId,
+            actionUrl: `/tasks/${taskId}/track`,
+          },
+        });
+      }
+    } catch (error) {
+      logger.warn("Failed to send additional quote request notification", {
+        taskId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+
+    TaskService.invalidateTaskCache(taskId);
+    return task as unknown as ITask;
+  }
+
+  static async getAdditionalQuoteRequests(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId
+  ): Promise<any[]> {
+    const task = await Task.findById(taskId).lean();
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isCreator = (task as any).requesterId?.equals
+      ? (task as any).requesterId.equals(profileId)
+      : String((task as any).requesterId) === String(profileId);
+    const isPerformer = (task as any).assigneeId?.equals
+      ? (task as any).assigneeId.equals(profileId)
+      : String((task as any).assigneeId || "") === String(profileId);
+    if (!isCreator && !isPerformer) {
+      throw new ForbiddenError("Not authorized to view additional payment requests");
+    }
+
+    return Array.isArray((task as any).additionalQuoteRequests)
+      ? (task as any).additionalQuoteRequests
+      : [];
+  }
+
+  static async decideAdditionalQuoteRequest(
+    taskId: string,
+    requestId: string,
+    profileId: mongoose.Types.ObjectId,
+    decision: "accepted" | "rejected",
+    reason?: string
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+    if (!task.requesterId.equals(profileId)) {
+      throw new ForbiddenError("Only task poster can decide additional payment request");
+    }
+    if (task.status !== "assigned") {
+      throw new BadRequestError("Additional payment request can only be decided before task start");
+    }
+
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+    const target = requests.find((request) => request?.requestId === requestId);
+    if (!target) throw new NotFoundError("Additional payment request not found");
+    if (target.status !== "pending") {
+      throw new BadRequestError("Additional payment request is already decided");
+    }
+
+    if (decision === "rejected") {
+      const cleanReason = String(reason || "").trim();
+      if (cleanReason.length < 5) {
+        throw new BadRequestError("Reject reason must be at least 5 characters");
+      }
+      target.posterDecisionReason = cleanReason;
+    }
+
+    target.status = decision;
+    target.decidedById = profileId;
+    target.decidedAt = new Date();
+    target.updatedAt = new Date();
+
+    if (decision === "accepted") {
+      (task as any).budget = {
+        ...(task as any).budget,
+        amount: Number(target.requestedTotalAmount || (task as any).budget?.amount || 0),
+      };
+    }
+
+    const pending = requests.find((request) => request?.status === "pending");
+    (task as any).activeAdditionalQuoteRequestId = pending?.requestId || null;
+    await task.save();
+
+    try {
+      const Profile = mongoose.connection.collection("profiles");
+      const performerProfile = task.assigneeId
+        ? await Profile.findOne({ _id: task.assigneeId })
+        : null;
+      const performerUid =
+        performerProfile && typeof performerProfile === "object" && "uid" in performerProfile
+          ? (performerProfile as { uid?: unknown }).uid
+          : undefined;
+      if (typeof performerUid === "string" && performerUid.trim()) {
+        const body =
+          decision === "accepted"
+            ? `Your additional payment request for "${task.title}" was accepted`
+            : `Your additional payment request for "${task.title}" was rejected`;
+        await InAppNotificationClient.send({
+          userId: performerUid,
+          title: decision === "accepted" ? "Additional payment accepted" : "Additional payment rejected",
+          body,
+          type: decision === "accepted" ? "success" : "warning",
+          category: "taskUpdates",
+          data: {
+            taskId: taskId.toString(),
+            requestId,
+            reason: target.posterDecisionReason,
+            actionUrl: `/tasks/${taskId}/track`,
+          },
+        });
+      }
+    } catch (error) {
+      logger.warn("Failed to send additional payment decision notification", {
+        taskId,
+        requestId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+
+    TaskService.invalidateTaskCache(taskId);
+    return task as unknown as ITask;
+  }
+
+  static async withdrawAdditionalQuoteRequest(
+    taskId: string,
+    requestId: string,
+    profileId: mongoose.Types.ObjectId
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can withdraw additional payment request");
+    }
+
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+    const target = requests.find((request) => request?.requestId === requestId);
+    if (!target) throw new NotFoundError("Additional payment request not found");
+    if (target.status !== "pending") {
+      throw new BadRequestError("Only pending additional payment request can be withdrawn");
+    }
+
+    target.status = "withdrawn";
+    target.updatedAt = new Date();
+    const pending = requests.find((request) => request?.status === "pending");
+    (task as any).activeAdditionalQuoteRequestId = pending?.requestId || null;
+    await task.save();
+
+    TaskService.invalidateTaskCache(taskId);
+    return task as unknown as ITask;
   }
 }
