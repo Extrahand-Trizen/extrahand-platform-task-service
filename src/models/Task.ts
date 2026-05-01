@@ -114,6 +114,10 @@ export interface ITask extends Document {
     requestedById: mongoose.Types.ObjectId;
   };
 
+  startedAt?: Date;
+  inProgressAt?: Date;
+  reviewAt?: Date;
+  completionSubmittedAt?: Date;
   completedAt?: Date;
   cancelledAt?: Date;
   cancelledById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
@@ -309,6 +313,10 @@ const TaskSchema = new Schema<ITask>(
         ref: "Profile",
       },
     },
+    startedAt: Date,
+    inProgressAt: Date,
+    reviewAt: Date,
+    completionSubmittedAt: Date,
     completedAt: Date,
     cancelledAt: Date,
     cancelledById: {
