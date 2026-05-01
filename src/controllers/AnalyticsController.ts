@@ -57,5 +57,34 @@ export class AnalyticsController {
     const data = await AnalyticsService.getUserAnalytics(profileId, uid, range);
     ApiResponse.success(res, data, 'User analytics fetched successfully');
   }
+
+  static async getTaskCategoryPerformance(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const range = req.query.range as string | undefined;
+    const data = await AnalyticsService.getTaskCategoryPerformance(range);
+    ApiResponse.success(res, data, 'Task category performance fetched successfully');
+  }
+
+  static async getTaskCancellationAnalytics(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const range = req.query.range as string | undefined;
+    const data = await AnalyticsService.getTaskCancellationAnalytics(range);
+    ApiResponse.success(res, data, 'Task cancellation analytics fetched successfully');
+  }
+
+  static async getUserAnalytics(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { profileId } = req.params;
+    const uid = (req.query.uid as string | undefined) || '';
+    const range = req.query.range as string | undefined;
+
+    if (!profileId || !mongoose.Types.ObjectId.isValid(profileId)) {
+      throw new BadRequestError('Valid profileId is required');
+    }
+
+    if (!uid.trim()) {
+      throw new BadRequestError('uid query parameter is required');
+    }
+
+    const data = await AnalyticsService.getUserAnalytics(profileId, uid.trim(), range);
+    ApiResponse.success(res, data, 'User analytics fetched successfully');
+  }
 }
 

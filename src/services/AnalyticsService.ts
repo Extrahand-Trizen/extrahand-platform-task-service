@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Task from '../models/Task';
 import TaskApplication from '../models/TaskApplication';
 import TaskQuestion from '../models/TaskQuestion';
+import TaskApplication from '../models/TaskApplication';
 
 const GENUINE_STATUSES = ['assigned', 'started', 'in_progress', 'review', 'completed'];
 
@@ -284,7 +285,7 @@ export class AnalyticsService {
     };
   }
 
-  static async getUserTaskStats(profileId: string, uid: string): Promise<{
+  static async getUserTaskStats(profileId: string, _uid: string): Promise<{
     totalTasks: number;
     completedTasks: number;
     postedTasks: number;
@@ -305,7 +306,7 @@ export class AnalyticsService {
         },
       ]),
       Task.aggregate([
-        { $match: { posterUid: uid } },
+        { $match: { requesterId: profileObjectId } },
         { $count: 'postedTasks' },
       ]),
     ]);
@@ -496,22 +497,24 @@ export class AnalyticsService {
     const rangeStart = getRangeStart(rangeValue);
     const activeStatuses = ['assigned', 'started', 'in_progress', 'review'];
 
-    const categoryRows = await Task.aggregate([
+    const rows = await Task.aggregate([
       { $match: { createdAt: { $gte: rangeStart } } },
       {
         $project: {
           category: {
-            $ifNull: ['$categorySlug', { $ifNull: ['$categoryLabel', { $ifNull: ['$category', 'other'] }] }],
+            $ifNull: ['$categorySlug', { $ifNull: ['$categoryLabel', '$category'] }],
           },
           status: 1,
         },
       },
       {
         $group: {
-          _id: '$category',
+          _id: { $ifNull: ['$category', 'other'] },
           posted: { $sum: 1 },
           open: { $sum: { $cond: [{ $eq: ['$status', 'open'] }, 1, 0] } },
-          active: { $sum: { $cond: [{ $in: ['$status', activeStatuses] }, 1, 0] } },
+          active: {
+            $sum: { $cond: [{ $in: ['$status', activeStatuses] }, 1, 0] },
+          },
           completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
           cancelled: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
         },
@@ -519,47 +522,46 @@ export class AnalyticsService {
       { $sort: { posted: -1 } },
     ]);
 
-    const categories = categoryRows.map((row) => {
+    const categories = rows.map((row) => {
       const posted = Number(row?.posted || 0);
-      const open = Number(row?.open || 0);
       const active = Number(row?.active || 0);
       const completed = Number(row?.completed || 0);
       const cancelled = Number(row?.cancelled || 0);
+      const completionRate = posted > 0 ? Number(((completed / posted) * 100).toFixed(1)) : 0;
+      const cancellationRate = posted > 0 ? Number(((cancelled / posted) * 100).toFixed(1)) : 0;
+      const fulfillmentRate = posted > 0 ? Number((((active + completed) / posted) * 100).toFixed(1)) : 0;
 
       return {
         category: String(row?._id || 'other'),
         posted,
-        open,
+        open: Number(row?.open || 0),
         active,
         completed,
         cancelled,
-        completionRate: posted > 0 ? Number(((completed / posted) * 100).toFixed(2)) : 0,
-        cancellationRate: posted > 0 ? Number(((cancelled / posted) * 100).toFixed(2)) : 0,
-        fulfillmentRate: posted > 0 ? Number((((active + completed) / posted) * 100).toFixed(2)) : 0,
+        completionRate,
+        cancellationRate,
+        fulfillmentRate,
       };
     });
 
     const totals = categories.reduce(
-      (acc, item) => {
-        acc.posted += item.posted;
-        acc.open += item.open;
-        acc.active += item.active;
-        acc.completed += item.completed;
-        acc.cancelled += item.cancelled;
+      (acc, category) => {
+        acc.posted += category.posted;
+        acc.open += category.open;
+        acc.active += category.active;
+        acc.completed += category.completed;
+        acc.cancelled += category.cancelled;
         return acc;
       },
-      { posted: 0, open: 0, active: 0, completed: 0, cancelled: 0 }
+      { posted: 0, open: 0, active: 0, completed: 0, cancelled: 0, completionRate: 0, cancellationRate: 0 }
     );
+
+    totals.completionRate = totals.posted > 0 ? Number(((totals.completed / totals.posted) * 100).toFixed(1)) : 0;
+    totals.cancellationRate = totals.posted > 0 ? Number(((totals.cancelled / totals.posted) * 100).toFixed(1)) : 0;
 
     return {
       range: rangeValue,
-      totals: {
-        ...totals,
-        completionRate:
-          totals.posted > 0 ? Number(((totals.completed / totals.posted) * 100).toFixed(2)) : 0,
-        cancellationRate:
-          totals.posted > 0 ? Number(((totals.cancelled / totals.posted) * 100).toFixed(2)) : 0,
-      },
+      totals,
       categories,
       generatedAt: new Date().toISOString(),
     };
@@ -591,7 +593,7 @@ export class AnalyticsService {
     const rangeValue = range || '30d';
     const rangeStart = getRangeStart(rangeValue);
 
-    const [totalsRow, trendRows, categoryRows] = await Promise.all([
+    const [summaryRow, categoryRows, trendRows] = await Promise.all([
       Task.aggregate([
         { $match: { createdAt: { $gte: rangeStart } } },
         {
@@ -602,7 +604,7 @@ export class AnalyticsService {
             cancelledBeforeAssignment: {
               $sum: {
                 $cond: [
-                  { $and: [{ $eq: ['$status', 'cancelled'] }, { $eq: [{ $ifNull: ['$assigneeId', null] }, null] }] },
+                  { $and: [{ $eq: ['$status', 'cancelled'] }, { $eq: ['$assigneeId', null] }] },
                   1,
                   0,
                 ],
@@ -611,7 +613,7 @@ export class AnalyticsService {
             cancelledAfterAssignment: {
               $sum: {
                 $cond: [
-                  { $and: [{ $eq: ['$status', 'cancelled'] }, { $ne: [{ $ifNull: ['$assigneeId', null] }, null] }] },
+                  { $and: [{ $eq: ['$status', 'cancelled'] }, { $ne: ['$assigneeId', null] }] },
                   1,
                   0,
                 ],
@@ -623,59 +625,64 @@ export class AnalyticsService {
       Task.aggregate([
         { $match: { createdAt: { $gte: rangeStart } } },
         {
-          $group: {
-            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-            totalTasks: { $sum: 1 },
-            cancelledTasks: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ]),
-      Task.aggregate([
-        { $match: { createdAt: { $gte: rangeStart } } },
-        {
           $project: {
             category: {
-              $ifNull: ['$categorySlug', { $ifNull: ['$categoryLabel', { $ifNull: ['$category', 'other'] }] }],
+              $ifNull: ['$categorySlug', { $ifNull: ['$categoryLabel', '$category'] }],
             },
             status: 1,
           },
         },
         {
           $group: {
-            _id: '$category',
+            _id: { $ifNull: ['$category', 'other'] },
             totalTasks: { $sum: 1 },
             cancelledTasks: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
           },
         },
-        { $sort: { cancelledTasks: -1 } },
+        { $sort: { totalTasks: -1 } },
+      ]),
+      Task.aggregate([
+        { $match: { createdAt: { $gte: rangeStart } } },
+        {
+          $project: {
+            day: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            status: 1,
+          },
+        },
+        {
+          $group: {
+            _id: '$day',
+            totalTasks: { $sum: 1 },
+            cancelledTasks: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
+          },
+        },
+        { $sort: { _id: 1 } },
       ]),
     ]);
 
-    const totalsBase = totalsRow?.[0] || {};
-    const totalTasks = Number(totalsBase.totalTasks || 0);
-    const cancelledTasks = Number(totalsBase.cancelledTasks || 0);
+    const summary = summaryRow?.[0] || {};
+    const totalTasks = Number(summary.totalTasks || 0);
+    const cancelledTasks = Number(summary.cancelledTasks || 0);
 
-    const trend = trendRows.map((row) => {
-      const dayTotal = Number(row?.totalTasks || 0);
-      const dayCancelled = Number(row?.cancelledTasks || 0);
+    const categories = categoryRows.map((row) => {
+      const total = Number(row?.totalTasks || 0);
+      const cancelled = Number(row?.cancelledTasks || 0);
       return {
-        date: String(row?._id),
-        totalTasks: dayTotal,
-        cancelledTasks: dayCancelled,
-        cancellationRate: dayTotal > 0 ? Number(((dayCancelled / dayTotal) * 100).toFixed(2)) : 0,
+        category: String(row?._id || 'other'),
+        totalTasks: total,
+        cancelledTasks: cancelled,
+        cancellationRate: total > 0 ? Number(((cancelled / total) * 100).toFixed(1)) : 0,
       };
     });
 
-    const categories = categoryRows.map((row) => {
-      const categoryTotal = Number(row?.totalTasks || 0);
-      const categoryCancelled = Number(row?.cancelledTasks || 0);
+    const trend = trendRows.map((row) => {
+      const total = Number(row?.totalTasks || 0);
+      const cancelled = Number(row?.cancelledTasks || 0);
       return {
-        category: String(row?._id || 'other'),
-        totalTasks: categoryTotal,
-        cancelledTasks: categoryCancelled,
-        cancellationRate:
-          categoryTotal > 0 ? Number(((categoryCancelled / categoryTotal) * 100).toFixed(2)) : 0,
+        date: String(row?._id),
+        totalTasks: total,
+        cancelledTasks: cancelled,
+        cancellationRate: total > 0 ? Number(((cancelled / total) * 100).toFixed(1)) : 0,
       };
     });
 
@@ -684,12 +691,125 @@ export class AnalyticsService {
       totals: {
         totalTasks,
         cancelledTasks,
-        cancellationRate: totalTasks > 0 ? Number(((cancelledTasks / totalTasks) * 100).toFixed(2)) : 0,
-        cancelledBeforeAssignment: Number(totalsBase.cancelledBeforeAssignment || 0),
-        cancelledAfterAssignment: Number(totalsBase.cancelledAfterAssignment || 0),
+        cancellationRate: totalTasks > 0 ? Number(((cancelledTasks / totalTasks) * 100).toFixed(1)) : 0,
+        cancelledBeforeAssignment: Number(summary.cancelledBeforeAssignment || 0),
+        cancelledAfterAssignment: Number(summary.cancelledAfterAssignment || 0),
       },
       trend,
       categories,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  static async getUserAnalytics(
+    profileId: string,
+    uid: string,
+    range?: string
+  ): Promise<{
+    profileId: string;
+    uid: string;
+    range: string;
+    poster: {
+      postedTasks: number;
+      totalBidsReceived: number;
+      tasksWithAtLeastOneBid: number;
+      openTasks: number;
+      activeTasks: number;
+      completedTasks: number;
+      questionsAskedOnMyTasks: number;
+    };
+    tasker: {
+      applicationsPlaced: number;
+      acceptedApplications: number;
+      pendingApplications: number;
+      activeAssignedTasks: number;
+      completedAssignedTasks: number;
+      questionsAsked: number;
+      answersGiven: number;
+    };
+    generatedAt: string;
+  }> {
+    const rangeValue = range || '30d';
+    const rangeStart = getRangeStart(rangeValue);
+    const profileObjectId = new mongoose.Types.ObjectId(profileId);
+    const activeStatuses = ['assigned', 'started', 'in_progress', 'review'];
+
+    const [posterAgg, taskerAgg, applicationAgg] = await Promise.all([
+      Task.aggregate([
+        { $match: { requesterId: profileObjectId, createdAt: { $gte: rangeStart } } },
+        {
+          $lookup: {
+            from: 'taskapplications',
+            localField: '_id',
+            foreignField: 'taskId',
+            as: 'applications',
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            postedTasks: { $sum: 1 },
+            totalBidsReceived: { $sum: { $size: '$applications' } },
+            tasksWithAtLeastOneBid: {
+              $sum: {
+                $cond: [{ $gt: [{ $size: '$applications' }, 0] }, 1, 0],
+              },
+            },
+            openTasks: { $sum: { $cond: [{ $eq: ['$status', 'open'] }, 1, 0] } },
+            activeTasks: { $sum: { $cond: [{ $in: ['$status', activeStatuses] }, 1, 0] } },
+            completedTasks: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          },
+        },
+      ]),
+      Task.aggregate([
+        { $match: { assigneeId: profileObjectId, createdAt: { $gte: rangeStart } } },
+        {
+          $group: {
+            _id: null,
+            activeAssignedTasks: { $sum: { $cond: [{ $in: ['$status', activeStatuses] }, 1, 0] } },
+            completedAssignedTasks: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          },
+        },
+      ]),
+      TaskApplication.aggregate([
+        { $match: { applicantId: profileObjectId, createdAt: { $gte: rangeStart } } },
+        {
+          $group: {
+            _id: null,
+            applicationsPlaced: { $sum: 1 },
+            acceptedApplications: { $sum: { $cond: [{ $eq: ['$status', 'accepted'] }, 1, 0] } },
+            pendingApplications: { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+          },
+        },
+      ]),
+    ]);
+
+    const poster = posterAgg?.[0] || {};
+    const tasker = taskerAgg?.[0] || {};
+    const app = applicationAgg?.[0] || {};
+
+    return {
+      profileId,
+      uid,
+      range: rangeValue,
+      poster: {
+        postedTasks: Number(poster.postedTasks || 0),
+        totalBidsReceived: Number(poster.totalBidsReceived || 0),
+        tasksWithAtLeastOneBid: Number(poster.tasksWithAtLeastOneBid || 0),
+        openTasks: Number(poster.openTasks || 0),
+        activeTasks: Number(poster.activeTasks || 0),
+        completedTasks: Number(poster.completedTasks || 0),
+        questionsAskedOnMyTasks: 0,
+      },
+      tasker: {
+        applicationsPlaced: Number(app.applicationsPlaced || 0),
+        acceptedApplications: Number(app.acceptedApplications || 0),
+        pendingApplications: Number(app.pendingApplications || 0),
+        activeAssignedTasks: Number(tasker.activeAssignedTasks || 0),
+        completedAssignedTasks: Number(tasker.completedAssignedTasks || 0),
+        questionsAsked: 0,
+        answersGiven: 0,
+      },
       generatedAt: new Date().toISOString(),
     };
   }
