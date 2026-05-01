@@ -114,27 +114,10 @@ export interface ITask extends Document {
     requestedById: mongoose.Types.ObjectId;
   };
 
-  additionalQuoteRequests?: Array<{
-    requestId: string;
-    requestedById: mongoose.Types.ObjectId;
-    baseBudgetAmount: number;
-    requestedAdditionalAmount: number;
-    requestedTotalAmount: number;
-    currency: "INR";
-    reason: string;
-    evidence: {
-      selfieImageUrl: string;
-      workImageUrl: string;
-      extraImageUrls?: string[];
-    };
-    status: "pending" | "accepted" | "rejected" | "withdrawn" | "expired";
-    posterDecisionReason?: string;
-    decidedById?: mongoose.Types.ObjectId;
-    decidedAt?: Date;
-    createdAt: Date;
-    updatedAt: Date;
-  }>;
-  activeAdditionalQuoteRequestId?: string;
+  // Reverted to older task-tracking backend flow:
+  // additionalQuoteRequests / activeAdditionalQuoteRequestId disabled.
+  // additionalQuoteRequests?: Array<...>;
+  // activeAdditionalQuoteRequestId?: string;
 
   startedAt?: Date;
   inProgressAt?: Date;
@@ -335,39 +318,9 @@ const TaskSchema = new Schema<ITask>(
         ref: "Profile",
       },
     },
-    additionalQuoteRequests: [
-      {
-        requestId: { type: String, required: true },
-        requestedById: {
-          type: Schema.Types.ObjectId,
-          ref: "Profile",
-          required: true,
-        },
-        baseBudgetAmount: { type: Number, required: true, min: 0 },
-        requestedAdditionalAmount: { type: Number, required: true, min: 1 },
-        requestedTotalAmount: { type: Number, required: true, min: 1 },
-        currency: { type: String, default: "INR" },
-        reason: { type: String, required: true, trim: true, maxlength: 1000 },
-        evidence: {
-          selfieImageUrl: { type: String, required: true },
-          workImageUrl: { type: String, required: true },
-          extraImageUrls: [{ type: String }],
-        },
-        status: {
-          type: String,
-          enum: ["pending", "accepted", "rejected", "withdrawn", "expired"],
-          default: "pending",
-          index: true,
-        },
-        posterDecisionReason: { type: String, trim: true, maxlength: 1000 },
-        decidedById: {
-          type: Schema.Types.ObjectId,
-          ref: "Profile",
-        },
-        decidedAt: Date,
-      },
-    ],
-    activeAdditionalQuoteRequestId: { type: String, default: null },
+    // Reverted to older task-tracking backend flow:
+    // additionalQuoteRequests: [...],
+    // activeAdditionalQuoteRequestId: { type: String, default: null },
     startedAt: Date,
     inProgressAt: Date,
     reviewAt: Date,
