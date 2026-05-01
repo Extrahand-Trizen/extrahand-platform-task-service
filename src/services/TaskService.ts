@@ -1896,6 +1896,24 @@ export class TaskService {
       updatedAt: new Date(),
     };
 
+    if (status === "started") {
+      updateData.startedAt = new Date();
+    }
+
+    if (status === "in_progress") {
+      updateData.inProgressAt = new Date();
+      // Backfill startedAt if task jumps directly to in_progress.
+      if (!task.startedAt) {
+        updateData.startedAt = new Date();
+      }
+    }
+
+    if (status === "review") {
+      const submittedAt = new Date();
+      updateData.reviewAt = submittedAt;
+      updateData.completionSubmittedAt = submittedAt;
+    }
+
     if (status === "completed") {
       updateData.completedAt = new Date();
     }

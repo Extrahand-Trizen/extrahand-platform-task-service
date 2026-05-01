@@ -136,6 +136,10 @@ export interface ITask extends Document {
   }>;
   activeAdditionalQuoteRequestId?: string;
 
+  startedAt?: Date;
+  inProgressAt?: Date;
+  reviewAt?: Date;
+  completionSubmittedAt?: Date;
   completedAt?: Date;
   cancelledAt?: Date;
   cancelledById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
@@ -364,6 +368,10 @@ const TaskSchema = new Schema<ITask>(
       },
     ],
     activeAdditionalQuoteRequestId: { type: String, default: null },
+    startedAt: Date,
+    inProgressAt: Date,
+    reviewAt: Date,
+    completionSubmittedAt: Date,
     completedAt: Date,
     cancelledAt: Date,
     cancelledById: {

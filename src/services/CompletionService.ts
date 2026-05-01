@@ -7,6 +7,7 @@ import { NotificationClient } from './NotificationClient';
 import { PaymentClient } from '../services/PaymentClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { UserServiceClient } from '../clients/UserServiceClient';
 import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
 import { TaskService } from './TaskService';
@@ -57,6 +58,7 @@ export class CompletionService {
       uploadedAt: new Date(),
       uploadedBy: performerProfileId,
     }));
+    const submittedAt = new Date();
 
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
@@ -65,7 +67,9 @@ export class CompletionService {
         completionProof,
         completionNotes: notes || '',
         completionStatus: 'pending_approval',
-        updatedAt: new Date(),
+        reviewAt: submittedAt,
+        completionSubmittedAt: submittedAt,
+        updatedAt: submittedAt,
       },
       { new: true, runValidators: true }
     ).lean();
@@ -410,6 +414,14 @@ export class CompletionService {
     emitProofApproved(taskId, updatedTask);
 
     TaskService.invalidateTaskCache(taskId);
+
+    // Update performer profile stats (increment completedTasks & totalTasks)
+    if (updatedTask?.assigneeId) {
+      UserServiceClient.updatePerformerStats(updatedTask.assigneeId.toString()).catch(err => {
+        logger.error(`Error updating performer stats for task ${taskId}:`, err);
+      });
+    }
+
     return updatedTask;
   }
 

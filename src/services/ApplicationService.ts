@@ -219,14 +219,14 @@ export class ApplicationService {
         const previousStatus = recyclableApplication.status;
         const currentReofferCount = Number((recyclableApplication as any).reofferCount || 0);
 
-        // Business rule: allow only one re-offer after a withdrawal/rejection.
-        // First re-offer: reofferCount 0 -> 1 (allowed)
-        // Subsequent re-offer attempts after another withdrawal/rejection: blocked.
-        if ((previousStatus === "withdrawn" || previousStatus === "rejected") && currentReofferCount >= 1) {
-          throw new BadRequestError(
-            "You can re-offer only once after your offer was withdrawn or rejected for this task"
-          );
-        }
+
+        // if ((previousStatus === "withdrawn" || previousStatus === "rejected") && currentReofferCount >= 1) {
+        //   throw new BadRequestError(
+        //     "You can re-offer only once after your offer was withdrawn or rejected for this task"
+        //   );
+        // }
+        // Allow re-offers after withdrawal/rejection. We reuse the same application row
+        // (unique index on taskId+applicantUid) and keep a counter for analytics.
 
         logger.info(`[ApplicationService.submitApplication] Reusing withdrawn/rejected application for resubmission`, {
           taskId,
@@ -1078,21 +1078,40 @@ export class ApplicationService {
 
     const actorRole: "poster" | "tasker" = isPoster ? "poster" : "tasker";
     const { action } = payload;
-    const negotiationHistory = application.negotiation.history || [];
+    const negotiation = application.negotiation;
+    const negotiationHistory = negotiation.history || [];
 
-    const getCounterCount = (): number =>
-      negotiationHistory.filter((entry) => entry.action === "counter").length;
+    const getCounterCountByRole = (role: "poster" | "tasker"): number =>
+      negotiationHistory.filter(
+        (entry) => entry.action === "counter" && entry.by === role
+      ).length;
 
     const assertCanCounter = () => {
       if (application.proposedBudget.isNegotiable === false) {
         throw new BadRequestError("This offer is not negotiable");
       }
-      // Business rule: only poster can counter, and only once in total.
-      if (actorRole !== "poster") {
-        throw new BadRequestError("Only task owner can send a counter offer");
+
+      if (actorRole === "poster") {
+        if (getCounterCountByRole("poster") >= 1) {
+          throw new BadRequestError("Task owner can send only one counter offer");
+        }
+
+        if (negotiation.status !== "none") {
+          throw new BadRequestError(
+            "Task owner can counter only on the original offer"
+          );
+        }
+        return;
       }
-      if (getCounterCount() >= 1) {
-        throw new BadRequestError("Only one counter offer is allowed");
+
+      if (getCounterCountByRole("tasker") >= 1) {
+        throw new BadRequestError("Tasker can send only one counter offer");
+      }
+
+      if (negotiation.status !== "countered_by_poster") {
+        throw new BadRequestError(
+          "Tasker can counter only after the task owner sends a counter offer"
+        );
       }
     };
 
@@ -1113,12 +1132,14 @@ export class ApplicationService {
     if (action === "counter") {
       assertCanCounter();
       const rawAmount = parseAndValidateCounterAmount();
+      const nextNegotiationStatus =
+        actorRole === "poster" ? "countered_by_poster" : "countered_by_tasker";
 
       application.proposedBudget.amount = rawAmount;
-      application.negotiation.currentAmount = rawAmount;
-      application.negotiation.status = "countered_by_poster";
-      application.negotiation.lastActionBy = actorRole;
-      application.negotiation.history.push({
+      negotiation.currentAmount = rawAmount;
+      negotiation.status = nextNegotiationStatus;
+      negotiation.lastActionBy = actorRole;
+      negotiation.history.push({
         amount: rawAmount,
         action: "counter",
         by: actorRole,
@@ -1126,26 +1147,26 @@ export class ApplicationService {
       });
     } else if (action === "accept") {
       if (
-        (actorRole === "tasker" && application.negotiation.status !== "countered_by_poster") ||
-        (actorRole === "poster" && application.negotiation.status !== "countered_by_tasker")
+        (actorRole === "tasker" && negotiation.status !== "countered_by_poster") ||
+        (actorRole === "poster" && negotiation.status !== "countered_by_tasker")
       ) {
         throw new BadRequestError("No pending counter offer to accept");
       }
 
-      application.negotiation.status = "accepted";
-      application.negotiation.lastActionBy = actorRole;
-      application.negotiation.history.push({
-        amount: application.negotiation.currentAmount,
+      negotiation.status = "accepted";
+      negotiation.lastActionBy = actorRole;
+      negotiation.history.push({
+        amount: negotiation.currentAmount,
         action: "accept",
         by: actorRole,
         at: new Date(),
       });
     } else if (action === "reject") {
       application.status = "rejected";
-      application.negotiation.status = "rejected";
-      application.negotiation.lastActionBy = actorRole;
-      application.negotiation.history.push({
-        amount: application.negotiation.currentAmount,
+      negotiation.status = "rejected";
+      negotiation.lastActionBy = actorRole;
+      negotiation.history.push({
+        amount: negotiation.currentAmount,
         action: "reject",
         by: actorRole,
         at: new Date(),
