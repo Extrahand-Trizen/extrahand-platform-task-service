@@ -9,7 +9,7 @@ import mongoose from 'mongoose';
  * 2. Keyword matching (for keyword-based task alerts)
  * 
  * All methods apply strict cost-control filters:
- * - Role: tasker or both
+ * - Role: includes tasker (dual poster+tasker counts)
  * - Active: isActive = true
  * - Verification: canAcceptTasks = true (verified)
  * - Exact keyword match (case-insensitive)
@@ -20,7 +20,7 @@ export class UserMatchingService {
    * Find taskers whose primary skill category matches the task category
    * 
    * Cost-control filters applied:
-   * - Role filter: roles includes 'tasker' or 'both'
+   * - Role filter: roles array includes 'tasker'
    * - Active filter: isActive = true
    * - Verification filter: canAcceptTasks = true
    * 
@@ -39,8 +39,7 @@ export class UserMatchingService {
       const Profile = mongoose.connection.collection('profiles');
 
       const taskers = await Profile.find({
-        // Role filter: tasker or both
-        roles: { $in: ['tasker', 'both'] },
+        roles: 'tasker',
         // Active filter: must be active
         isActive: true,
         // Verification filter: must be verified to accept tasks

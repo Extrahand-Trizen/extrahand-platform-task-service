@@ -130,6 +130,24 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
   return "other";
 }
 
+function hasOpenInStatusFilter(
+  status?: TaskStatus | TaskStatus[] | string | string[],
+): boolean {
+  if (!status) return false;
+  if (Array.isArray(status)) return status.includes("open");
+  return status === "open";
+}
+
+function buildLiveOpenExpiryClause(now: Date): any {
+  return {
+    $or: [
+      { expiresAt: { $exists: false } },
+      { expiresAt: null },
+      { expiresAt: { $gt: now } },
+    ],
+  };
+}
+
 function normalizeDateOnly(value: Date): Date {
   const d = new Date(value);
   d.setHours(0, 0, 0, 0);
@@ -281,6 +299,10 @@ export class TaskService {
       } else if (typeof status === 'string') {
         andClauses.push({ status });
       }
+    }
+    // Browse tasks should hide deadline-crossed open tasks at query time.
+    if (hasOpenInStatusFilter(status)) {
+      andClauses.push(buildLiveOpenExpiryClause(new Date()));
     }
 
     if (excludeRequesterId && mongoose.Types.ObjectId.isValid(excludeRequesterId)) {
@@ -481,6 +503,10 @@ export class TaskService {
         andClauses.push({ status });
       }
     }
+    // Nearby browse should also hide deadline-crossed open tasks at query time.
+    if (hasOpenInStatusFilter(status)) {
+      andClauses.push(buildLiveOpenExpiryClause(new Date()));
+    }
 
     if (excludeRequesterId && mongoose.Types.ObjectId.isValid(excludeRequesterId)) {
       andClauses.push({
@@ -640,6 +666,7 @@ export class TaskService {
     return Task.countDocuments({
       requesterId: new mongoose.Types.ObjectId(requesterId),
       status: "open",
+      ...buildLiveOpenExpiryClause(new Date()),
     });
   }
 
