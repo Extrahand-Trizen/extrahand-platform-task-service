@@ -412,13 +412,80 @@ export class TaskController {
     ApiResponse.success(res, task, 'Changes requested successfully');
   }
 
-  // Reverted to older task-tracking backend flow:
-  // additional quote + selfie/work-evidence controller handlers are disabled.
-  // static async createAdditionalQuoteRequest(...) {}
-  // static async getAdditionalQuoteRequests(...) {}
-  // static async getActiveAdditionalQuoteRequest(...) {}
-  // static async acceptAdditionalQuoteRequest(...) {}
-  // static async rejectAdditionalQuoteRequest(...) {}
-  // static async withdrawAdditionalQuoteRequest(...) {}
+  static async createAdditionalQuoteRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    // TEMP DISABLED: selfie/work-photo specific request fields.
+    // const { amount, reason, selfieImage, workImage } = req.body || {};
+    const { amount, reason, proofImages } = req.body || {};
+    const task = await TaskService.createAdditionalQuoteRequest(
+      req.params.id,
+      req.user!.profileId,
+      { amount, reason, proofImages }
+    );
+    ApiResponse.success(res, task, 'Additional payment request submitted');
+  }
+
+  static async getAdditionalQuoteRequests(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const requests = await TaskService.getAdditionalQuoteRequests(
+      req.params.id,
+      req.user!.profileId
+    );
+    ApiResponse.success(res, requests, 'Additional payment requests fetched');
+  }
+
+  static async getActiveAdditionalQuoteRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const request = await TaskService.getActiveAdditionalQuoteRequest(
+      req.params.id,
+      req.user!.profileId
+    );
+    ApiResponse.success(res, request, 'Active additional payment request fetched');
+  }
+
+  static async acceptAdditionalQuoteRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const task = await TaskService.decideAdditionalQuoteRequest(
+      req.params.id,
+      req.params.requestId,
+      req.user!.profileId,
+      'accepted'
+    );
+    ApiResponse.success(res, task, 'Additional payment request accepted');
+  }
+
+  static async rejectAdditionalQuoteRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const task = await TaskService.decideAdditionalQuoteRequest(
+      req.params.id,
+      req.params.requestId,
+      req.user!.profileId,
+      'rejected',
+      req.body?.reason
+    );
+    ApiResponse.success(res, task, 'Additional payment request rejected');
+  }
+
+  static async withdrawAdditionalQuoteRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const task = await TaskService.withdrawAdditionalQuoteRequest(
+      req.params.id,
+      req.params.requestId,
+      req.user!.profileId
+    );
+    ApiResponse.success(res, task, 'Additional payment request withdrawn');
+  }
 }
 

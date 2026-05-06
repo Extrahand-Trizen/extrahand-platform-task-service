@@ -199,6 +199,7 @@ export class ApplicationService {
           isNegotiable: applicationData.proposedBudget?.isNegotiable !== false,
         },
         negotiation: {
+          initialAmount: proposedAmount,
           currentAmount: proposedAmount,
           status: "none",
           history: [],
@@ -679,6 +680,13 @@ export class ApplicationService {
 
     // Validate status transition
     if (status === "accepted") {
+      const negotiationStatus = application.negotiation?.status || "none";
+      if (negotiationStatus === "countered_by_poster") {
+        throw new BadRequestError(
+          "Helper confirmation is required before accepting this counter offer"
+        );
+      }
+
       const isRecurring = Boolean(task.recurring?.enabled) && Array.isArray(task.schedule) && task.schedule.length > 0;
 
       if (!isRecurring && task.status !== "open") {
@@ -764,17 +772,23 @@ export class ApplicationService {
     application.updatedAt = new Date();
     if (!application.negotiation) {
       application.negotiation = {
+        initialAmount: application.proposedBudget.amount,
         currentAmount: application.proposedBudget.amount,
         status: "none",
         history: [],
       };
     }
     if (application.status === "accepted") {
-      application.negotiation.currentAmount = application.proposedBudget.amount;
+      const effectiveAcceptedAmount =
+        Number(application.negotiation.currentAmount) > 0
+          ? Number(application.negotiation.currentAmount)
+          : application.proposedBudget.amount;
+      application.negotiation.currentAmount = effectiveAcceptedAmount;
+      application.negotiation.finalAmount = effectiveAcceptedAmount;
       application.negotiation.status = "accepted";
       application.negotiation.lastActionBy = "poster";
       application.negotiation.history.push({
-        amount: application.proposedBudget.amount,
+        amount: effectiveAcceptedAmount,
         action: "accept",
         by: "poster",
         at: new Date(),
@@ -783,8 +797,14 @@ export class ApplicationService {
     if (application.status === "rejected") {
       application.negotiation.status = "rejected";
       application.negotiation.lastActionBy = "poster";
+      if (application.negotiation.finalAmount !== undefined) {
+        application.negotiation.finalAmount = undefined;
+      }
       application.negotiation.history.push({
-        amount: application.proposedBudget.amount,
+        amount:
+          Number(application.negotiation.currentAmount) > 0
+            ? Number(application.negotiation.currentAmount)
+            : application.proposedBudget.amount,
         action: "reject",
         by: "poster",
         at: new Date(),
@@ -1070,6 +1090,7 @@ export class ApplicationService {
 
     if (!application.negotiation) {
       application.negotiation = {
+        initialAmount: application.proposedBudget.amount,
         currentAmount: application.proposedBudget.amount,
         status: "none",
         history: [],
@@ -1135,8 +1156,10 @@ export class ApplicationService {
       const nextNegotiationStatus =
         actorRole === "poster" ? "countered_by_poster" : "countered_by_tasker";
 
-      application.proposedBudget.amount = rawAmount;
       negotiation.currentAmount = rawAmount;
+      if (negotiation.finalAmount !== undefined) {
+        negotiation.finalAmount = undefined;
+      }
       negotiation.status = nextNegotiationStatus;
       negotiation.lastActionBy = actorRole;
       negotiation.history.push({
@@ -1155,6 +1178,7 @@ export class ApplicationService {
 
       negotiation.status = "accepted";
       negotiation.lastActionBy = actorRole;
+      negotiation.finalAmount = negotiation.currentAmount;
       negotiation.history.push({
         amount: negotiation.currentAmount,
         action: "accept",
@@ -1165,6 +1189,9 @@ export class ApplicationService {
       application.status = "rejected";
       negotiation.status = "rejected";
       negotiation.lastActionBy = actorRole;
+      if (negotiation.finalAmount !== undefined) {
+        negotiation.finalAmount = undefined;
+      }
       negotiation.history.push({
         amount: negotiation.currentAmount,
         action: "reject",

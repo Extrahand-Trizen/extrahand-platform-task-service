@@ -114,10 +114,21 @@ export interface ITask extends Document {
     requestedById: mongoose.Types.ObjectId;
   };
 
-  // Reverted to older task-tracking backend flow:
-  // additionalQuoteRequests / activeAdditionalQuoteRequestId disabled.
-  // additionalQuoteRequests?: Array<...>;
-  // activeAdditionalQuoteRequestId?: string;
+  additionalQuoteRequests?: Array<{
+    requestId: string;
+    amount: number;
+    reason: string;
+    proofImages?: string[];
+    // TEMP DISABLED: selfie/work-photo specific fields retained only for backward compatibility.
+    selfieImage?: string;
+    workImage?: string;
+    status: "pending" | "accepted" | "rejected" | "withdrawn";
+    createdAt: Date;
+    decidedAt?: Date;
+    decidedById?: mongoose.Types.ObjectId;
+    decisionReason?: string;
+  }>;
+  activeAdditionalQuoteRequestId?: string | null;
 
   startedAt?: Date;
   inProgressAt?: Date;
@@ -318,9 +329,30 @@ const TaskSchema = new Schema<ITask>(
         ref: "Profile",
       },
     },
-    // Reverted to older task-tracking backend flow:
-    // additionalQuoteRequests: [...],
-    // activeAdditionalQuoteRequestId: { type: String, default: null },
+    additionalQuoteRequests: [{
+      requestId: { type: String, required: true },
+      amount: { type: Number, required: true, min: 1 },
+      reason: { type: String, required: true, trim: true, maxlength: 1000 },
+      proofImages: [{ type: String }],
+      // TEMP DISABLED: selfie/work-photo specific required fields.
+      // selfieImage: { type: String, required: true },
+      // workImage: { type: String, required: true },
+      selfieImage: { type: String, required: false },
+      workImage: { type: String, required: false },
+      status: {
+        type: String,
+        enum: ["pending", "accepted", "rejected", "withdrawn"],
+        default: "pending",
+      },
+      createdAt: { type: Date, default: Date.now },
+      decidedAt: Date,
+      decidedById: {
+        type: Schema.Types.ObjectId,
+        ref: "Profile",
+      },
+      decisionReason: String,
+    }],
+    activeAdditionalQuoteRequestId: { type: String, default: null },
     startedAt: Date,
     inProgressAt: Date,
     reviewAt: Date,

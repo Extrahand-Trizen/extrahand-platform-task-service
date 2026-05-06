@@ -197,14 +197,12 @@ function hashStartOtp(taskId: string, otp: string): string {
   return crypto.createHash("sha256").update(`${taskId}:${otp}`).digest("hex");
 }
 
-// Reverted to older task-tracking flow:
-// additional quote + selfie/work evidence gate disabled.
-// function getPendingAdditionalQuoteRequest(task: ITask): any | null {
-//   const requests = Array.isArray((task as any)?.additionalQuoteRequests)
-//     ? ((task as any).additionalQuoteRequests as any[])
-//     : [];
-//   return requests.find((request) => request?.status === "pending") || null;
-// }
+function getPendingAdditionalQuoteRequest(task: ITask): any | null {
+  const requests = Array.isArray((task as any)?.additionalQuoteRequests)
+    ? ((task as any).additionalQuoteRequests as any[])
+    : [];
+  return requests.find((request) => request?.status === "pending") || null;
+}
 
 export class TaskService {
   /**
@@ -1831,7 +1829,12 @@ export class TaskService {
       isPerformer &&
       !options?.skipStartOtpValidation
     ) {
-      // Reverted: no additional-quote pending gate in legacy flow.
+      const pendingAdditionalQuote = getPendingAdditionalQuoteRequest(task);
+      if (pendingAdditionalQuote) {
+        throw new BadRequestError(
+          "Cannot start task while an additional payment request is pending decision"
+        );
+      }
 
       const startOtp = task.startOtp;
       if (!startOtp?.verifiedAt) {
@@ -2610,10 +2613,198 @@ export class TaskService {
     return updatedTask as unknown as ITask;
   }
 
-  // Reverted to older task-tracking backend flow:
-  // additional quote + selfie/work-evidence service methods are disabled.
-  // static async createAdditionalQuoteRequest(...) {}
-  // static async getAdditionalQuoteRequests(...) {}
-  // static async decideAdditionalQuoteRequest(...) {}
-  // static async withdrawAdditionalQuoteRequest(...) {}
+  static async createAdditionalQuoteRequest(
+    taskId: string,
+    performerProfileId: mongoose.Types.ObjectId,
+    payload: {
+      amount: number;
+      reason: string;
+      proofImages?: string[];
+      // TEMP DISABLED: selfie/work-photo specific fields (kept optional for backward compatibility).
+      selfieImage?: string;
+      workImage?: string;
+    }
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.equals(performerProfileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can request additional payment");
+    }
+    if (!["assigned", "started", "in_progress"].includes(String(task.status || ""))) {
+      throw new BadRequestError("Additional payment request is only allowed before review stage");
+    }
+
+    const amount = Number(payload?.amount || 0);
+    const reason = String(payload?.reason || "").trim();
+    const normalizedProofImages = Array.isArray(payload?.proofImages)
+      ? payload.proofImages.map((img) => String(img || "").trim()).filter(Boolean)
+      : [];
+    // TEMP DISABLED: selfie/work-photo specific parsing.
+    // const selfieImage = String(payload?.selfieImage || "").trim();
+    // const workImage = String(payload?.workImage || "").trim();
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestError("Valid additional amount is required");
+    }
+    if (reason.length < 10) {
+      throw new BadRequestError("Reason must be at least 10 characters");
+    }
+    if (normalizedProofImages.length < 1) {
+      throw new BadRequestError("At least one proof image is required");
+    }
+
+    const pending = getPendingAdditionalQuoteRequest(task);
+    if (pending) {
+      throw new BadRequestError("A pending additional payment request already exists");
+    }
+
+    const requestId = `aqr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ([...(task as any).additionalQuoteRequests] as any[])
+      : [];
+
+    requests.push({
+      requestId,
+      amount,
+      reason,
+      proofImages: normalizedProofImages,
+      // TEMP DISABLED: selfie/work-photo specific persistence.
+      // selfieImage,
+      // workImage,
+      status: "pending",
+      createdAt: new Date(),
+    });
+
+    const updated = await Task.findByIdAndUpdate(
+      taskId,
+      {
+        additionalQuoteRequests: requests,
+        activeAdditionalQuoteRequestId: requestId,
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updated) throw new NotFoundError("Task not found");
+    TaskService.invalidateTaskCache(taskId);
+    return updated as unknown as ITask;
+  }
+
+  static async getAdditionalQuoteRequests(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId
+  ): Promise<any[]> {
+    const task = await Task.findById(taskId).lean();
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.toString() === profileId.toString();
+    const isRequester = task.requesterId?.toString() === profileId.toString();
+    if (!isPerformer && !isRequester) {
+      throw new ForbiddenError("Not authorized to view additional payment requests");
+    }
+
+    return Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+  }
+
+  static async getActiveAdditionalQuoteRequest(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId
+  ): Promise<any | null> {
+    const requests = await TaskService.getAdditionalQuoteRequests(taskId, profileId);
+    return requests.find((r) => r?.status === "pending") || null;
+  }
+
+  static async decideAdditionalQuoteRequest(
+    taskId: string,
+    requestId: string,
+    requesterProfileId: mongoose.Types.ObjectId,
+    decision: "accepted" | "rejected",
+    decisionReason?: string
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+    if (!task.requesterId.equals(requesterProfileId)) {
+      throw new ForbiddenError("Only task requester can decide additional payment request");
+    }
+
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ([...(task as any).additionalQuoteRequests] as any[])
+      : [];
+    const index = requests.findIndex((r) => String(r?.requestId) === String(requestId));
+    if (index < 0) throw new NotFoundError("Additional payment request not found");
+    if (requests[index]?.status !== "pending") {
+      throw new BadRequestError("Only pending request can be decided");
+    }
+
+    requests[index] = {
+      ...requests[index],
+      status: decision,
+      decidedAt: new Date(),
+      decidedById: requesterProfileId,
+      decisionReason: decision === "rejected" ? String(decisionReason || "").trim() : undefined,
+    };
+
+    const updated = await Task.findByIdAndUpdate(
+      taskId,
+      {
+        additionalQuoteRequests: requests,
+        activeAdditionalQuoteRequestId: null,
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updated) throw new NotFoundError("Task not found");
+    TaskService.invalidateTaskCache(taskId);
+    return updated as unknown as ITask;
+  }
+
+  static async withdrawAdditionalQuoteRequest(
+    taskId: string,
+    requestId: string,
+    performerProfileId: mongoose.Types.ObjectId
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.equals(performerProfileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can withdraw additional payment request");
+    }
+
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ([...(task as any).additionalQuoteRequests] as any[])
+      : [];
+    const index = requests.findIndex((r) => String(r?.requestId) === String(requestId));
+    if (index < 0) throw new NotFoundError("Additional payment request not found");
+    if (requests[index]?.status !== "pending") {
+      throw new BadRequestError("Only pending request can be withdrawn");
+    }
+
+    requests[index] = {
+      ...requests[index],
+      status: "withdrawn",
+      decidedAt: new Date(),
+      decidedById: performerProfileId,
+      decisionReason: "Withdrawn by performer",
+    };
+
+    const updated = await Task.findByIdAndUpdate(
+      taskId,
+      {
+        additionalQuoteRequests: requests,
+        activeAdditionalQuoteRequestId: null,
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updated) throw new NotFoundError("Task not found");
+    TaskService.invalidateTaskCache(taskId);
+    return updated as unknown as ITask;
+  }
 }

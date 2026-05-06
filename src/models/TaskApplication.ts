@@ -31,7 +31,9 @@ export interface ITaskApplication extends Document {
   portfolio?: string[];
   status: ApplicationStatus;
   negotiation?: {
+    initialAmount: number;
     currentAmount: number;
+    finalAmount?: number;
     status: ApplicationNegotiationStatus;
     lastActionBy?: "poster" | "tasker";
     history: Array<{
@@ -122,7 +124,9 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
     },
 
     negotiation: {
+      initialAmount: { type: Number, min: 0 },
       currentAmount: { type: Number, min: 0 },
+      finalAmount: { type: Number, min: 0, required: false },
       status: {
         type: String,
         enum: ["none", "countered_by_poster", "countered_by_tasker", "accepted", "rejected"],

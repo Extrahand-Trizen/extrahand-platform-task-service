@@ -49,9 +49,19 @@ export class CompletionService {
       throw new ForbiddenError('Only the assigned performer can submit completion proof');
     }
 
-    const normalizedProofUrls = Array.isArray(proofUrls) ? proofUrls : [];
+    const normalizedProofUrls = Array.isArray(proofUrls)
+      ? proofUrls.map((url) => String(url || '').trim()).filter(Boolean)
+      : [];
 
-    // Proof is optional: if no images are provided, still allow moving to review.
+    // TEMP DISABLED: selfie + work-photo specific requirement.
+    // if (normalizedProofUrls.length < 2) {
+    //   throw new BadRequestError('Please upload both selfie and work photo before submission');
+    // }
+
+    if (normalizedProofUrls.length < 1) {
+      throw new BadRequestError('Please upload at least one proof image before submission');
+    }
+
     const completionProof = normalizedProofUrls.map(url => ({
       url,
       filename: url.split('/').pop() || 'proof.jpg',

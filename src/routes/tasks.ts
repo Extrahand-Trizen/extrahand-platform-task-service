@@ -114,48 +114,46 @@ router.post(
   asyncHandler(TaskController.requestChanges)
 );
 
-// Reverted to older task-tracking backend flow:
-// additional quote + selfie/work-evidence routes are disabled for now.
-// router.post(
-//   "/:id/additional-quote-request",
-//   serviceAuthMiddleware,
-//   authMiddleware,
-//   asyncHandler(TaskController.createAdditionalQuoteRequest)
-// );
-//
-// router.get(
-//   "/:id/additional-quote-requests",
-//   serviceAuthMiddleware,
-//   authMiddleware,
-//   asyncHandler(TaskController.getAdditionalQuoteRequests)
-// );
-//
-// router.get(
-//   "/:id/additional-quote-request/active",
-//   serviceAuthMiddleware,
-//   authMiddleware,
-//   asyncHandler(TaskController.getActiveAdditionalQuoteRequest)
-// );
-//
-// router.post(
-//   "/:id/additional-quote-request/:requestId/accept",
-//   serviceAuthMiddleware,
-//   authMiddleware,
-//   asyncHandler(TaskController.acceptAdditionalQuoteRequest)
-// );
-//
-// router.post(
-//   "/:id/additional-quote-request/:requestId/reject",
-//   serviceAuthMiddleware,
-//   authMiddleware,
-//   asyncHandler(TaskController.rejectAdditionalQuoteRequest)
-// );
-//
-// router.post(
-//   "/:id/additional-quote-request/:requestId/withdraw",
-//   serviceAuthMiddleware,
-//   authMiddleware,
-//   asyncHandler(TaskController.withdrawAdditionalQuoteRequest)
-// );
+router.post(
+  "/:id/additional-quote-request",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.createAdditionalQuoteRequest)
+);
+
+router.get(
+  "/:id/additional-quote-requests",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getAdditionalQuoteRequests)
+);
+
+router.get(
+  "/:id/additional-quote-request/active",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getActiveAdditionalQuoteRequest)
+);
+
+router.post(
+  "/:id/additional-quote-request/:requestId/accept",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.acceptAdditionalQuoteRequest)
+);
+
+router.post(
+  "/:id/additional-quote-request/:requestId/reject",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.rejectAdditionalQuoteRequest)
+);
+
+router.post(
+  "/:id/additional-quote-request/:requestId/withdraw",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.withdrawAdditionalQuoteRequest)
+);
 
 export default router;
