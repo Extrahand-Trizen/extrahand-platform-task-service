@@ -130,6 +130,21 @@ export interface ITask extends Document {
   }>;
   activeAdditionalQuoteRequestId?: string | null;
 
+  // ── Global Budget Revision (Phase 1) ────────────────────────────────────────
+  /** How many times the poster has revised the budget. Max = 2. Default = 0. */
+  currentRevisionRound: number;
+  /** High-level negotiation state for the task. Separate from task lifecycle status. */
+  negotiationStatus: "open" | "revised" | "closed";
+  /** Append-only audit trail of all poster budget revisions. Bounded by currentRevisionRound (max 2). */
+  budgetRevisions?: Array<{
+    round: number;
+    previousAmount: number;
+    newAmount: number;
+    revisedAt: Date;
+    revisedById: mongoose.Types.ObjectId;
+    notifiedBidderCount: number;
+  }>;
+
   startedAt?: Date;
   inProgressAt?: Date;
   reviewAt?: Date;
@@ -353,6 +368,33 @@ const TaskSchema = new Schema<ITask>(
       decisionReason: String,
     }],
     activeAdditionalQuoteRequestId: { type: String, default: null },
+
+    // ── Global Budget Revision (Phase 1) ────────────────────────────────────
+    currentRevisionRound: { type: Number, default: 0, min: 0, max: 2 },
+    negotiationStatus: {
+      type: String,
+      enum: ["open", "revised", "closed"],
+      default: "open",
+      index: true,
+    },
+    budgetRevisions: {
+      type: [
+        {
+          round: { type: Number, required: true, min: 1 },
+          previousAmount: { type: Number, required: true, min: 0 },
+          newAmount: { type: Number, required: true, min: 0 },
+          revisedAt: { type: Date, default: Date.now },
+          revisedById: {
+            type: Schema.Types.ObjectId,
+            ref: "Profile",
+            required: true,
+          },
+          notifiedBidderCount: { type: Number, default: 0, min: 0 },
+        },
+      ],
+      default: [],
+    },
+
     startedAt: Date,
     inProgressAt: Date,
     reviewAt: Date,
@@ -380,6 +422,8 @@ TaskSchema.index({ "schedule.date": 1, status: 1 });
 TaskSchema.index({ category: 1, status: 1, createdAt: -1 });
 TaskSchema.index({ category: 1, status: 1, "budget.amount": 1 });
 TaskSchema.index({ status: 1, createdAt: -1 });
+// Global revision: poster's revisable open tasks
+TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);

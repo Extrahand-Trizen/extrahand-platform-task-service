@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { ApplicationController } from "../controllers/ApplicationController";
+import { BudgetRevisionController } from "../controllers/BudgetRevisionController";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { asyncHandler } from "../middleware/errorHandler";
 
@@ -55,5 +56,12 @@ router.post(
 
 // DELETE /api/v1/applications/:id - Withdraw an application (Alias for backward compatibility)
 router.delete("/:id", asyncHandler(ApplicationController.withdrawApplication));
+
+// ── Global Budget Revision ───────────────────────────────────────────────────
+// POST /api/v1/applications/:id/respond-to-revision — Tasker responds to active revision round
+router.post(
+  "/:id/respond-to-revision",
+  asyncHandler(BudgetRevisionController.respondToRevision)
+);
 
 export default router;

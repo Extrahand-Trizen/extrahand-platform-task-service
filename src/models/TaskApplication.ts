@@ -57,6 +57,29 @@ export interface ITaskApplication extends Document {
    * Business rule: allow only one re-offer after withdrawal.
    */
   reofferCount?: number;
+
+  // ── Global Budget Revision (Phase 1) ────────────────────────────────────────
+  /**
+   * Denormalized copy of task.currentRevisionRound at the time of the last
+   * poster revision. Updated by the revise-budget API via updateMany.
+   * Used to check if this tasker has already responded to the current round
+   * without needing to fetch the task document.
+   */
+  taskCurrentRevisionRound?: number;
+  /**
+   * The revision round number this tasker last responded to (keep/revise).
+   * null = never responded to any round.
+   * Guard: respondedToRevisionRound >= taskCurrentRevisionRound → already responded.
+   */
+  respondedToRevisionRound?: number;
+  /** Append-only log of the tasker's responses to global revision rounds. */
+  quotationRevisions?: Array<{
+    round: number;
+    previousAmount: number;
+    newAmount: number;
+    revisedAt: Date;
+    action: "revised" | "kept";
+  }>;
 }
 
 const TaskApplicationSchema = new Schema<ITaskApplication>(
@@ -174,6 +197,26 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
       default: [],
       maxlength: 50, // prevents document bloat
     },
+
+    // ── Global Budget Revision (Phase 1) ─────────────────────────────────────
+    taskCurrentRevisionRound: { type: Number, default: 0, min: 0 },
+    respondedToRevisionRound: { type: Number, default: null, min: 0 },
+    quotationRevisions: {
+      type: [
+        {
+          round: { type: Number, required: true, min: 1 },
+          previousAmount: { type: Number, required: true, min: 0 },
+          newAmount: { type: Number, required: true, min: 0 },
+          revisedAt: { type: Date, default: Date.now },
+          action: {
+            type: String,
+            enum: ["revised", "kept"],
+            required: true,
+          },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );
@@ -183,6 +226,16 @@ TaskApplicationSchema.index({ taskId: 1, status: 1 });
 TaskApplicationSchema.index({ applicantId: 1, status: 1 });
 TaskApplicationSchema.index({ taskId: 1, applicantUid: 1 }, { unique: true }); // Prevent duplicate applications
 TaskApplicationSchema.index({ taskId: 1, selectedDates: 1 });
+// Covered index: fetch pending bidder UIDs without touching document pages (used in revise-budget notification dispatch)
+TaskApplicationSchema.index(
+  { taskId: 1, status: 1, applicantUid: 1 },
+  { name: "task_status_uid_covered" }
+);
+// Revision round response tracking: find pending apps that haven't responded to current round
+TaskApplicationSchema.index(
+  { taskId: 1, status: 1, respondedToRevisionRound: 1 },
+  { name: "task_status_revision_round" }
+);
 
 // Auto-set respondedAt
 TaskApplicationSchema.pre("save", function (next) {

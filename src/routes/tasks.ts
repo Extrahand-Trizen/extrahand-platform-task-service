@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { TaskController } from "../controllers/TaskController";
+import { BudgetRevisionController } from "../controllers/BudgetRevisionController";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { serviceAuthMiddleware } from "../middleware/serviceAuth";
 import { asyncHandler } from "../middleware/errorHandler";
@@ -154,6 +155,15 @@ router.post(
   serviceAuthMiddleware,
   authMiddleware,
   asyncHandler(TaskController.withdrawAdditionalQuoteRequest)
+);
+
+// ── Global Budget Revision ───────────────────────────────────────────────────
+// POST /api/v1/tasks/:taskId/revise-budget — Poster revises task budget (max 2 rounds)
+router.post(
+  "/:taskId/revise-budget",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BudgetRevisionController.reviseBudget)
 );
 
 export default router;
