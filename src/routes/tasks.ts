@@ -35,6 +35,16 @@ router.get(
   asyncHandler(TaskController.getMyTasks)
 );
 
+// Backward-compatible alias:
+// Some gateway/app deployments may still call /api/v1/tasks/my.
+// Keep this route BEFORE "/:id" to avoid "my" being treated as an ObjectId.
+router.get(
+  "/my",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getMyTasks)
+);
+
 // GET /api/v1/tasks/count/open - Fast open-task count by requesterId
 router.get(
   "/count/open",
