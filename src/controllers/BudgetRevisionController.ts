@@ -19,7 +19,7 @@ export class BudgetRevisionController {
   /**
    * POST /api/v1/tasks/:taskId/revise-budget
    *
-   * Poster revises the task budget globally (max 2 times).
+   * Poster revises the task budget globally (max 1 time).
    * Body: { newAmount: number, reason?: string }
    */
   static async reviseBudget(

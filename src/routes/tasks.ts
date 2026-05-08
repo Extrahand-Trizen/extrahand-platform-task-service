@@ -168,7 +168,7 @@ router.post(
 );
 
 // ── Global Budget Revision ───────────────────────────────────────────────────
-// POST /api/v1/tasks/:taskId/revise-budget — Poster revises task budget (max 2 rounds)
+// POST /api/v1/tasks/:taskId/revise-budget — Poster revises task budget (max 1 round)
 router.post(
   "/:taskId/revise-budget",
   serviceAuthMiddleware,

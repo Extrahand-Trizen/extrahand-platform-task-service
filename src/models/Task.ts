@@ -131,11 +131,11 @@ export interface ITask extends Document {
   activeAdditionalQuoteRequestId?: string | null;
 
   // ── Global Budget Revision (Phase 1) ────────────────────────────────────────
-  /** How many times the poster has revised the budget. Max = 2. Default = 0. */
+  /** How many times the poster has revised the budget. Max = 1. Default = 0. */
   currentRevisionRound: number;
   /** High-level negotiation state for the task. Separate from task lifecycle status. */
   negotiationStatus: "open" | "revised" | "closed";
-  /** Append-only audit trail of all poster budget revisions. Bounded by currentRevisionRound (max 2). */
+  /** Append-only audit trail of all poster budget revisions. Bounded by currentRevisionRound (max 1). */
   budgetRevisions?: Array<{
     round: number;
     previousAmount: number;
@@ -370,7 +370,7 @@ const TaskSchema = new Schema<ITask>(
     activeAdditionalQuoteRequestId: { type: String, default: null },
 
     // ── Global Budget Revision (Phase 1) ────────────────────────────────────
-    currentRevisionRound: { type: Number, default: 0, min: 0, max: 2 },
+    currentRevisionRound: { type: Number, default: 0, min: 0, max: 1 },
     negotiationStatus: {
       type: String,
       enum: ["open", "revised", "closed"],

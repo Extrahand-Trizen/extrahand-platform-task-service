@@ -20,7 +20,7 @@ import { ITaskApplication } from "../models/TaskApplication";
  *
  * Business logic for the Global Counter Offer Model.
  * Responsible for:
- *   1. reviseBudget()      — Poster revises the task budget globally (max 2 rounds)
+ *   1. reviseBudget()      — Poster revises the task budget globally (max 1 round)
  *   2. respondToRevision() — Tasker responds to an active revision round (keep/revise/withdraw)
  *
  * All DB operations delegate to TaskRepository / ApplicationRepository.
