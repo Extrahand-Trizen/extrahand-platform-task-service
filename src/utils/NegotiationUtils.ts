@@ -76,7 +76,7 @@ export const NegotiationUtils = {
       previousAmount: number;
       newAmount: number;
       revisedAt: Date;
-      action: "revised" | "kept";
+      action: "revised" | "kept" | "withdrawn";
     };
   } {
     const effectiveNewAmount =

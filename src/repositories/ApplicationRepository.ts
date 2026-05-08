@@ -73,12 +73,12 @@ export class ApplicationRepository {
         previousAmount: number;
         newAmount: number;
         revisedAt: Date;
-        action: "revised" | "kept";
+        action: "revised" | "kept" | "withdrawn";
       };
     }
   ): Promise<ITaskApplication | null> {
-    return TaskApplication.findByIdAndUpdate(
-      applicationId,
+    return TaskApplication.findOneAndUpdate(
+      { _id: applicationId, status: "pending" },
       {
         $set: {
           "proposedBudget.amount": payload.newAmount,

@@ -95,28 +95,27 @@ export class BudgetRevisionService {
     logger.info("[BudgetRevisionService.reviseBudget] Budget revised", {
       taskId,
       round,
-      previousAmount: updated.budgetRevisions?.[round - 2]?.newAmount,
+      previousAmount: updated.budgetRevisions?.[round - 1]?.previousAmount,
       newAmount,
       actorUid,
     });
 
     // ── DENORMALIZE ROUND onto pending applications ──────────────────────────
     // Bulk write: O(A) one DB op so respond-to-revision doesn't need a task fetch.
-    // Run async — don't block the HTTP response.
-    setImmediate(async () => {
-      try {
-        await ApplicationRepository.setTaskRevisionRound(taskId, round);
-        logger.info(
-          "[BudgetRevisionService.reviseBudget] Denormalized revision round onto applications",
-          { taskId, round }
-        );
-      } catch (err) {
-        logger.error(
-          "[BudgetRevisionService.reviseBudget] Failed to denormalize round",
-          { taskId, round, error: err instanceof Error ? err.message : err }
-        );
-      }
-    });
+    // Synchronous — must complete before HTTP response so helpers see the update
+    // immediately when their frontend refetches after poster's revision.
+    try {
+      await ApplicationRepository.setTaskRevisionRound(taskId, round);
+      logger.info(
+        "[BudgetRevisionService.reviseBudget] Denormalized revision round onto applications",
+        { taskId, round }
+      );
+    } catch (err) {
+      logger.error(
+        "[BudgetRevisionService.reviseBudget] Failed to denormalize round",
+        { taskId, round, error: err instanceof Error ? err.message : err }
+      );
+    }
 
     // ── DISPATCH NOTIFICATIONS ───────────────────────────────────────────────
     // Fetch pending bidder UIDs via covered index scan (no doc reads), then
@@ -254,7 +253,7 @@ export class BudgetRevisionService {
           previousAmount: application.proposedBudget.amount,
           newAmount: application.proposedBudget.amount,
           revisedAt: new Date(),
-          action: "kept",
+          action: "withdrawn",
         },
       });
       // Use raw update to set withdrawn status (avoid Mongoose pre-save hook complications)

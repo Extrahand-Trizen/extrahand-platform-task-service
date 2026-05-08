@@ -68,17 +68,17 @@ export interface ITaskApplication extends Document {
   taskCurrentRevisionRound?: number;
   /**
    * The revision round number this tasker last responded to (keep/revise).
-   * null = never responded to any round.
+   * 0 = never responded to any round.
    * Guard: respondedToRevisionRound >= taskCurrentRevisionRound → already responded.
    */
-  respondedToRevisionRound?: number;
+  respondedToRevisionRound: number;
   /** Append-only log of the tasker's responses to global revision rounds. */
   quotationRevisions?: Array<{
     round: number;
     previousAmount: number;
     newAmount: number;
     revisedAt: Date;
-    action: "revised" | "kept";
+    action: "revised" | "kept" | "withdrawn";
   }>;
 }
 
@@ -200,7 +200,7 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
 
     // ── Global Budget Revision (Phase 1) ─────────────────────────────────────
     taskCurrentRevisionRound: { type: Number, default: 0, min: 0 },
-    respondedToRevisionRound: { type: Number, default: null, min: 0 },
+    respondedToRevisionRound: { type: Number, default: 0, min: 0 },
     quotationRevisions: {
       type: [
         {
@@ -210,7 +210,7 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
           revisedAt: { type: Date, default: Date.now },
           action: {
             type: String,
-            enum: ["revised", "kept"],
+            enum: ["revised", "kept", "withdrawn"],
             required: true,
           },
         },

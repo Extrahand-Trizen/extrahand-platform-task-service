@@ -45,6 +45,7 @@ export class TaskRepository {
         _id: taskId,
         requesterId: actorProfileId,
         status: "open",
+        negotiationStatus: { $ne: "closed" },
         currentRevisionRound: { $lt: NegotiationUtils.MAX_REVISION_ROUNDS },
         "budget.amount": { $ne: newAmount },
       },

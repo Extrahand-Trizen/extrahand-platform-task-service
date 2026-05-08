@@ -687,6 +687,17 @@ export class ApplicationService {
         );
       }
 
+      // Global revision guard: block acceptance if an active revision round
+      // exists and the helper hasn't responded yet (their price may change).
+      const taskRevRound = task.currentRevisionRound ?? 0;
+      const appRespondedRound = application.respondedToRevisionRound ?? 0;
+      if (taskRevRound > 0 && appRespondedRound < taskRevRound) {
+        throw new BadRequestError(
+          "This helper hasn't responded to the latest budget revision yet. " +
+          "Please wait for their response before accepting."
+        );
+      }
+
       const isRecurring = Boolean(task.recurring?.enabled) && Array.isArray(task.schedule) && task.schedule.length > 0;
 
       if (!isRecurring && task.status !== "open") {
