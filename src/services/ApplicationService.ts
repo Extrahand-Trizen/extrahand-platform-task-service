@@ -512,7 +512,7 @@ export class ApplicationService {
     const applications = await TaskApplication.find(query)
       .populate(
         "taskId",
-        "title category budget location status requesterId requesterName"
+        "title category budget location status requesterId requesterName currentRevisionRound budgetRevisions"
       )
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -600,7 +600,7 @@ export class ApplicationService {
     const application = await TaskApplication.findById(applicationId)
       .populate(
         "taskId",
-        "title category budget location status requesterId requesterName"
+        "title category budget location status requesterId requesterName currentRevisionRound budgetRevisions"
       )
       .lean();
 
