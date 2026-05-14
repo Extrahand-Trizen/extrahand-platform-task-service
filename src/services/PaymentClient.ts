@@ -330,6 +330,114 @@ export class PaymentClient {
   }
 
   /**
+   * Release ALL active escrows for a task (original + additional payments).
+   * Called on task completion so the Tasker receives both amounts.
+   * POST /api/v1/escrow/task/:taskId/release-all
+   */
+  static async releaseAllEscrowsForTask(
+    taskId: string,
+    releasedByUid: string,
+  ): Promise<{ success: boolean; released: number; total: number; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/escrow/task/${taskId}/release-all`,
+        { releasedBy: releasedByUid },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 30000,
+        }
+      );
+
+      const data = response.data;
+      logger.info('[PaymentClient.releaseAllEscrowsForTask] Response', {
+        taskId,
+        released: data?.released,
+        total: data?.total,
+      });
+
+      return {
+        success: Boolean(data?.success),
+        released: Number(data?.released ?? 0),
+        total: Number(data?.total ?? 0),
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string; message?: string }>;
+        return { success: false, released: 0, total: 0, error: ax.response?.data?.error || ax.message };
+      }
+      return { success: false, released: 0, total: 0, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  }
+
+  /**
+   * Create a separate escrow for an additional payment request.
+   * POST /api/v1/escrow/create (reuses existing escrow creation endpoint)
+   */
+  static async createAdditionalEscrow(params: {
+    taskId: string;
+    requestId: string;
+    posterUid: string;
+    performerUid: string;
+    amount: number;
+    taskTitle?: string;
+  }): Promise<{ success: boolean; orderId?: string; escrowId?: string; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/escrow/create`,
+        {
+          taskId: params.taskId,
+          posterUid: params.posterUid,
+          performerUid: params.performerUid,
+          amount: params.amount,
+          currency: "INR",
+          metadata: {
+            type: "additional_payment",
+            taskId: params.taskId,
+            requestId: params.requestId,
+            taskTitle: params.taskTitle,
+          },
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Service-Auth": this.serviceAuthToken,
+            "X-Service-Name": "task-service",
+          },
+          timeout: 15000,
+        }
+      );
+
+      const data = response.data;
+      if (data?.success && data?.order?.id) {
+        return {
+          success: true,
+          orderId: data.order.id,
+          escrowId: data.escrow?.escrowId,
+        };
+      }
+      return { success: false, error: data?.error || "Failed to create additional escrow" };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string; message?: string }>;
+        return { success: false, error: ax.response?.data?.error || ax.message };
+      }
+      return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
+    }
+  }
+
+  /**
    * Cancel escrow / trigger Razorpay payment refund when a task is cancelled (service-to-service).
    * POST /api/v1/payment/cancel
    */

@@ -344,77 +344,86 @@ export class CompletionService {
       });
     }
 
-    // Trigger direct payout workflow (RazorpayX-only, non-escrow)
+    // Trigger payout: release ALL escrows (original + additional) then direct payout
     try {
       const Profile = mongoose.connection.collection('profiles');
       const assigneeProfile = task.assigneeId
         ? await Profile.findOne({ _id: task.assigneeId })
         : null;
+      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
 
       const performerUid = assigneeProfile?.uid;
+      const posterUid = typeof requesterProfile?.uid === "string" ? requesterProfile.uid : performerUid;
       const taskAmount = task.budget?.amount || 0;
 
-      if (performerUid && taskAmount > 0) {
-          logger.info(`🔔 Triggering task completion payout`, {
-            taskId,
-            performerUid,
-            taskAmount,
-            taskTitle: task.title,
-          });
-        const payoutResult = await PaymentClient.processTaskCompletionPayout({
+      // Calculate total payout = original budget + any accepted additional payment amounts
+      const additionalRequests = Array.isArray((task as any).additionalQuoteRequests)
+        ? ((task as any).additionalQuoteRequests as any[])
+        : [];
+      const additionalTotal = additionalRequests
+        .filter((r: any) => r?.status === "accepted")
+        .reduce((sum: number, r: any) => sum + Number(r?.amount || 0), 0);
+      const totalPayoutAmount = taskAmount + additionalTotal;
+
+      if (performerUid) {
+        logger.info(`🔔 Triggering task completion payout (escrow release + direct payout)`, {
           taskId,
           performerUid,
-          amount: taskAmount,
+          taskAmount,
+          additionalTotal,
+          totalPayoutAmount,
           taskTitle: task.title,
         });
 
-        if (payoutResult.success) {
-          logger.info(`✅ Task completion payout processed for task ${taskId}`, {
+        // Step 1: Release ALL active escrows (marks them as released in Postgres)
+        const releaseResult = await PaymentClient.releaseAllEscrowsForTask(taskId, posterUid);
+        logger.info(`Escrow release result`, { taskId, released: releaseResult.released, total: releaseResult.total });
+
+        // Step 2: Direct payout to performer via RazorpayX (total = original + additional)
+        if (totalPayoutAmount > 0) {
+          const payoutResult = await PaymentClient.processTaskCompletionPayout({
+            taskId,
             performerUid,
-            payoutId: payoutResult.payout?.payoutId,
-            netAmount: payoutResult.payout?.netAmount,
+            amount: totalPayoutAmount,
+            taskTitle: task.title,
           });
 
-          await InAppNotificationClient.send({
-            userId: task.assigneeId!.toString(),
-            title: 'Amount credited',
-            body: `Rs ${payoutResult.payout?.netAmount || taskAmount} credited for \"${task.title}\".`,
-            type: 'success',
-            category: 'payments',
-            data: {
-              taskId,
+          if (payoutResult.success) {
+            logger.info(`✅ Task completion payout processed for task ${taskId}`, {
+              performerUid,
               payoutId: payoutResult.payout?.payoutId,
-              actionUrl: '/profile?section=payments',
-            },
-          });
-        } else if (payoutResult.requiresBankAccount) {
-          logger.warn(`Payout pending bank account for task ${taskId}`, {
-            performerUid,
-            error: payoutResult.error,
-          });
+              netAmount: payoutResult.payout?.netAmount,
+              totalPayoutAmount,
+            });
 
-          await InAppNotificationClient.send({
-            userId: task.assigneeId!.toString(),
-            title: 'Add account to get amount',
-            body: 'Add and verify your bank account to receive your task payout.',
-            type: 'warning',
-            category: 'payments',
-            data: {
-              taskId,
-              actionUrl: '/profile?section=bank-account',
-            },
-          });
-        } else {
-          logger.warn(`Task payout failed for task ${taskId}`, {
-            performerUid,
-            error: payoutResult.error,
-          });
+            await InAppNotificationClient.send({
+              userId: task.assigneeId!.toString(),
+              title: 'Amount credited',
+              body: `₹${payoutResult.payout?.netAmount || totalPayoutAmount} credited for "${task.title}".`,
+              type: 'success',
+              category: 'payments',
+              data: {
+                taskId,
+                payoutId: payoutResult.payout?.payoutId,
+                actionUrl: '/profile?section=payments',
+              },
+            });
+          } else if (payoutResult.requiresBankAccount) {
+            logger.warn(`Payout pending bank account for task ${taskId}`, { performerUid, error: payoutResult.error });
+            await InAppNotificationClient.send({
+              userId: task.assigneeId!.toString(),
+              title: 'Add account to get amount',
+              body: 'Add and verify your bank account to receive your task payout.',
+              type: 'warning',
+              category: 'payments',
+              data: { taskId, actionUrl: '/profile?section=bank-account' },
+            });
+          } else {
+            logger.warn(`Task payout failed for task ${taskId}`, { performerUid, error: payoutResult.error });
+          }
         }
       } else {
-        logger.warn(`Payout skipped for task ${taskId}: performer UID or task amount missing`, {
-          hasPerformerUid: Boolean(performerUid),
-          taskAmount,
-        });
+        logger.warn(`Payout skipped for task ${taskId}: performer UID missing`, { taskId });
       }
     } catch (paymentError) {
       logger.error(`Error processing payout for task ${taskId}:`, paymentError);

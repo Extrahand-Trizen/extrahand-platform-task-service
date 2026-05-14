@@ -39,6 +39,7 @@ export interface ITask extends Document {
   status:
     | "open"
     | "assigned"
+    | "reached"
     | "started"
     | "in_progress"
     | "review"
@@ -114,6 +115,23 @@ export interface ITask extends Document {
     requestedById: mongoose.Types.ObjectId;
   };
 
+  /** Photos captured by the Tasker when confirming arrival at the work location. */
+  locationProof?: {
+    selfieUrl: string;
+    workPhotoUrl: string;
+    capturedAt: Date;
+    capturedByUid: string;
+  };
+
+  /** Photo captured by the Tasker when they reached the location (Reached step). */
+  reachedProof?: {
+    imageUrl: string;
+    capturedAt: Date;
+    capturedByUid: string;
+  };
+
+  reachedAt?: Date;
+
   additionalQuoteRequests?: Array<{
     requestId: string;
     amount: number;
@@ -122,11 +140,17 @@ export interface ITask extends Document {
     // TEMP DISABLED: selfie/work-photo specific fields retained only for backward compatibility.
     selfieImage?: string;
     workImage?: string;
-    status: "pending" | "accepted" | "rejected" | "withdrawn";
+    status: "pending" | "accepted" | "rejected" | "withdrawn" | "paid";
     createdAt: Date;
     decidedAt?: Date;
     decidedById?: mongoose.Types.ObjectId;
     decisionReason?: string;
+    /** Razorpay / payment-service escrow id for additional amount */
+    additionalEscrowId?: string;
+    /** Razorpay order id for additional payment checkout */
+    additionalOrderId?: string;
+    paidAt?: Date;
+    paidByUid?: string;
   }>;
   activeAdditionalQuoteRequestId?: string | null;
 
@@ -216,6 +240,7 @@ const TaskSchema = new Schema<ITask>(
       enum: [
         "open",
         "assigned",
+        "reached",
         "started",
         "in_progress",
         "review",
@@ -344,19 +369,28 @@ const TaskSchema = new Schema<ITask>(
         ref: "Profile",
       },
     },
+    locationProof: {
+      selfieUrl: { type: String },
+      workPhotoUrl: { type: String },
+      capturedAt: { type: Date },
+      capturedByUid: { type: String },
+    },
+    reachedProof: {
+      imageUrl: { type: String },
+      capturedAt: { type: Date },
+      capturedByUid: { type: String },
+    },
+    reachedAt: Date,
     additionalQuoteRequests: [{
       requestId: { type: String, required: true },
       amount: { type: Number, required: true, min: 1 },
       reason: { type: String, required: true, trim: true, maxlength: 1000 },
       proofImages: [{ type: String }],
-      // TEMP DISABLED: selfie/work-photo specific required fields.
-      // selfieImage: { type: String, required: true },
-      // workImage: { type: String, required: true },
       selfieImage: { type: String, required: false },
       workImage: { type: String, required: false },
       status: {
         type: String,
-        enum: ["pending", "accepted", "rejected", "withdrawn"],
+        enum: ["pending", "accepted", "rejected", "withdrawn", "paid"],
         default: "pending",
       },
       createdAt: { type: Date, default: Date.now },
@@ -366,6 +400,10 @@ const TaskSchema = new Schema<ITask>(
         ref: "Profile",
       },
       decisionReason: String,
+      additionalEscrowId: { type: String, required: false },
+      additionalOrderId: { type: String, required: false },
+      paidAt: Date,
+      paidByUid: { type: String, required: false },
     }],
     activeAdditionalQuoteRequestId: { type: String, default: null },
 

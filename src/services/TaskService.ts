@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import crypto from "crypto";
 import Task, { ITask } from "../models/Task";
+import TaskApplication from "../models/TaskApplication";
 import {
   BadRequestError,
   NotFoundError,
@@ -195,13 +196,6 @@ function generateStartOtpCode(): string {
 
 function hashStartOtp(taskId: string, otp: string): string {
   return crypto.createHash("sha256").update(`${taskId}:${otp}`).digest("hex");
-}
-
-function getPendingAdditionalQuoteRequest(task: ITask): any | null {
-  const requests = Array.isArray((task as any)?.additionalQuoteRequests)
-    ? ((task as any).additionalQuoteRequests as any[])
-    : [];
-  return requests.find((request) => request?.status === "pending") || null;
 }
 
 export class TaskService {
@@ -714,6 +708,29 @@ export class TaskService {
     getRedisClient()?.del(cacheKey).catch((err: any) => {
       logger.warn("Task detail cache invalidate error", { taskId, error: err instanceof Error ? err.message : String(err) });
     });
+  }
+
+  /**
+   * After mutating a task, prime Redis with the latest document so GET /tasks/:id cannot
+   * briefly (or stuck) serve a pre-payment snapshot — fixes "shows paid then reload = pending".
+   */
+  static async writeTaskDetailCache(taskId: string, taskDoc: unknown): Promise<void> {
+    const cacheKey = `task:detail:${taskId}`;
+    try {
+      const redis = getRedisClient();
+      if (!redis) return;
+      await redis.setex(
+        cacheKey,
+        REDIS_TTLS.TASK_DETAIL_SECONDS,
+        JSON.stringify(taskDoc),
+      );
+      logger.debug("Task detail cache write-through", { taskId });
+    } catch (err) {
+      logger.warn("Task detail cache write-through error", {
+        taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -1778,6 +1795,7 @@ export class TaskService {
     const validStatuses: TaskStatus[] = [
       "open",
       "assigned",
+      "reached",
       "started",
       "in_progress",
       "review",
@@ -1804,45 +1822,49 @@ export class TaskService {
 
     // Performer-only transitions
     if (isPerformer && !isCreator) {
-      const allowed = ["started", "in_progress", "review", "cancelled"];
+      const allowed = ["reached", "started", "in_progress", "review", "cancelled"];
       if (!allowed.includes(status)) {
         throw new ForbiddenError(
-          "Performer can only update status to started, in_progress, review, or cancelled"
+          "Performer can only update status to reached, started, in_progress, review, or cancelled"
         );
       }
     }
 
     // Creator-only restrictions
     if (isCreator && !isPerformer) {
-      const restricted = ["started", "in_progress"];
+      const restricted = ["reached", "started", "in_progress"];
       if (restricted.includes(status)) {
         throw new ForbiddenError(
-          "Only assigned performer can mark task as started or in_progress"
+          "Only assigned performer can mark task as reached, started or in_progress"
         );
       }
     }
 
-    // OTP gate: performer cannot move assigned -> started/in_progress without successful OTP verification.
+    // OTP gate: performer cannot move assigned → reached without OTP verification.
     if (
-      (status === "started" || status === "in_progress") &&
-      task.status === "assigned" &&
+      status === "reached" &&
+      String(task.status) === "assigned" &&
       isPerformer &&
       !options?.skipStartOtpValidation
     ) {
-      const pendingAdditionalQuote = getPendingAdditionalQuoteRequest(task);
-      if (pendingAdditionalQuote) {
-        throw new BadRequestError(
-          "Cannot start task while an additional payment request is pending decision"
-        );
-      }
-
       const startOtp = task.startOtp;
       if (!startOtp?.verifiedAt) {
-        throw new BadRequestError("Start OTP verification required before starting task");
+        throw new BadRequestError("Start OTP verification required before marking as reached");
       }
-
       if (startOtp.expiresAt && new Date(startOtp.expiresAt).getTime() < Date.now()) {
         throw new BadRequestError("Start OTP expired. Please resend and verify OTP again");
+      }
+    }
+
+    // Gate: performer cannot move reached → started without reachedProof image.
+    if (
+      status === "started" &&
+      String(task.status) === "reached" &&
+      isPerformer &&
+      !options?.skipStartOtpValidation
+    ) {
+      if (!(task as any).reachedProof?.imageUrl) {
+        throw new BadRequestError("Location proof image required before starting task");
       }
     }
 
@@ -1922,6 +1944,10 @@ export class TaskService {
       status,
       updatedAt: new Date(),
     };
+
+    if (status === "reached") {
+      updateData.reachedAt = new Date();
+    }
 
     if (status === "started") {
       updateData.startedAt = new Date();
@@ -2085,6 +2111,40 @@ export class TaskService {
       }
     }
 
+    // In-app notification: tasker reached location → notify Poster
+    if (status === "reached" && String(task.status) === "assigned") {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+        const assigneeProfile = task.assigneeId
+          ? await Profile.findOne({ _id: task.assigneeId })
+          : null;
+        const taskerName = assigneeProfile?.name || assigneeProfile?.fullName || "The helper";
+        const requesterUid = requesterProfile?.uid;
+
+        if (requesterUid) {
+          await InAppNotificationClient.send({
+            userId: requesterUid,
+            title: "Helper Has Arrived",
+            body: `${taskerName} has reached the work location for "${task.title}".`,
+            type: "info",
+            category: "transactional",
+            data: {
+              taskId,
+              taskTitle: task.title,
+              eventKey: "TASK_REACHED",
+            },
+          });
+          logger.info("Reached notification sent to poster", { taskId, requesterUid });
+        }
+      } catch (error) {
+        logger.error("Error sending reached notification", {
+          taskId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    }
+
     // Email: task started / in_progress → notify requester
     if ((status === "started" || status === "in_progress") && task.status === "assigned") {
       try {
@@ -2184,60 +2244,67 @@ export class TaskService {
         });
       }
 
-      // Trigger direct payout workflow (same behavior as CompletionService.approveCompletion)
+      // Trigger payout workflow: release ALL escrows (original + any additional payments)
       try {
         const Profile = mongoose.connection.collection("profiles");
         const assigneeProfile = task.assigneeId
           ? await Profile.findOne({ _id: task.assigneeId })
           : null;
+        const requesterProfile = await Profile.findOne({ _id: task.requesterId });
 
         const performerUid = assigneeProfile?.uid;
+        const posterUid = typeof requesterProfile?.uid === "string" ? requesterProfile.uid : performerUid;
         const taskAmount = task.budget?.amount || 0;
 
-        if (performerUid && taskAmount > 0) {
-          logger.info(`🔔 Triggering task completion payout from updateTaskStatus`, {
+        if (performerUid) {
+          logger.info(`🔔 Releasing all escrows for task completion`, {
             taskId,
             performerUid,
+            posterUid,
             taskAmount,
             statusTransition: `${task.status} -> ${status}`,
           });
 
-          const payoutResult = await PaymentClient.processTaskCompletionPayout({
-            taskId,
-            performerUid,
-            amount: taskAmount,
-            taskTitle: task.title,
-          });
+          // Release ALL active escrows (original + additional payment escrows)
+          // Pass posterUid as releasedBy — escrow service validates the poster is releasing
+          const releaseResult = await PaymentClient.releaseAllEscrowsForTask(taskId, posterUid);
 
-          if (payoutResult.success) {
-            logger.info(`✅ Task completion payout processed from updateTaskStatus`, {
+          if (releaseResult.success && releaseResult.released > 0) {
+            logger.info(`✅ All escrows released for task completion`, {
               taskId,
               performerUid,
-              payoutId: payoutResult.payout?.payoutId,
-              netAmount: payoutResult.payout?.netAmount,
+              released: releaseResult.released,
+              total: releaseResult.total,
             });
-          } else if (payoutResult.requiresBankAccount) {
-            logger.warn(`Payout pending bank account from updateTaskStatus`, {
-              taskId,
-              performerUid,
-              error: payoutResult.error,
-            });
+          } else if (releaseResult.total === 0) {
+            // No escrows found — fall back to direct payout (non-escrow flow)
+            logger.info(`No escrows found, falling back to direct payout`, { taskId, performerUid });
+            if (taskAmount > 0) {
+              const payoutResult = await PaymentClient.processTaskCompletionPayout({
+                taskId,
+                performerUid,
+                amount: taskAmount,
+                taskTitle: task.title,
+              });
+              if (payoutResult.success) {
+                logger.info(`✅ Direct payout processed`, { taskId, performerUid });
+              } else {
+                logger.warn(`Direct payout failed`, { taskId, performerUid, error: payoutResult.error });
+              }
+            }
           } else {
-            logger.warn(`Task payout failed from updateTaskStatus`, {
+            logger.warn(`Some escrows failed to release`, {
               taskId,
-              performerUid,
-              error: payoutResult.error,
+              released: releaseResult.released,
+              total: releaseResult.total,
+              error: releaseResult.error,
             });
           }
         } else {
-          logger.warn(`Payout skipped from updateTaskStatus: performer UID or task amount missing`, {
-            taskId,
-            hasPerformerUid: Boolean(performerUid),
-            taskAmount,
-          });
+          logger.warn(`Payout skipped: performer UID missing`, { taskId });
         }
       } catch (paymentError) {
-        logger.error(`Error processing payout from updateTaskStatus for task ${taskId}:`, paymentError);
+        logger.error(`Error processing payout for task ${taskId}:`, paymentError);
       }
     }
 
@@ -2265,11 +2332,9 @@ export class TaskService {
       throw new ForbiddenError("Only assigned performer can request start OTP");
     }
 
-    if (task.status !== "assigned") {
-      throw new BadRequestError("OTP can only be requested when task is in assigned status");
+    if (task.status !== "assigned" && String(task.status) !== "reached") {
+      throw new BadRequestError("OTP can only be requested when task is in assigned or reached status");
     }
-
-    // Reverted: no additional-quote pending gate in legacy flow.
 
     const Profile = mongoose.connection.collection("profiles");
     const requesterProfile = await Profile.findOne({ _id: task.requesterId });
@@ -2348,7 +2413,7 @@ export class TaskService {
         title: "Task Start OTP",
         body: otpBody,
         type: "info",
-        category: "taskUpdates",
+        category: "transactional",   // transactional = always delivered, bypasses preference blocks
         data: {
           taskId,
           otp,
@@ -2374,7 +2439,12 @@ export class TaskService {
   static async verifyStartOtp(
     taskId: string,
     profileId: mongoose.Types.ObjectId,
-    otp: string
+    otp: string,
+    locationProofData?: {
+      selfieUrl?: string;
+      workPhotoUrl?: string;
+      performerUid?: string;
+    }
   ): Promise<ITask> {
     const task = await Task.findById(taskId);
     if (!task) {
@@ -2386,11 +2456,9 @@ export class TaskService {
       throw new ForbiddenError("Only assigned performer can verify start OTP");
     }
 
-    if (task.status !== "assigned") {
-      throw new BadRequestError("Task is not in assigned state");
+    if (String(task.status) !== "reached") {
+      throw new BadRequestError("Task must be in 'reached' state to verify OTP and start");
     }
-
-    // Reverted: no additional-quote pending gate in legacy flow.
 
     const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 6);
     if (sanitizedOtp.length !== 6) {
@@ -2410,7 +2478,17 @@ export class TaskService {
         taskId,
         posterUid: posterUid ?? null,
       });
-      return TaskService.updateTaskStatus(taskId, profileId, "started", {
+      if (locationProofData?.selfieUrl || locationProofData?.workPhotoUrl) {
+        await Task.findByIdAndUpdate(taskId, {
+          locationProof: {
+            selfieUrl: locationProofData.selfieUrl || '',
+            workPhotoUrl: locationProofData.workPhotoUrl || '',
+            capturedAt: new Date(),
+            capturedByUid: locationProofData.performerUid || profileId.toString(),
+          },
+        });
+      }
+      return TaskService.updateTaskStatus(taskId, profileId, "started" as TaskStatus, {
         skipStartOtpValidation: true,
       });
     }
@@ -2442,9 +2520,107 @@ export class TaskService {
     task.startOtp.verifiedAt = new Date();
     await task.save();
 
-    return TaskService.updateTaskStatus(taskId, profileId, "started", {
+    // Save location proof photos if provided (selfie from the Reached step)
+    if (locationProofData?.selfieUrl || locationProofData?.workPhotoUrl) {
+      await Task.findByIdAndUpdate(taskId, {
+        locationProof: {
+          selfieUrl: locationProofData.selfieUrl || '',
+          workPhotoUrl: locationProofData.workPhotoUrl || '',
+          capturedAt: new Date(),
+          capturedByUid: locationProofData.performerUid || profileId.toString(),
+        },
+      });
+      logger.info('Location proof saved for task', { taskId, performerUid: locationProofData.performerUid });
+    }
+
+    // OTP verification moves task from reached → started
+    return TaskService.updateTaskStatus(taskId, profileId, "started" as TaskStatus, {
       skipStartOtpValidation: true,
     });
+  }
+
+  /**
+   * Mark task as reached from assigned state.
+   * No OTP required — just a selfie confirming arrival.
+   */
+  static async markReached(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    selfieUrl: string,
+    performerUid: string,
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) throw new ForbiddenError("Only assigned performer can mark as reached");
+
+    if (task.status !== "assigned") {
+      throw new BadRequestError("Task must be in 'assigned' status to mark as reached");
+    }
+
+    if (!selfieUrl || selfieUrl.trim().length < 5) {
+      throw new BadRequestError("Selfie image is required to confirm arrival");
+    }
+
+    // Save selfie as location proof
+    await Task.findByIdAndUpdate(taskId, {
+      locationProof: {
+        selfieUrl: selfieUrl.trim(),
+        workPhotoUrl: '',
+        capturedAt: new Date(),
+        capturedByUid: performerUid || profileId.toString(),
+      },
+    });
+
+    logger.info('Selfie saved, transitioning task to reached', { taskId, performerUid });
+
+    return TaskService.updateTaskStatus(taskId, profileId, "reached" as TaskStatus, {
+      skipStartOtpValidation: true,
+    });
+  }
+
+  /**
+   * Mark task as started from reached state.
+   * Requires a work-site photo uploaded by the performer.
+   */
+  static async markStarted(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    workPhotoUrl: string,
+    performerUid: string,
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) throw new ForbiddenError("Only assigned performer can upload work photo");
+
+    if (String(task.status) !== "reached") {
+      throw new BadRequestError("Work photo can only be uploaded when task is in 'reached' status");
+    }
+
+    if (!workPhotoUrl || workPhotoUrl.trim().length < 5) {
+      throw new BadRequestError("Work site photo is required");
+    }
+
+    // Persist the work photo alongside the existing selfie in locationProof
+    const existingProof = (task as any).locationProof || {};
+    await Task.findByIdAndUpdate(taskId, {
+      locationProof: {
+        ...existingProof,
+        workPhotoUrl: workPhotoUrl.trim(),
+        capturedByUid: performerUid || profileId.toString(),
+      },
+    });
+
+    logger.info('Work photo saved', { taskId, performerUid, currentStatus: task.status });
+
+    // Only save the photo — do NOT transition status.
+    // The reached → started transition happens exclusively via verifyStartOtp (OTP verification).
+    const refreshed = await Task.findById(taskId).lean();
+    TaskService.invalidateTaskCache(taskId);
+    return refreshed as unknown as ITask;
   }
 
   /**
@@ -2632,8 +2808,8 @@ export class TaskService {
     if (!isPerformer) {
       throw new ForbiddenError("Only assigned performer can request additional payment");
     }
-    if (!["assigned", "started", "in_progress"].includes(String(task.status || ""))) {
-      throw new BadRequestError("Additional payment request is only allowed before review stage");
+    if (!["assigned", "reached"].includes(String(task.status || ""))) {
+      throw new BadRequestError("Additional payment request is only allowed before the task is started");
     }
 
     const amount = Number(payload?.amount || 0);
@@ -2641,9 +2817,8 @@ export class TaskService {
     const normalizedProofImages = Array.isArray(payload?.proofImages)
       ? payload.proofImages.map((img) => String(img || "").trim()).filter(Boolean)
       : [];
-    // TEMP DISABLED: selfie/work-photo specific parsing.
-    // const selfieImage = String(payload?.selfieImage || "").trim();
-    // const workImage = String(payload?.workImage || "").trim();
+    const selfieImage = String(payload?.selfieImage || "").trim();
+    const workImage = String(payload?.workImage || "").trim();
 
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new BadRequestError("Valid additional amount is required");
@@ -2654,12 +2829,24 @@ export class TaskService {
     if (normalizedProofImages.length < 1) {
       throw new BadRequestError("At least one proof image is required");
     }
-
-    const pending = getPendingAdditionalQuoteRequest(task);
-    if (pending) {
-      throw new BadRequestError("A pending additional payment request already exists");
+    // selfieImage is optional for the additional payment request (only required for start-task flow)
+    // workImage is required as proof of the additional work needed
+    if (!workImage) {
+      throw new BadRequestError("Work photo is required to justify the additional payment request");
     }
-
+    // One-time limit: tasker can only ever submit one additional payment request per task.
+    // Once any request has been made (regardless of outcome), no further requests are allowed.
+    const existingRequests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+    if (existingRequests.length > 0) {
+      const pending = existingRequests.find((r) => r?.status === "pending");
+      if (pending) {
+        throw new BadRequestError("A pending additional payment request already exists");
+      }
+      // Any prior request (paid, accepted, rejected, withdrawn) blocks a new one
+      throw new BadRequestError("You can only request additional payment once per task");
+    }
     const requestId = `aqr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const requests = Array.isArray((task as any).additionalQuoteRequests)
       ? ([...(task as any).additionalQuoteRequests] as any[])
@@ -2670,9 +2857,8 @@ export class TaskService {
       amount,
       reason,
       proofImages: normalizedProofImages,
-      // TEMP DISABLED: selfie/work-photo specific persistence.
-      // selfieImage,
-      // workImage,
+      selfieImage,
+      workImage,
       status: "pending",
       createdAt: new Date(),
     });
@@ -2689,6 +2875,28 @@ export class TaskService {
 
     if (!updated) throw new NotFoundError("Task not found");
     TaskService.invalidateTaskCache(taskId);
+
+    // Notify Poster that the Tasker has requested additional payment
+    try {
+      const Profile = mongoose.connection.collection("profiles");
+      const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+      const performerProfile = await Profile.findOne({ _id: performerProfileId });
+      const taskerName = (performerProfile?.name || performerProfile?.fullName || "The helper") as string;
+      const requesterUid = typeof requesterProfile?.uid === "string" ? requesterProfile.uid : undefined;
+      if (requesterUid) {
+        await InAppNotificationClient.send({
+          userId: requesterUid,
+          title: "Additional Payment Requested",
+          body: `${taskerName} has requested ₹${Number(amount).toLocaleString("en-IN")} extra for "${task.title}". Review and accept or decline.`,
+          type: "info",
+          category: "transactional",
+          data: { taskId, requestId, amount, eventKey: "ADDITIONAL_QUOTE_REQUESTED" },
+        });
+      }
+    } catch (notifError) {
+      logger.warn("[TaskService.createAdditionalQuoteRequest] Failed to notify poster", { taskId });
+    }
+
     return updated as unknown as ITask;
   }
 
@@ -2714,17 +2922,50 @@ export class TaskService {
     taskId: string,
     profileId: mongoose.Types.ObjectId
   ): Promise<any | null> {
-    const requests = await TaskService.getAdditionalQuoteRequests(taskId, profileId);
-    return requests.find((r) => r?.status === "pending") || null;
+    const task = await Task.findById(taskId).lean();
+    if (!task) throw new NotFoundError("Task not found");
+
+    const isPerformer = task.assigneeId?.toString() === profileId.toString();
+    const isRequester = task.requesterId?.toString() === profileId.toString();
+    if (!isPerformer && !isRequester) {
+      throw new ForbiddenError("Not authorized to view additional payment requests");
+    }
+
+    // Use activeAdditionalQuoteRequestId as the source of truth.
+    // If it's null/empty, there is no active request (even if old rejected/withdrawn ones exist).
+    const activeId = String((task as any).activeAdditionalQuoteRequestId || '').trim();
+
+    // Also check for the most recent accepted/paid request (activeAdditionalQuoteRequestId
+    // is cleared after reject/withdraw but kept for accepted/paid so Tasker sees the state)
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+
+    if (activeId) {
+      const active = requests.find((r) => String(r?.requestId || '') === activeId);
+      // Return pending, accepted, or paid — all are "active" states the UI needs to show
+      if (active && ['pending', 'accepted', 'paid'].includes(active.status)) {
+        return active;
+      }
+    }
+
+    // Fallback: find the most recent accepted or paid request (for Tasker to see paid state)
+    const recentPaid = [...requests]
+      .reverse()
+      .find((r) => r?.status === 'paid' || r?.status === 'accepted');
+    return recentPaid || null;
   }
 
   static async decideAdditionalQuoteRequest(
     taskId: string,
     requestId: string,
     requesterProfileId: mongoose.Types.ObjectId,
-    decision: "accepted" | "rejected",
+    decision: "accepted" | "rejected" | "accept" | "reject",
     decisionReason?: string
   ): Promise<ITask> {
+    // Normalize decision value — gateway may send 'accept'/'reject' or 'accepted'/'rejected'
+    const normalizedDecision: "accepted" | "rejected" =
+      decision === "accept" || decision === "accepted" ? "accepted" : "rejected";
     const task = await Task.findById(taskId);
     if (!task) throw new NotFoundError("Task not found");
     if (!task.requesterId.equals(requesterProfileId)) {
@@ -2742,25 +2983,444 @@ export class TaskService {
 
     requests[index] = {
       ...requests[index],
-      status: decision,
+      status: normalizedDecision,
       decidedAt: new Date(),
       decidedById: requesterProfileId,
-      decisionReason: decision === "rejected" ? String(decisionReason || "").trim() : undefined,
+      decisionReason: normalizedDecision === "rejected" ? String(decisionReason || "").trim() : undefined,
     };
 
-    const updated = await Task.findByIdAndUpdate(
-      taskId,
-      {
-        additionalQuoteRequests: requests,
-        activeAdditionalQuoteRequestId: null,
-        updatedAt: new Date(),
-      },
-      { new: true, runValidators: true }
-    ).lean();
+    // Base update — mark request as decided
+    const baseUpdate: any = {
+      additionalQuoteRequests: requests,
+      activeAdditionalQuoteRequestId: null,
+      updatedAt: new Date(),
+    };
 
+    // ── REJECT: unassign tasker, reopen task, refund original payment ──────
+    if (normalizedDecision === "rejected") {
+      const performerProfileId = task.assigneeId;
+
+      // Reopen task and unassign performer
+      baseUpdate.status = "open";
+      baseUpdate.assigneeId = null;
+      baseUpdate.assignedAt = null;
+
+      const updated = await Task.findByIdAndUpdate(taskId, baseUpdate, {
+        new: true,
+        runValidators: true,
+      }).lean();
+      if (!updated) throw new NotFoundError("Task not found");
+      TaskService.invalidateTaskCache(taskId);
+
+      // Reset the accepted application back to 'pending' so the Tasker
+      // no longer sees ACCEPTED / View Work / Chat / Withdraw buttons.
+      try {
+        await TaskApplication.updateMany(
+          {
+            taskId: new mongoose.Types.ObjectId(taskId),
+            applicantId: performerProfileId,
+            status: "accepted",
+          },
+          {
+            $set: {
+              status: "pending",
+              updatedAt: new Date(),
+            },
+          }
+        );
+        logger.info("[TaskService.decideAdditionalQuoteRequest] Application status reset to pending after rejection", {
+          taskId,
+          performerProfileId: performerProfileId?.toString(),
+        });
+      } catch (appUpdateError) {
+        logger.warn("[TaskService.decideAdditionalQuoteRequest] Failed to reset application status", {
+          taskId,
+          error: appUpdateError instanceof Error ? appUpdateError.message : "Unknown",
+        });
+      }
+
+      // Refund original escrow to poster
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const requesterProfile = await Profile.findOne({ _id: requesterProfileId });
+        const requesterUid = typeof requesterProfile?.uid === "string" ? requesterProfile.uid : undefined;
+        const taskStart = TaskService.getTaskStartDateForCancellationPolicy(task as unknown as ITask);
+        const taskBudgetAmount =
+          task.budget && typeof task.budget === "object" && "amount" in task.budget
+            ? Number((task.budget as { amount: number }).amount)
+            : undefined;
+
+        const refundResult = await PaymentClient.cancelPaymentForTask({
+          taskId,
+          reason: `Additional payment request declined by poster. Tasker unassigned.`,
+          userId: requesterUid,
+          cancelledBy: "poster",
+          taskStartDate: taskStart.toISOString(),
+          assignedAt: task.assignedAt ? new Date(task.assignedAt).toISOString() : undefined,
+          feeBaseAmount: taskBudgetAmount,
+          taskTitle: typeof task.title === "string" ? task.title : undefined,
+        });
+
+        logger.info("[TaskService.decideAdditionalQuoteRequest] Refund result after rejection", {
+          taskId,
+          success: refundResult.success,
+          refundRequired: refundResult.refundRequired,
+        });
+      } catch (refundError) {
+        logger.error("[TaskService.decideAdditionalQuoteRequest] Refund failed after rejection", {
+          taskId,
+          error: refundError instanceof Error ? refundError.message : "Unknown error",
+        });
+        // Don't throw — task is already reopened; refund failure is non-blocking
+      }
+
+      // Notify tasker of rejection and unassignment
+      if (performerProfileId) {
+        try {
+          const Profile = mongoose.connection.collection("profiles");
+          const performerProfile = await Profile.findOne({ _id: performerProfileId });
+          if (performerProfile?.uid) {
+            await InAppNotificationClient.send({
+              userId: performerProfile.uid,
+              title: "Additional Payment Request Declined",
+              body: `Your additional payment request for "${task.title}" was declined. You have been unassigned from this work.`,
+              type: "warning",
+              category: "taskUpdates",
+              data: { taskId, eventKey: "ADDITIONAL_QUOTE_REJECTED" },
+            });
+          }
+        } catch (notifError) {
+          logger.warn("[TaskService.decideAdditionalQuoteRequest] Failed to notify performer of rejection", { taskId });
+        }
+      }
+
+      return updated as unknown as ITask;
+    }
+
+    // ── ACCEPT: mark as accepted, notify tasker to continue ────────────────
+    const updated = await Task.findByIdAndUpdate(taskId, baseUpdate, {
+      new: true,
+      runValidators: true,
+    }).lean();
     if (!updated) throw new NotFoundError("Task not found");
     TaskService.invalidateTaskCache(taskId);
+
+    // Notify tasker that request was accepted
+    if (task.assigneeId) {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const performerProfile = await Profile.findOne({ _id: task.assigneeId });
+        if (performerProfile?.uid) {
+          await InAppNotificationClient.send({
+            userId: performerProfile.uid,
+            title: "Additional Payment Accepted",
+            body: `The poster accepted your additional payment request for "${task.title}". They will complete the payment shortly.`,
+            type: "success",
+            category: "transactional",
+            data: { taskId, eventKey: "ADDITIONAL_QUOTE_ACCEPTED" },
+          });
+        }
+      } catch (notifError) {
+        logger.warn("[TaskService.decideAdditionalQuoteRequest] Failed to notify performer of acceptance", { taskId });
+      }
+    }
+
     return updated as unknown as ITask;
+  }
+
+  /**
+   * True if the caller is the task poster (profile id from gateway OR Firebase uid on profiles collection).
+   * Fixes missing/wrong X-Profile-Id from the gateway while the same user still owns the task.
+   */
+  private static async posterOwnsTask(
+    task: { requesterId?: mongoose.Types.ObjectId | null },
+    requesterProfileId: mongoose.Types.ObjectId | undefined,
+    requesterUid: string,
+  ): Promise<boolean> {
+    const reqId = task.requesterId;
+    if (!reqId) return false;
+
+    let resolvedProfileId = requesterProfileId;
+    const uid = String(requesterUid || "").trim();
+    if (!resolvedProfileId && uid) {
+      try {
+        const posterProfile = await mongoose.connection.collection("profiles").findOne({ uid });
+        if (posterProfile?._id) {
+          resolvedProfileId = new mongoose.Types.ObjectId(String(posterProfile._id));
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (resolvedProfileId && reqId.equals(resolvedProfileId)) {
+      return true;
+    }
+
+    if (uid) {
+      try {
+        const posterProfile = await mongoose.connection.collection("profiles").findOne({ uid });
+        if (posterProfile?._id && reqId.equals(posterProfile._id as mongoose.Types.ObjectId)) {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Atomically set one additional-quote row to paid (avoids replacing the whole array — that often failed
+   * validation or dropped subdocument fields so Mongo never persisted).
+   */
+  private static async applyAdditionalQuotePaidDb(
+    taskId: string,
+    requestId: string,
+    paidByUid: string,
+  ): Promise<ITask | null> {
+    const rid = String(requestId || "").trim();
+    if (!rid || !mongoose.Types.ObjectId.isValid(String(taskId))) {
+      return null;
+    }
+    const oid = new mongoose.Types.ObjectId(String(taskId));
+    const now = new Date();
+    // runValidators:false — positional `$` updates often fail subdocument validation in Mongoose
+    // even for valid enum values; we only set known-safe fields.
+    const updated = await Task.findOneAndUpdate(
+      {
+        _id: oid,
+        additionalQuoteRequests: { $elemMatch: { requestId: rid } },
+      },
+      {
+        $set: {
+          "additionalQuoteRequests.$.status": "paid",
+          "additionalQuoteRequests.$.paidAt": now,
+          "additionalQuoteRequests.$.paidByUid": String(paidByUid || "").trim(),
+          activeAdditionalQuoteRequestId: rid,
+          updatedAt: now,
+        },
+      },
+      { new: true, runValidators: false },
+    ).lean();
+    return updated as unknown as ITask | null;
+  }
+
+  /**
+   * Mark an additional quote request as paid after Razorpay payment is verified.
+   * Called by the mobile app after successful payment.
+   */
+  static async markAdditionalPaymentPaid(
+    taskId: string,
+    requestId: string,
+    requesterProfileId: mongoose.Types.ObjectId | undefined,
+    requesterUid: string,
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId).lean();
+    if (!task) throw new NotFoundError("Task not found");
+
+    const owns = await TaskService.posterOwnsTask(task, requesterProfileId, requesterUid);
+    if (!owns) {
+      throw new ForbiddenError("Only task requester can mark additional payment as paid");
+    }
+
+    const rid = String(requestId || "").trim();
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+    const row = requests.find((r) => String(r?.requestId || "").trim() === rid);
+    if (!row) throw new NotFoundError("Additional payment request not found");
+
+    const quoteStatus = String(row?.status ?? "").trim().toLowerCase();
+    if (quoteStatus === "paid") {
+      const current = await Task.findById(taskId).lean();
+      if (current) await TaskService.writeTaskDetailCache(String(taskId), current);
+      return current as unknown as ITask;
+    }
+    if (!["accepted", "pending"].includes(quoteStatus)) {
+      throw new BadRequestError("Request must be accepted before marking as paid");
+    }
+
+    const updated = await TaskService.applyAdditionalQuotePaidDb(taskId, rid, requesterUid);
+    if (!updated) {
+      logger.error("[TaskService.markAdditionalPaymentPaid] Atomic update returned no document", {
+        taskId,
+        requestId: rid,
+      });
+      throw new BadRequestError("Could not save payment status. Please try again or contact support.");
+    }
+
+    await TaskService.writeTaskDetailCache(String(taskId), updated);
+
+    // Notify Tasker that payment was completed
+    if (task.assigneeId) {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const performerProfile = await Profile.findOne({ _id: task.assigneeId });
+        if (performerProfile?.uid) {
+          await InAppNotificationClient.send({
+            userId: performerProfile.uid,
+            title: "Additional Payment Received",
+            body: `The customer has paid the additional amount for "${task.title}". You can now continue the work.`,
+            type: "success",
+            category: "transactional",
+            data: { taskId, requestId, eventKey: "ADDITIONAL_QUOTE_PAID" },
+          });
+        }
+      } catch (notifError) {
+        logger.warn("[TaskService.markAdditionalPaymentPaid] Failed to notify performer", { taskId });
+      }
+    }
+
+    return updated as unknown as ITask;
+  }
+
+  /**
+   * Mark additional payment as paid — called by payment service (service-to-service).
+   * Bypasses poster profile check since the call comes from a trusted internal service.
+   */
+  static async markAdditionalPaymentPaidByService(
+    taskId: string,
+    requestId: string,
+    posterUid: string,
+  ): Promise<ITask> {
+    logger.info("[TaskService.markAdditionalPaymentPaidByService] Called", { taskId, requestId, posterUid });
+    const task = await Task.findById(taskId).lean();
+    if (!task) throw new NotFoundError("Task not found");
+
+    const rid = String(requestId || "").trim();
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+
+    logger.info("[TaskService.markAdditionalPaymentPaidByService] Found requests", {
+      count: requests.length,
+      requestId: rid,
+      statuses: requests.map((r) => `${r.requestId}:${r.status}`),
+    });
+
+    const row = requests.find((r) => String(r?.requestId || "").trim() === rid);
+    if (!row) throw new NotFoundError("Additional payment request not found");
+
+    if (String(row?.status ?? "").trim().toLowerCase() === "paid") {
+      logger.info("[TaskService.markAdditionalPaymentPaidByService] Already paid (idempotent)", { taskId, requestId: rid });
+      await TaskService.writeTaskDetailCache(String(taskId), task);
+      return task as unknown as ITask;
+    }
+
+    const updated = await TaskService.applyAdditionalQuotePaidDb(taskId, rid, posterUid);
+    if (!updated) {
+      logger.error("[TaskService.markAdditionalPaymentPaidByService] Atomic update returned no document", {
+        taskId,
+        requestId: rid,
+      });
+      throw new NotFoundError("Task not found after update");
+    }
+
+    await TaskService.writeTaskDetailCache(String(taskId), updated);
+
+    logger.info("[TaskService.markAdditionalPaymentPaidByService] Successfully marked as paid", { taskId, requestId: rid });
+
+    // Notify Tasker that payment was completed
+    if (task.assigneeId) {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const performerProfile = await Profile.findOne({ _id: task.assigneeId });
+        if (performerProfile?.uid) {
+          await InAppNotificationClient.send({
+            userId: performerProfile.uid,
+            title: "Additional Payment Received",
+            body: `The customer has paid the additional amount for "${task.title}". You can now continue the work.`,
+            type: "success",
+            category: "transactional",
+            data: { taskId, requestId, eventKey: "ADDITIONAL_QUOTE_PAID" },
+          });
+        }
+      } catch (notifError) {
+        logger.warn("[TaskService.markAdditionalPaymentPaidByService] Failed to notify performer", { taskId });
+      }
+    }
+
+    return updated as unknown as ITask;
+  }
+
+  /**
+   * Create a Razorpay payment order for an accepted additional quote request.
+   * Called by the Poster after accepting the request, before paying.
+   */
+  static async createAdditionalPaymentOrder(
+    taskId: string,
+    requestId: string,
+    requesterProfileId: mongoose.Types.ObjectId,
+    requesterUid: string,
+  ): Promise<{ orderId: string; amount: number; currency: string; requestId: string }> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+    if (!task.requesterId.equals(requesterProfileId)) {
+      throw new ForbiddenError("Only task requester can pay for additional request");
+    }
+
+    const requests = Array.isArray((task as any).additionalQuoteRequests)
+      ? ((task as any).additionalQuoteRequests as any[])
+      : [];
+    const request = requests.find((r) => String(r?.requestId) === String(requestId));
+    if (!request) throw new NotFoundError("Additional payment request not found");
+    // Accept both 'pending' (just accepted) and 'accepted' (already accepted, retry payment)
+    if (request.status !== "accepted" && request.status !== "pending") {
+      throw new BadRequestError("Only pending or accepted requests can be paid for");
+    }
+    if (request.additionalEscrowId) {
+      // Already has an order — return the existing one instead of creating a duplicate
+      return {
+        orderId: request.additionalOrderId || request.additionalEscrowId,
+        amount: Number(request.amount),
+        currency: "INR",
+        requestId,
+      };
+    }
+
+    const performerProfile = task.assigneeId
+      ? await mongoose.connection.collection("profiles").findOne({ _id: task.assigneeId })
+      : null;
+    const performerUid = typeof performerProfile?.uid === "string" ? performerProfile.uid : "";
+
+    // Ensure request is marked accepted (handles cache staleness from prior acceptAdditionalQuoteRequest call)
+    if (request.status === "pending") {
+      const acceptedRequests = requests.map((r: any) =>
+        String(r?.requestId) === String(requestId) ? { ...r, status: "accepted", decidedAt: new Date(), decidedById: requesterProfileId } : r
+      );
+      await Task.findByIdAndUpdate(taskId, { additionalQuoteRequests: acceptedRequests, updatedAt: new Date() });
+      TaskService.invalidateTaskCache(taskId);
+    }
+
+    // Create escrow via payment service
+    const escrowResult = await PaymentClient.createAdditionalEscrow({      taskId,
+      requestId,
+      posterUid: requesterUid,
+      performerUid,
+      amount: Number(request.amount),
+      taskTitle: typeof task.title === "string" ? task.title : undefined,
+    });
+
+    if (!escrowResult.success || !escrowResult.orderId) {
+      throw new Error(escrowResult.error || "Failed to create additional payment order");
+    }
+
+    // Store the escrow/order reference on the request
+    const updatedRequests = requests.map((r) =>
+      String(r?.requestId) === String(requestId)
+        ? { ...r, additionalEscrowId: escrowResult.escrowId, additionalOrderId: escrowResult.orderId }
+        : r
+    );
+    await Task.findByIdAndUpdate(taskId, { additionalQuoteRequests: updatedRequests, updatedAt: new Date() });
+    TaskService.invalidateTaskCache(taskId);
+
+    return {
+      orderId: escrowResult.orderId,
+      amount: Number(request.amount),
+      currency: "INR",
+      requestId,
+    };
   }
 
   static async withdrawAdditionalQuoteRequest(

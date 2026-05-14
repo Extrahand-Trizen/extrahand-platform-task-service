@@ -213,6 +213,15 @@ export class BudgetRevisionService {
     );
     if (!application) throw new NotFoundError("Application not found");
 
+    // Source of truth: task.currentRevisionRound (denormalized taskCurrentRevisionRound on the
+    // application can be 0 for helpers who applied after a revision if submitApplication never copied it).
+    const taskDoc = await TaskRepository.findById(
+      application.taskId.toString(),
+      "currentRevisionRound"
+    );
+    if (!taskDoc) throw new NotFoundError("Task not found");
+    const taskRevisionRound = Number((taskDoc as any).currentRevisionRound ?? 0);
+
     // ── AUTHORIZATION ─────────────────────────────────────────────────────────
     if (!application.applicantId.equals(actorProfileId)) {
       throw new ForbiddenError("Not authorized to respond to this application");
@@ -224,7 +233,6 @@ export class BudgetRevisionService {
     }
 
     // ── ACTIVE REVISION CHECK ─────────────────────────────────────────────────
-    const taskRevisionRound = application.taskCurrentRevisionRound ?? 0;
     if (taskRevisionRound === 0) {
       throw new BadRequestError(
         "No active budget revision exists for this task"

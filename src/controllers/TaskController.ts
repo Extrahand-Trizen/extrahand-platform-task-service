@@ -1,4 +1,4 @@
-import { Response } from 'express';
+import { Response, Request } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
 import { ApplicationService } from '../services/ApplicationService';
@@ -350,12 +350,11 @@ export class TaskController {
    * POST /api/v1/tasks/:id/start-otp/verify
    * Verify OTP and mark task as started
    */
-  static async verifyStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
-    if (!req.user!.profileId) {
+  static async verifyStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {    if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    const { otp } = req.body;
+    const { otp, selfieUrl, workPhotoUrl } = req.body;
     if (!otp) {
       throw new BadRequestError('OTP is required');
     }
@@ -363,10 +362,63 @@ export class TaskController {
     const task = await TaskService.verifyStartOtp(
       req.params.id,
       req.user!.profileId,
-      String(otp)
+      String(otp),
+      {
+        selfieUrl: typeof selfieUrl === 'string' ? selfieUrl.trim() : undefined,
+        workPhotoUrl: typeof workPhotoUrl === 'string' ? workPhotoUrl.trim() : undefined,
+        performerUid: req.user!.uid,
+      }
     );
 
-    ApiResponse.success(res, task, 'OTP verified. Task started successfully');
+    ApiResponse.success(res, task, 'OTP verified. Reached location confirmed.');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/mark-reached
+   * Tasker uploads selfie and transitions assigned → reached (no OTP).
+   */
+  static async markReached(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { selfieUrl } = req.body;
+    if (!selfieUrl) {
+      throw new BadRequestError('Selfie URL is required');
+    }
+
+    const task = await TaskService.markReached(
+      req.params.id,
+      req.user!.profileId,
+      String(selfieUrl),
+      req.user!.uid,
+    );
+
+    ApiResponse.success(res, task, 'Arrival confirmed. Task marked as reached.');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/mark-started
+   * Tasker uploads work photo and transitions reached → started.
+   */
+  static async markStarted(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const { workPhotoUrl } = req.body;
+    if (!workPhotoUrl) {
+      throw new BadRequestError('Work site photo URL is required');
+    }
+
+    const task = await TaskService.markStarted(
+      req.params.id,
+      req.user!.profileId,
+      String(workPhotoUrl),
+      req.user!.uid,
+    );
+
+    ApiResponse.success(res, task, 'Work started successfully');
   }
 
   /**
@@ -418,11 +470,11 @@ export class TaskController {
     }
     // TEMP DISABLED: selfie/work-photo specific request fields.
     // const { amount, reason, selfieImage, workImage } = req.body || {};
-    const { amount, reason, proofImages } = req.body || {};
+    const { amount, reason, proofImages, selfieImage, workImage } = req.body || {};
     const task = await TaskService.createAdditionalQuoteRequest(
       req.params.id,
       req.user!.profileId,
-      { amount, reason, proofImages }
+      { amount, reason, proofImages, selfieImage, workImage }
     );
     ApiResponse.success(res, task, 'Additional payment request submitted');
   }
@@ -460,6 +512,53 @@ export class TaskController {
       'accepted'
     );
     ApiResponse.success(res, task, 'Additional payment request accepted');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/additional-quote-request/:requestId/mark-paid
+   * Mark additional payment as paid after Razorpay success.
+   */
+  static async markAdditionalPaymentPaid(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user?.uid) {
+      throw new BadRequestError('Authentication required');
+    }
+    const task = await TaskService.markAdditionalPaymentPaid(
+      req.params.id,
+      req.params.requestId,
+      req.user.profileId,
+      req.user.uid,
+    );
+    ApiResponse.success(res, task, 'Additional payment marked as paid');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/additional-payment-complete/:requestId
+   * Called by payment service (service-to-service) after Razorpay payment is verified.
+   * No Firebase auth required — uses service auth token only.
+   */
+  static async markAdditionalPaymentPaidByService(req: Request, res: Response): Promise<void> {
+    const { id: taskId, requestId } = req.params;
+    const posterUid = (req.headers['x-user-uid'] as string || req.headers['x-user-id'] as string || '').trim();
+    logger.info('[TaskController.markAdditionalPaymentPaidByService] Called', { taskId, requestId, posterUid });
+    const task = await TaskService.markAdditionalPaymentPaidByService(taskId, requestId, posterUid);
+    ApiResponse.success(res, task, 'Additional payment marked as paid');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/additional-quote-request/:requestId/create-payment-order
+   * Poster creates a Razorpay order to pay the accepted additional amount.
+   */
+  static async createAdditionalPaymentOrder(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const result = await TaskService.createAdditionalPaymentOrder(
+      req.params.id,
+      req.params.requestId,
+      req.user!.profileId,
+      req.user!.uid,
+    );
+    ApiResponse.success(res, result, 'Additional payment order created');
   }
 
   static async rejectAdditionalQuoteRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
