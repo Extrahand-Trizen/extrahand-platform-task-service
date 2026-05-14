@@ -7,6 +7,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import logger from '../config/logger';
+import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
 
 export class TaskController {
   /**
@@ -374,6 +375,8 @@ export class TaskController {
    * Submit completion proof for review
    */
   static async submitCompletionProof(req: AuthenticatedRequest, res: Response): Promise<void> {
+    await attachProfileIdForLocalTestIfNeeded(req);
+
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }

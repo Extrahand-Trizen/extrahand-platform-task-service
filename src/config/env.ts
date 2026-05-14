@@ -39,6 +39,12 @@ const envSchema = z.object({
   // Service-to-Service Communication
   SERVICE_AUTH_TOKEN: z.string().min(1, 'SERVICE_AUTH_TOKEN is required for service-to-service communication').optional(),
 
+  /**
+   * When "true" or "1": dev-only behavior (e.g. resolve missing X-Profile-Id from uid for dummy sessions).
+   * Must remain unset/false in production (same contract as api-gateway complete-dev).
+   */
+  LOCAL_TEST: z.string().optional(),
+
   /** Comma-separated *poster* Firebase UIDs (test); assignee may use 123123 to start */
   TASK_START_OTP_BYPASS_UIDS: z.string().optional(),
   USER_SERVICE_URL: z.string().url().default('http://localhost:4001'),
@@ -247,6 +253,10 @@ export class Config {
 
   static get SERVICE_AUTH_TOKEN(): string | undefined {
     return this.env.SERVICE_AUTH_TOKEN;
+  }
+
+  static get LOCAL_TEST(): string | undefined {
+    return this.env.LOCAL_TEST;
   }
 
   static get TASK_START_OTP_BYPASS_UIDS(): string | undefined {
