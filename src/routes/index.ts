@@ -44,6 +44,13 @@ router.delete(
   asyncHandler(CascadeDeleteController.deleteUserData.bind(CascadeDeleteController))
 );
 
+// Active tasks that block account deletion (service-to-service)
+router.get(
+  '/cascade-delete/user/:uid/active-blockers',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.getActiveDeletionBlockers.bind(CascadeDeleteController))
+);
+
 // Diagnostic endpoint: Get all tasks for user (debug why deletion is blocked)
 router.get(
   '/cascade-delete/user/:uid/tasks-diagnostic',

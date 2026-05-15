@@ -6,6 +6,15 @@ import TaskFollow from '../models/TaskFollow';
 import TaskReport from '../models/TaskReport';
 import TaskQuestion from '../models/TaskQuestion';
 import logger from '../config/logger';
+import { BadRequestError } from '../errors/AppError';
+
+/** Task statuses that block account deletion until completed or cancelled. */
+export const ACTIVE_DELETION_BLOCKER_STATUSES = [
+  'assigned',
+  'started',
+  'in_progress',
+  'review',
+] as const;
 
 export class CascadeDeleteService {
   /**
@@ -179,6 +188,59 @@ export class CascadeDeleteService {
       logger.error(`❌ Error during cascading delete for user ${uid}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Returns whether the user has tasks that block account deletion.
+   * Uses requesterId / assigneeId (profile ObjectId) — not posterUid (not stored on Task).
+   */
+  static async getActiveDeletionBlockers(profileIdStr: string): Promise<{
+    hasBlockers: boolean;
+    asPosterCount: number;
+    asAssigneeCount: number;
+    sampleTasks: Array<{ id: string; title: string; status: string; role: 'poster' | 'assignee' }>;
+  }> {
+    if (!profileIdStr || !mongoose.Types.ObjectId.isValid(profileIdStr)) {
+      throw new BadRequestError('Valid profileId is required for deletion blocker check');
+    }
+
+    const profileId = new mongoose.Types.ObjectId(profileIdStr);
+    const statuses = [...ACTIVE_DELETION_BLOCKER_STATUSES];
+
+    const [asPosterCount, asAssigneeCount, posterSample, assigneeSample] = await Promise.all([
+      Task.countDocuments({ requesterId: profileId, status: { $in: statuses } }),
+      Task.countDocuments({ assigneeId: profileId, status: { $in: statuses } }),
+      Task.find({ requesterId: profileId, status: { $in: statuses } })
+        .select('_id title status')
+        .limit(3)
+        .lean(),
+      Task.find({ assigneeId: profileId, status: { $in: statuses } })
+        .select('_id title status')
+        .limit(3)
+        .lean(),
+    ]);
+
+    const sampleTasks = [
+      ...posterSample.map((t) => ({
+        id: String(t._id),
+        title: String(t.title || ''),
+        status: String(t.status),
+        role: 'poster' as const,
+      })),
+      ...assigneeSample.map((t) => ({
+        id: String(t._id),
+        title: String(t.title || ''),
+        status: String(t.status),
+        role: 'assignee' as const,
+      })),
+    ];
+
+    return {
+      hasBlockers: asPosterCount > 0 || asAssigneeCount > 0,
+      asPosterCount,
+      asAssigneeCount,
+      sampleTasks,
+    };
   }
 
   /**

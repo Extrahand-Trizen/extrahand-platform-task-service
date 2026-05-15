@@ -46,6 +46,28 @@ export class CascadeDeleteController {
   }
 
   /**
+   * GET /api/v1/cascade-delete/user/:uid/active-blockers
+   * Service-to-service: active tasks that block account deletion.
+   */
+  static async getActiveDeletionBlockers(req: Request, res: Response): Promise<void> {
+    const { uid } = req.params;
+    const profileId = req.headers['x-profile-id'] as string | undefined;
+
+    if (!uid) {
+      throw new BadRequestError('User ID (uid) is required');
+    }
+    if (!profileId) {
+      throw new BadRequestError('X-Profile-Id header is required');
+    }
+
+    logger.info(`🔎 Active deletion blockers check for user: ${uid}`, { profileId });
+
+    const result = await CascadeDeleteService.getActiveDeletionBlockers(profileId);
+
+    ApiResponse.success(res, result, 'Active deletion blockers retrieved');
+  }
+
+  /**
    * GET /api/v1/cascade-delete/user/:uid/tasks-diagnostic
    * Diagnostic endpoint: Returns all tasks for a user (across all statuses)
    * Used to debug why account deletion is being blocked
