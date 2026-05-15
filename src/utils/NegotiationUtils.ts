@@ -10,7 +10,7 @@ import { BadRequestError } from "../errors/AppError";
  */
 
 export const NegotiationUtils = {
-  /** Maximum number of times a poster can revise the task budget. */
+  /** Maximum number of times a poster can revise the listed budget (negotiable tasks). */
   MAX_REVISION_ROUNDS: 1 as const,
   /** Minimum allowed quote/revision amount in INR. */
   MIN_AMOUNT: 50 as const,

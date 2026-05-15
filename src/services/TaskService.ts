@@ -1574,6 +1574,8 @@ export class TaskService {
 
     // Normalize budget field to handle both object and number formats
     let updateData = { ...updates, updatedAt: new Date() };
+    // Never trust client-sent flags for one-time budget rules.
+    delete (updateData as any).posterBudgetEditedViaFormOnce;
     if (updateData.budget) {
       if (typeof updateData.budget !== "object") {
         // Convert budget number to object
@@ -1582,6 +1584,20 @@ export class TaskService {
           currency: "INR",
           type: "fixed",
         };
+      }
+    }
+
+    // Non-negotiable tasks: poster may change the listed budget at most once via updateTask (Edit Work).
+    if (updateData.budget && task.isNegotiable === false) {
+      const newAmt = Number((updateData.budget as any).amount);
+      const oldAmt = Number((task.budget as any)?.amount ?? 0);
+      if (Number.isFinite(newAmt) && newAmt !== oldAmt) {
+        if ((task as any).posterBudgetEditedViaFormOnce === true) {
+          throw new BadRequestError(
+            "You can only update the fixed budget once. Further budget changes are not allowed here."
+          );
+        }
+        (updateData as any).posterBudgetEditedViaFormOnce = true;
       }
     }
 
