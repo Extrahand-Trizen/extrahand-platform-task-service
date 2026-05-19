@@ -46,6 +46,47 @@ export class CascadeDeleteController {
   }
 
   /**
+   * GET /api/v1/cascade-delete/user/:uid/account-deletion-preview
+   * Service-to-service: counts for deletion warnings and active blockers.
+   */
+  static async getAccountDeletionPreview(req: Request, res: Response): Promise<void> {
+    const { uid } = req.params;
+    const profileId = req.headers['x-profile-id'] as string | undefined;
+
+    if (!uid) {
+      throw new BadRequestError('User ID (uid) is required');
+    }
+    if (!profileId) {
+      throw new BadRequestError('X-Profile-Id header is required');
+    }
+
+    logger.info(`🔎 Account deletion preview for user: ${uid}`, { profileId });
+
+    const result = await CascadeDeleteService.getAccountDeletionPreview(profileId);
+
+    ApiResponse.success(res, result, 'Account deletion preview retrieved');
+  }
+
+  /**
+   * DELETE /api/v1/cascade-delete/user/:uid/account-deletion
+   * Service-to-service: delete eligible task data when a user deletes their account.
+   */
+  static async deleteAccountEligibleData(req: Request, res: Response): Promise<void> {
+    const { uid } = req.params;
+    const profileId = req.headers['x-profile-id'] as string | undefined;
+
+    if (!uid) {
+      throw new BadRequestError('User ID (uid) is required');
+    }
+
+    logger.info(`🗑️ Account-deletion eligible delete for user: ${uid}, profileId: ${profileId ?? 'not provided'}`);
+
+    const result = await CascadeDeleteService.deleteAccountEligibleData(uid, profileId);
+
+    ApiResponse.success(res, result, 'Account deletion eligible data removed');
+  }
+
+  /**
    * GET /api/v1/cascade-delete/user/:uid/active-blockers
    * Service-to-service: active tasks that block account deletion.
    */
