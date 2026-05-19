@@ -68,6 +68,40 @@ async function compressImageIfSupported(
   }
 }
 
+async function assertPerformerCanUploadProof(
+  task: { _id: unknown; assigneeId?: unknown },
+  performerUid: string,
+  performerProfileId?: string,
+): Promise<void> {
+  const assigneeIdStr = task.assigneeId?.toString();
+  const isAssignedPerformer =
+    (performerProfileId && assigneeIdStr === performerProfileId) ||
+    (assigneeIdStr && assigneeIdStr === performerUid);
+
+  if (isAssignedPerformer) {
+    return;
+  }
+
+  const applicationQuery: Record<string, unknown> = {
+    taskId: task._id,
+    status: 'accepted',
+  };
+
+  if (performerProfileId) {
+    applicationQuery.$or = [
+      { applicantUid: performerUid },
+      { applicantId: performerProfileId },
+    ];
+  } else {
+    applicationQuery.applicantUid = performerUid;
+  }
+
+  const acceptedApplication = await TaskApplication.findOne(applicationQuery);
+  if (!acceptedApplication) {
+    throw new ForbiddenError('Only the assigned performer can upload completion proof');
+  }
+}
+
 export class UploadService {
   /**
    * Upload task image (for task creation/editing)
@@ -120,7 +154,8 @@ export class UploadService {
     performerUid: string,
     fileBuffer: Buffer,
     filename: string,
-    mimetype: string
+    mimetype: string,
+    performerProfileId?: string,
   ): Promise<{ url: string; key: string }> {
     if (!fileBuffer || !filename) {
       throw new BadRequestError('No image file provided');
@@ -132,23 +167,7 @@ export class UploadService {
       throw new NotFoundError('Task not found');
     }
 
-    // Check if user is the assigned performer
-    const isAssignedPerformer = task.assigneeId?.toString() === performerUid;
-    let hasAcceptedApplication = false;
-
-    if (!isAssignedPerformer) {
-      // Check if user has an accepted application
-      const acceptedApplication = await TaskApplication.findOne({
-        taskId: task._id,
-        applicantUid: performerUid,
-        status: 'accepted',
-      });
-      hasAcceptedApplication = !!acceptedApplication;
-    }
-
-    if (!isAssignedPerformer && !hasAcceptedApplication) {
-      throw new ForbiddenError('Only the assigned performer can upload completion proof');
-    }
+    await assertPerformerCanUploadProof(task, performerUid, performerProfileId);
 
     const processed = await compressImageIfSupported(fileBuffer, filename, mimetype);
 
@@ -201,7 +220,8 @@ export class UploadService {
   static async uploadMultipleCompletionProofs(
     taskId: string,
     performerUid: string,
-    files: Array<{ buffer: Buffer; filename: string; mimetype: string }>
+    files: Array<{ buffer: Buffer; filename: string; mimetype: string }>,
+    performerProfileId?: string,
   ): Promise<Array<{ url: string; key: string }>> {
     if (!files || files.length === 0) {
       throw new BadRequestError('No image files provided');
@@ -213,23 +233,7 @@ export class UploadService {
       throw new NotFoundError('Task not found');
     }
 
-    // Check if user is the assigned performer
-    const isAssignedPerformer = task.assigneeId?.toString() === performerUid;
-    let hasAcceptedApplication = false;
-
-    if (!isAssignedPerformer) {
-      // Check if user has an accepted application
-      const acceptedApplication = await TaskApplication.findOne({
-        taskId: task._id,
-        applicantUid: performerUid,
-        status: 'accepted',
-      });
-      hasAcceptedApplication = !!acceptedApplication;
-    }
-
-    if (!isAssignedPerformer && !hasAcceptedApplication) {
-      throw new ForbiddenError('Only the assigned performer can upload completion proof');
-    }
+    await assertPerformerCanUploadProof(task, performerUid, performerProfileId);
 
     // Upload all files
     const uploadPromises = files.map(async (file) => {

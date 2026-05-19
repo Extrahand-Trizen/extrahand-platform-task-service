@@ -11,7 +11,7 @@ export class UploadController {
    * Upload single completion proof image
    */
   static async uploadCompletionProof(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { uid } = req.user!;
+    const { uid, profileId } = req.user!;
     const { taskId } = req.params;
     const file = (req as any).file;
 
@@ -24,7 +24,8 @@ export class UploadController {
       uid,
       file.buffer,
       file.originalname || 'proof.jpg',
-      file.mimetype
+      file.mimetype,
+      profileId?.toString(),
     );
 
     ApiResponse.success(res, { url: result.url, key: result.key }, 'Completion proof uploaded successfully');
@@ -35,7 +36,7 @@ export class UploadController {
    * Upload multiple completion proof images
    */
   static async uploadMultipleCompletionProofs(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { uid } = req.user!;
+    const { uid, profileId } = req.user!;
     const { taskId } = req.params;
     const files = (req as any).files;
 
@@ -52,7 +53,8 @@ export class UploadController {
     const results = await UploadService.uploadMultipleCompletionProofs(
       taskId,
       uid,
-      fileData
+      fileData,
+      profileId?.toString(),
     );
 
     const urls = results.map(r => r.url);
