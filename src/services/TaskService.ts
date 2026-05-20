@@ -98,6 +98,25 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "care-services": "other",
     "education-training": "other",
     "professional-services": "other",
+
+    // Packers & Movers
+    "packers-movers": "packers-movers",
+    "Packers & Movers": "packers-movers",
+    "packers-and-movers": "packers-movers",
+    "home-shifting": "packers-movers",
+    "office-relocation": "packers-movers",
+    moving: "packers-movers",
+    relocation: "packers-movers",
+
+    // Delivery / Pickup subcategories
+    "delivery-pickup-services": "delivery",
+    "grocery-pickup": "delivery",
+    "medicine-pickup": "delivery",
+    "pick-drop": "delivery",
+    "pick-and-drop": "delivery",
+    "Grocery Pickup": "delivery",
+    "Medicine Pickup": "delivery",
+    "Pick & Drop": "delivery",
   };
 
   // Try exact match first, then case-insensitive match
@@ -184,7 +203,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails';
 
 const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
@@ -354,10 +373,9 @@ export class TaskService {
       if (remotely === true) {
         // Remote tasks: tasks without coordinates/address
         andClauses.push({ $or: [{ location: { $exists: false } }, { 'location.coordinates.0': { $exists: false } }, { 'location.address': { $exists: false } }] });
-      } else {
-        // In-person tasks: require coordinates to exist
-        andClauses.push({ 'location.coordinates.0': { $exists: true } });
       }
+      // remotely === false: in-person filter — don't strictly exclude tasks without coordinates
+      // to avoid hiding packers-movers and similar category-specific tasks
     }
 
     // Search across title, description, city and category
@@ -477,19 +495,28 @@ export class TaskService {
     const skip = (effectivePage - 1) * effectiveLimit;
     const radiusMeters = radiusKm * 1000;
 
-    const andClauses: any[] = [
-      {
-        "location.coordinates": {
-          $near: {
-            $geometry: {
-              type: "Point",
-              coordinates: [lng, lat],
+    const andClauses: any[] = [];
+
+    // Include nearby tasks (with coordinates) OR remote/packers-movers tasks (without coordinates)
+    // This ensures tasks like packers-movers that don't have a fixed location are always shown
+    andClauses.push({
+      $or: [
+        {
+          "location.coordinates": {
+            $near: {
+              $geometry: {
+                type: "Point",
+                coordinates: [lng, lat],
+              },
+              $maxDistance: radiusMeters,
             },
-            $maxDistance: radiusMeters,
           },
         },
-      },
-    ];
+        // Tasks without coordinates (remote tasks, packers-movers, etc.)
+        { "location.coordinates.0": { $exists: false } },
+        { location: { $exists: false } },
+      ],
+    });
 
     // Status filter: support single value or array
     if (status) {
@@ -546,6 +573,7 @@ export class TaskService {
 
     if (typeof remotely === "boolean") {
       if (remotely === true) {
+        // Remote-only: tasks without coordinates
         andClauses.push({
           $or: [
             { location: { $exists: false } },
@@ -553,9 +581,9 @@ export class TaskService {
             { "location.address": { $exists: false } },
           ],
         });
-      } else {
-        andClauses.push({ "location.coordinates.0": { $exists: true } });
       }
+      // remotely === false: in-person filter — but still include packers-movers (no coordinates)
+      // We don't add a strict coordinates-required filter to avoid hiding packers-movers
     }
 
     if (search) {
@@ -783,12 +811,15 @@ export class TaskService {
       taskData.location &&
       (taskData.location.address || taskData.location.coordinates)
     ) {
+      const coords = taskData.location.coordinates ||
+        (taskData.location.longitude && taskData.location.latitude
+          ? [taskData.location.longitude, taskData.location.latitude]
+          : null);
+
       location = {
         type: "Point" as const,
-        coordinates: taskData.location.coordinates || [
-          taskData.location.longitude || 0,
-          taskData.location.latitude || 0,
-        ],
+        // Only set coordinates if we have valid non-zero values
+        ...(coords && coords[0] !== 0 && coords[1] !== 0 ? { coordinates: coords } : {}),
         address: taskData.location.address || taskData.location || undefined,
         city: taskData.location.city || taskData.city || undefined,
         state: taskData.location.state || taskData.state || undefined,
@@ -912,6 +943,79 @@ export class TaskService {
     // Only include location if it was provided
     if (location) {
       taskPayload.location = location;
+    }
+
+    // ── Packers & Movers specific fields ──────────────────────────────────────
+    // Only store when category is packers-movers — no impact on other categories
+    if (mappedCategory === 'packers-movers' && taskData.packersMoversDetails) {
+      const pm = taskData.packersMoversDetails;
+      taskPayload.packersMoversDetails = {
+        serviceType: pm.serviceType,
+        houseType: pm.houseType,
+        pickupAddress: pm.pickupAddress,
+        pickupCoordinates: pm.pickupCoordinates,
+        dropAddress: pm.dropAddress,
+        dropCoordinates: pm.dropCoordinates,
+        liftAtPickup: pm.liftAtPickup ?? false,
+        liftAtDrop: pm.liftAtDrop ?? false,
+        moveDate: pm.moveDate,
+        moveTimeSlot: pm.moveTimeSlot,
+        selectedItems: pm.selectedItems,
+        packing: pm.packing ?? false,
+        unpacking: pm.unpacking ?? false,
+        loadingOnly: pm.loadingOnly ?? false,
+        helpers: typeof pm.helpers === 'number' ? pm.helpers : parseInt(pm.helpers) || 2,
+        offeredPrice: typeof pm.offeredPrice === 'number' ? pm.offeredPrice : parseFloat(pm.offeredPrice) || 0,
+      };
+    }
+
+    // ── Delivery / Pickup specific fields ──────────────────────────────────────
+    if (mappedCategory === 'delivery' && taskData.subcategory) {
+      const sub = String(taskData.subcategory).toLowerCase();
+
+      if ((sub.includes('grocery') || sub.includes('shopping')) && taskData.groceryPickupDetails) {
+        const gp = taskData.groceryPickupDetails;
+        taskPayload.groceryPickupDetails = {
+          groceryItems: gp.groceryItems,
+          preferredStore: gp.preferredStore,
+          shopLocation: gp.shopLocation,
+          quantityNotes: gp.quantityNotes,
+          urgentDelivery: gp.urgentDelivery ?? false,
+          deliveryAddress: gp.deliveryAddress,
+          deliveryLabel: gp.deliveryLabel,
+          preferences: gp.preferences,
+          estimatedAmount: typeof gp.estimatedAmount === 'number' ? gp.estimatedAmount : parseFloat(gp.estimatedAmount) || 0,
+        };
+      }
+
+      if (sub.includes('medicine') && taskData.medicinePickupDetails) {
+        const mp = taskData.medicinePickupDetails;
+        taskPayload.medicinePickupDetails = {
+          medicines: mp.medicines,
+          specialInstructions: mp.specialInstructions,
+          preferredPharmacy: mp.preferredPharmacy,
+          pharmacyLocation: mp.pharmacyLocation,
+          deliveryAddress: mp.deliveryAddress,
+          deliveryLabel: mp.deliveryLabel,
+          estimatedAmount: typeof mp.estimatedAmount === 'number' ? mp.estimatedAmount : parseFloat(mp.estimatedAmount) || 0,
+        };
+      }
+
+      if ((sub.includes('pick') || sub.includes('drop')) && taskData.pickDropDetails) {
+        const pd = taskData.pickDropDetails;
+        taskPayload.pickDropDetails = {
+          itemType: pd.itemType,
+          pickupAddress: pd.pickupAddress,
+          pickupLabel: pd.pickupLabel,
+          dropAddress: pd.dropAddress,
+          receiverName: pd.receiverName,
+          receiverMobile: pd.receiverMobile,
+          useMyNumber: pd.useMyNumber ?? false,
+          specialInstructions: pd.specialInstructions,
+          otpRequired: pd.otpRequired ?? false,
+          estimatedItemValue: typeof pd.estimatedItemValue === 'number' ? pd.estimatedItemValue : parseFloat(pd.estimatedItemValue) || 0,
+        };
+      }
     }
 
     const task = await Task.create(taskPayload);

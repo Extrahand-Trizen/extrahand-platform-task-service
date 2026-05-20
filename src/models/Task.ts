@@ -11,10 +11,67 @@ export interface ITask extends Document {
     | "assembly"
     | "gardening"
     | "petcare"
+    | "packers-movers"
     | "other";
   categorySlug?: string;
   categoryLabel?: string;
   subcategory?: string;
+
+  // ── Packers & Movers specific fields (only populated when category = 'packers-movers') ──
+  packersMoversDetails?: {
+    serviceType?: 'intracity' | 'intercity';
+    houseType?: string;
+    pickupAddress?: string;
+    pickupCoordinates?: [number, number];
+    dropAddress?: string;
+    dropCoordinates?: [number, number];
+    liftAtPickup?: boolean;
+    liftAtDrop?: boolean;
+    moveDate?: string;
+    moveTimeSlot?: string;
+    selectedItems?: string;
+    packing?: boolean;
+    unpacking?: boolean;
+    loadingOnly?: boolean;
+    helpers?: number;
+    offeredPrice?: number;
+  };
+
+  // ── Delivery / Pickup specific fields ──────────────────────────────────────
+  groceryPickupDetails?: {
+    groceryItems?: string;
+    preferredStore?: string;
+    shopLocation?: string;
+    quantityNotes?: string;
+    urgentDelivery?: boolean;
+    deliveryAddress?: string;
+    deliveryLabel?: string;
+    preferences?: string;
+    estimatedAmount?: number;
+  };
+
+  medicinePickupDetails?: {
+    medicines?: string;
+    specialInstructions?: string;
+    preferredPharmacy?: string;
+    pharmacyLocation?: string;
+    deliveryAddress?: string;
+    deliveryLabel?: string;
+    estimatedAmount?: number;
+  };
+
+  pickDropDetails?: {
+    itemType?: string;
+    pickupAddress?: string;
+    pickupLabel?: string;
+    dropAddress?: string;
+    receiverName?: string;
+    receiverMobile?: string;
+    useMyNumber?: boolean;
+    specialInstructions?: string;
+    otpRequired?: boolean;
+    estimatedItemValue?: number;
+  };
 
   budget: {
     amount: number;
@@ -175,6 +232,7 @@ const TaskSchema = new Schema<ITask>(
         "assembly",
         "gardening",
         "petcare",
+        "packers-movers",
         "other",
       ],
       required: true,
@@ -183,6 +241,74 @@ const TaskSchema = new Schema<ITask>(
     categorySlug: { type: String, index: true },
     categoryLabel: String,
     subcategory: String,
+
+    // ── Packers & Movers specific fields ──────────────────────────────────────
+    packersMoversDetails: {
+      type: {
+        serviceType: { type: String, enum: ['intracity', 'intercity'] },
+        houseType: String,
+        pickupAddress: String,
+        pickupCoordinates: [Number],
+        dropAddress: String,
+        dropCoordinates: [Number],
+        liftAtPickup: { type: Boolean, default: false },
+        liftAtDrop: { type: Boolean, default: false },
+        moveDate: String,
+        moveTimeSlot: String,
+        selectedItems: String,
+        packing: { type: Boolean, default: false },
+        unpacking: { type: Boolean, default: false },
+        loadingOnly: { type: Boolean, default: false },
+        helpers: { type: Number, default: 2 },
+        offeredPrice: Number,
+      },
+      default: undefined,
+    },
+
+    // ── Delivery / Pickup specific fields ──────────────────────────────────────
+    groceryPickupDetails: {
+      type: {
+        groceryItems: String,
+        preferredStore: String,
+        shopLocation: String,
+        quantityNotes: String,
+        urgentDelivery: { type: Boolean, default: false },
+        deliveryAddress: String,
+        deliveryLabel: String,
+        preferences: String,
+        estimatedAmount: Number,
+      },
+      default: undefined,
+    },
+
+    medicinePickupDetails: {
+      type: {
+        medicines: String,
+        specialInstructions: String,
+        preferredPharmacy: String,
+        pharmacyLocation: String,
+        deliveryAddress: String,
+        deliveryLabel: String,
+        estimatedAmount: Number,
+      },
+      default: undefined,
+    },
+
+    pickDropDetails: {
+      type: {
+        itemType: String,
+        pickupAddress: String,
+        pickupLabel: String,
+        dropAddress: String,
+        receiverName: String,
+        receiverMobile: String,
+        useMyNumber: { type: Boolean, default: false },
+        specialInstructions: String,
+        otpRequired: { type: Boolean, default: false },
+        estimatedItemValue: Number,
+      },
+      default: undefined,
+    },
 
     budget: {
       amount: { type: Number, required: true, min: 0 },

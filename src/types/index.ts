@@ -24,7 +24,7 @@ export interface Location {
 }
 
 // Task types
-export type TaskCategory = 'cleaning' | 'repair' | 'delivery' | 'assembly' | 'gardening' | 'petcare' | 'other';
+export type TaskCategory = 'cleaning' | 'repair' | 'delivery' | 'assembly' | 'gardening' | 'petcare' | 'packers-movers' | 'other';
 export type TaskStatus = 'open' | 'assigned' | 'started' | 'in_progress' | 'review' | 'completed' | 'cancelled';
 export type BudgetType = 'fixed' | 'hourly' | 'negotiable';
 export type Urgency = 'low' | 'medium' | 'high' | 'urgent';
