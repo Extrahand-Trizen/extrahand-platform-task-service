@@ -44,6 +44,26 @@ router.delete(
   asyncHandler(CascadeDeleteController.deleteUserData.bind(CascadeDeleteController))
 );
 
+// Account deletion preview and selective cascade (service-to-service)
+router.get(
+  '/cascade-delete/user/:uid/account-deletion-preview',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.getAccountDeletionPreview.bind(CascadeDeleteController))
+);
+
+router.delete(
+  '/cascade-delete/user/:uid/account-deletion',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.deleteAccountEligibleData.bind(CascadeDeleteController))
+);
+
+// Active tasks that block account deletion (service-to-service)
+router.get(
+  '/cascade-delete/user/:uid/active-blockers',
+  serviceAuthMiddleware,
+  asyncHandler(CascadeDeleteController.getActiveDeletionBlockers.bind(CascadeDeleteController))
+);
+
 // Diagnostic endpoint: Get all tasks for user (debug why deletion is blocked)
 router.get(
   '/cascade-delete/user/:uid/tasks-diagnostic',

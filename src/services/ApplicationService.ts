@@ -1032,9 +1032,24 @@ export class ApplicationService {
           throw new BadRequestError("Proposed budget amount cannot exceed 50000");
         }
 
+        const amountChanging = application.proposedBudget.amount !== rawAmount;
+        let listingIsNonNegotiable = false;
+        if (amountChanging) {
+          const task = await Task.findById(application.taskId).select("isNegotiable").lean();
+          listingIsNonNegotiable = Boolean(task && task.isNegotiable === false);
+          if (listingIsNonNegotiable && application.freeOfferEditUsed === true) {
+            throw new BadRequestError(
+              "You can only update your offered price once for fixed-budget work."
+            );
+          }
+        }
+
         application.proposedBudget.amount = rawAmount;
         if (application.negotiation) {
           application.negotiation.currentAmount = rawAmount;
+        }
+        if (amountChanging && listingIsNonNegotiable) {
+          application.freeOfferEditUsed = true;
         }
         changed = true;
       }

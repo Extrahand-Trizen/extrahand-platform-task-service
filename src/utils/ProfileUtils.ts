@@ -57,6 +57,33 @@ export class ProfileUtils {
   }
 
   /**
+   * Look up profile Mongo ObjectId by auth uid (Firebase uid or dev dummy uid stored on profile).
+   */
+  static async getProfileIdByUid(
+    uid: string
+  ): Promise<mongoose.Types.ObjectId | null> {
+    const trimmed = String(uid || "").trim();
+    if (!trimmed) return null;
+    try {
+      const doc = await ProfileUtils.collection.findOne(
+        { uid: trimmed },
+        { projection: { _id: 1 } }
+      );
+      if (doc?._id) {
+        return doc._id instanceof mongoose.Types.ObjectId
+          ? doc._id
+          : new mongoose.Types.ObjectId(String(doc._id));
+      }
+    } catch (error) {
+      logger.warn("[ProfileUtils.getProfileIdByUid] Failed", {
+        uid: trimmed,
+        error: error instanceof Error ? error.message : "Unknown",
+      });
+    }
+    return null;
+  }
+
+  /**
    * Batch fetch profiles by an array of ObjectIds.
    * Returns a Map keyed by profileId.toString() → profile document.
    * Minimizes round trips for enrichment operations.

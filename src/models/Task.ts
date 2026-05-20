@@ -154,12 +154,15 @@ export interface ITask extends Document {
   }>;
   activeAdditionalQuoteRequestId?: string | null;
 
+  /** Poster changed fixed (non-negotiable) budget from Edit Work — at most one such change server-side. */
+  posterBudgetEditedViaFormOnce?: boolean;
+
   // ── Global Budget Revision (Phase 1) ────────────────────────────────────────
-  /** How many times the poster has revised the budget. Max = 1. Default = 0. */
+  /** How many times the poster has revised the listed budget. Capped by MAX_REVISION_ROUNDS. Default = 0. */
   currentRevisionRound: number;
   /** High-level negotiation state for the task. Separate from task lifecycle status. */
   negotiationStatus: "open" | "revised" | "closed";
-  /** Append-only audit trail of all poster budget revisions. Bounded by currentRevisionRound (max 1). */
+  /** Append-only audit trail of poster listed-budget revisions (negotiable flow). */
   budgetRevisions?: Array<{
     round: number;
     previousAmount: number;
@@ -211,6 +214,7 @@ const TaskSchema = new Schema<ITask>(
       type: { type: String, enum: ["fixed", "hourly"], default: "fixed" },
     },
     isNegotiable: { type: Boolean, default: false },
+    posterBudgetEditedViaFormOnce: { type: Boolean, default: false },
 
     location: {
       type: { type: String, enum: ["Point"], default: "Point" },

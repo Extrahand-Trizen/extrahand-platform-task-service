@@ -72,6 +72,11 @@ export interface ITaskApplication extends Document {
    * Guard: respondedToRevisionRound >= taskCurrentRevisionRound → already responded.
    */
   respondedToRevisionRound: number;
+  /**
+   * For fixed-budget (non-negotiable) listings: set after the tasker changes their
+   * offered price once via PATCH application — blocks further amount edits.
+   */
+  freeOfferEditUsed?: boolean;
   /** Append-only log of the tasker's responses to global revision rounds. */
   quotationRevisions?: Array<{
     round: number;
@@ -201,6 +206,7 @@ const TaskApplicationSchema = new Schema<ITaskApplication>(
     // ── Global Budget Revision (Phase 1) ─────────────────────────────────────
     taskCurrentRevisionRound: { type: Number, default: 0, min: 0 },
     respondedToRevisionRound: { type: Number, default: 0, min: 0 },
+    freeOfferEditUsed: { type: Boolean, default: false },
     quotationRevisions: {
       type: [
         {

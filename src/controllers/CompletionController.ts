@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../types';
 import { CompletionService } from '../services/CompletionService';
 import { ApiResponse } from '../utils/ApiResponse';
 import { BadRequestError } from '../errors/AppError';
+import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
 
 export class CompletionController {
   /**
@@ -10,6 +11,8 @@ export class CompletionController {
    * Submit completion proof
    */
   static async submitCompletion(req: AuthenticatedRequest, res: Response): Promise<void> {
+    await attachProfileIdForLocalTestIfNeeded(req);
+
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
@@ -28,6 +31,8 @@ export class CompletionController {
    * Approve completion
    */
   static async approveCompletion(req: AuthenticatedRequest, res: Response): Promise<void> {
+    await attachProfileIdForLocalTestIfNeeded(req);
+
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
@@ -45,6 +50,8 @@ export class CompletionController {
    * Reject completion
    */
   static async rejectCompletion(req: AuthenticatedRequest, res: Response): Promise<void> {
+    await attachProfileIdForLocalTestIfNeeded(req);
+
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
