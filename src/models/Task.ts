@@ -27,6 +27,8 @@ export interface ITask extends Document {
     dropCoordinates?: [number, number];
     liftAtPickup?: boolean;
     liftAtDrop?: boolean;
+    pickupFloor?: string;
+    dropFloor?: string;
     moveDate?: string;
     moveTimeSlot?: string;
     selectedItems?: string;
@@ -251,8 +253,10 @@ const TaskSchema = new Schema<ITask>(
         pickupCoordinates: [Number],
         dropAddress: String,
         dropCoordinates: [Number],
-        liftAtPickup: { type: Boolean, default: false },
-        liftAtDrop: { type: Boolean, default: false },
+        liftAtPickup: { type: Boolean, default: true },
+        liftAtDrop: { type: Boolean, default: true },
+        pickupFloor: String,
+        dropFloor: String,
         moveDate: String,
         moveTimeSlot: String,
         selectedItems: String,
