@@ -203,7 +203,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images';
 
 const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
@@ -752,27 +752,39 @@ export class TaskService {
     taskData: any,
     uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
-    const titleError = getMeaningfulTextError(taskData.title, {
-      fieldName: 'Title',
-      minLength: 3,
-      minWords: 2,
-      allowSingleWord: true,
-      minSingleWordLength: 4,
-      minSingleWordVowelRatio: 0.25,
-      minVowelRatio: 0.25,
-    });
-    if (titleError) {
-      throw new BadRequestError(titleError);
-    }
+    // Delivery/pickup tasks have system-generated titles and descriptions — skip meaningful-text checks
+    const isDeliveryPickup = [taskData.category, taskData.categorySlug].some((c: string) =>
+      String(c || '').toLowerCase().includes('delivery') ||
+      String(c || '').toLowerCase().includes('pickup') ||
+      String(c || '').toLowerCase().includes('pick-drop') ||
+      String(c || '').toLowerCase().includes('pick_drop') ||
+      String(c || '').toLowerCase().includes('packers') ||
+      String(c || '').toLowerCase().includes('movers')
+    );
 
-    const descriptionError = getMeaningfulTextError(taskData.description, {
-      fieldName: 'Description',
-      minLength: 10,
-      minWords: 3,
-      minVowelRatio: 0.25,
-    });
-    if (descriptionError) {
-      throw new BadRequestError(descriptionError);
+    if (!isDeliveryPickup) {
+      const titleError = getMeaningfulTextError(taskData.title, {
+        fieldName: 'Title',
+        minLength: 3,
+        minWords: 2,
+        allowSingleWord: true,
+        minSingleWordLength: 4,
+        minSingleWordVowelRatio: 0.25,
+        minVowelRatio: 0.25,
+      });
+      if (titleError) {
+        throw new BadRequestError(titleError);
+      }
+
+      const descriptionError = getMeaningfulTextError(taskData.description, {
+        fieldName: 'Description',
+        minLength: 10,
+        minWords: 3,
+        minVowelRatio: 0.25,
+      });
+      if (descriptionError) {
+        throw new BadRequestError(descriptionError);
+      }
     }
 
     logger.info(`[TaskService.createTask] Starting task creation`, {

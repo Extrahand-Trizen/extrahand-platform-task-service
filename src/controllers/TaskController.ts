@@ -188,28 +188,41 @@ export class TaskController {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    const { title, description } = req.body;
-    const titleError = getMeaningfulTextError(title, {
-      fieldName: 'Title',
-      minLength: 3,
-      minWords: 2,
-      allowSingleWord: true,
-      minSingleWordLength: 4,
-      minSingleWordVowelRatio: 0.25,
-      minVowelRatio: 0.25,
-    });
-    if (titleError) {
-      throw new BadRequestError(titleError);
-    }
+    const { title, description, category, categorySlug } = req.body;
 
-    const descriptionError = getMeaningfulTextError(description, {
-      fieldName: 'Description',
-      minLength: 10,
-      minWords: 3,
-      minVowelRatio: 0.25,
-    });
-    if (descriptionError) {
-      throw new BadRequestError(descriptionError);
+    // Delivery/pickup tasks have system-generated titles and descriptions — skip meaningful-text checks
+    const isDeliveryPickup = [category, categorySlug].some((c: string) =>
+      String(c || '').toLowerCase().includes('delivery') ||
+      String(c || '').toLowerCase().includes('pickup') ||
+      String(c || '').toLowerCase().includes('pick-drop') ||
+      String(c || '').toLowerCase().includes('pick_drop') ||
+      String(c || '').toLowerCase().includes('packers') ||
+      String(c || '').toLowerCase().includes('movers')
+    );
+
+    if (!isDeliveryPickup) {
+      const titleError = getMeaningfulTextError(title, {
+        fieldName: 'Title',
+        minLength: 3,
+        minWords: 2,
+        allowSingleWord: true,
+        minSingleWordLength: 4,
+        minSingleWordVowelRatio: 0.25,
+        minVowelRatio: 0.25,
+      });
+      if (titleError) {
+        throw new BadRequestError(titleError);
+      }
+
+      const descriptionError = getMeaningfulTextError(description, {
+        fieldName: 'Description',
+        minLength: 10,
+        minWords: 3,
+        minVowelRatio: 0.25,
+      });
+      if (descriptionError) {
+        throw new BadRequestError(descriptionError);
+      }
     }
 
     if (containsPhoneNumber(title) || containsPhoneNumber(description)) {
