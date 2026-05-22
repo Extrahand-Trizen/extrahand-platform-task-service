@@ -388,7 +388,7 @@ const TaskSchema = new Schema<ITask>(
     additionalQuoteRequests: [{
       requestId: { type: String, required: true },
       amount: { type: Number, required: true, min: 1 },
-      reason: { type: String, required: true, trim: true, maxlength: 1000 },
+      reason: { type: String, required: true, trim: true, maxlength: 2000 },
       proofImages: [{ type: String }],
       selfieImage: { type: String, required: false },
       workImage: { type: String, required: false },

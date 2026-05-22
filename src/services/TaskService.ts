@@ -20,6 +20,10 @@ import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
 import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 import { getMeaningfulTextError } from '../utils/textValidation';
+import {
+  enrichTaskListWithPaymentSummary,
+  enrichTaskWithPaymentSummary,
+} from '../utils/taskPaymentSummary';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -185,7 +189,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt additionalQuoteRequests';
 
 const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
@@ -389,7 +393,7 @@ export class TaskService {
     const total = await Task.countDocuments(query);
 
     const result = {
-      tasks: tasks as unknown as ITask[],
+      tasks: enrichTaskListWithPaymentSummary(tasks as Record<string, unknown>[]) as unknown as ITask[],
       pagination: {
         page: effectivePage,
         limit: effectiveLimit,
@@ -593,7 +597,7 @@ export class TaskService {
     });
 
     return {
-      tasks: tasks as unknown as ITask[],
+      tasks: enrichTaskListWithPaymentSummary(tasks as Record<string, unknown>[]) as unknown as ITask[],
       pagination: {
         page: effectivePage,
         limit: effectiveLimit,
@@ -637,7 +641,7 @@ export class TaskService {
     const total = await Task.countDocuments(query);
 
     return {
-      tasks: tasks as unknown as ITask[],
+      tasks: enrichTaskListWithPaymentSummary(tasks as Record<string, unknown>[]) as unknown as ITask[],
       pagination: {
         page: effectivePage,
         limit: effectiveLimit,
@@ -685,7 +689,9 @@ export class TaskService {
     if (!task) {
       throw new NotFoundError("Task not found");
     }
-    const result = task as unknown as ITask;
+    const result = enrichTaskWithPaymentSummary(
+      task as Record<string, unknown>,
+    ) as unknown as ITask;
 
     try {
       const redis = getRedisClient();
@@ -2285,6 +2291,14 @@ export class TaskService {
           // Pass posterUid as releasedBy — escrow service validates the poster is releasing
           const releaseResult = await PaymentClient.releaseAllEscrowsForTask(taskId, posterUid);
 
+          const additionalRequests = Array.isArray((task as any).additionalQuoteRequests)
+            ? ((task as any).additionalQuoteRequests as any[])
+            : [];
+          const additionalTotal = additionalRequests
+            .filter((r: any) => r?.status === "paid")
+            .reduce((sum: number, r: any) => sum + Number(r?.amount || 0), 0);
+          const totalPayoutAmount = Number(taskAmount || 0) + additionalTotal;
+
           if (releaseResult.success && releaseResult.released > 0) {
             logger.info(`✅ All escrows released for task completion`, {
               taskId,
@@ -2292,6 +2306,30 @@ export class TaskService {
               released: releaseResult.released,
               total: releaseResult.total,
             });
+
+            const payoutResult = await PaymentClient.processTaskCompletionPayout({
+              taskId,
+              performerUid,
+              amount: totalPayoutAmount > 0 ? totalPayoutAmount : Number(taskAmount || 0),
+              taskTitle: typeof task.title === "string" ? task.title : undefined,
+            });
+
+            if (payoutResult.success) {
+              logger.info(`✅ Task completion payout sent (net after fees on total)`, {
+                taskId,
+                performerUid,
+                netAmount: payoutResult.payout?.netAmount,
+                bankTransferAmount: payoutResult.payout?.bankTransferAmount,
+              });
+            } else if (payoutResult.requiresBankAccount) {
+              logger.warn(`Payout pending bank account`, { taskId, performerUid });
+            } else {
+              logger.warn(`Task completion payout failed`, {
+                taskId,
+                performerUid,
+                error: payoutResult.error,
+              });
+            }
           } else if (releaseResult.total === 0) {
             // No escrows found — fall back to direct payout (non-escrow flow)
             logger.info(`No escrows found, falling back to direct payout`, { taskId, performerUid });
@@ -2824,8 +2862,16 @@ export class TaskService {
     if (!isPerformer) {
       throw new ForbiddenError("Only assigned performer can request additional payment");
     }
-    if (!["assigned", "reached"].includes(String(task.status || ""))) {
-      throw new BadRequestError("Additional payment request is only allowed before the task is started");
+    if (String(task.status || "") !== "reached") {
+      throw new BadRequestError(
+        "Additional payment request is only allowed after you confirm arrival at the work location"
+      );
+    }
+    const arrivalProofUrl = String(
+      (task as any).locationProof?.selfieUrl || (task as any).reachedProof?.imageUrl || ""
+    ).trim();
+    if (!arrivalProofUrl) {
+      throw new BadRequestError("Arrival proof is required before requesting additional payment");
     }
 
     const amount = Number(payload?.amount || 0);
@@ -2841,6 +2887,9 @@ export class TaskService {
     }
     if (reason.length < 10) {
       throw new BadRequestError("Reason must be at least 10 characters");
+    }
+    if (reason.length > 2000) {
+      throw new BadRequestError("Reason must be at most 2000 characters");
     }
     if (normalizedProofImages.length < 1) {
       throw new BadRequestError("At least one proof image is required");
@@ -3399,6 +3448,15 @@ export class TaskService {
       ? await mongoose.connection.collection("profiles").findOne({ _id: task.assigneeId })
       : null;
     const performerUid = typeof performerProfile?.uid === "string" ? performerProfile.uid : "";
+    const requesterProfile = await mongoose.connection.collection("profiles").findOne({ _id: requesterProfileId });
+    const requesterPhone =
+      typeof requesterProfile?.phoneNumber === "string"
+        ? requesterProfile.phoneNumber
+        : typeof requesterProfile?.phone === "string"
+          ? requesterProfile.phone
+          : typeof requesterProfile?.mobile === "string"
+            ? requesterProfile.mobile
+            : "";
 
     // Ensure request is marked accepted (handles cache staleness from prior acceptAdditionalQuoteRequest call)
     if (request.status === "pending") {
@@ -3413,6 +3471,7 @@ export class TaskService {
     const escrowResult = await PaymentClient.createAdditionalEscrow({      taskId,
       requestId,
       posterUid: requesterUid,
+      posterPhone: requesterPhone,
       performerUid,
       amount: Number(request.amount),
       taskTitle: typeof task.title === "string" ? task.title : undefined,

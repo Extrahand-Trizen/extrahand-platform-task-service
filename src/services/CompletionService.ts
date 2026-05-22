@@ -361,7 +361,7 @@ export class CompletionService {
         ? ((task as any).additionalQuoteRequests as any[])
         : [];
       const additionalTotal = additionalRequests
-        .filter((r: any) => r?.status === "accepted")
+        .filter((r: any) => r?.status === "paid")
         .reduce((sum: number, r: any) => sum + Number(r?.amount || 0), 0);
       const totalPayoutAmount = taskAmount + additionalTotal;
 
@@ -399,7 +399,7 @@ export class CompletionService {
             await InAppNotificationClient.send({
               userId: task.assigneeId!.toString(),
               title: 'Amount credited',
-              body: `₹${payoutResult.payout?.netAmount || totalPayoutAmount} credited for "${task.title}".`,
+              body: `₹${payoutResult.payout?.netAmount ?? payoutResult.payout?.bankTransferAmount ?? '0'} credited to your bank for "${task.title}" (after platform fees on total payment).`,
               type: 'success',
               category: 'payments',
               data: {

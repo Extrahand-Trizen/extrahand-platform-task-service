@@ -385,6 +385,7 @@ export class PaymentClient {
     taskId: string;
     requestId: string;
     posterUid: string;
+    posterPhone?: string;
     performerUid: string;
     amount: number;
     taskTitle?: string;
@@ -404,9 +405,19 @@ export class PaymentClient {
           currency: "INR",
           metadata: {
             type: "additional_payment",
+            paymentKind: "additional",
+            paymentLabel: "Additional payment (helper request)",
             taskId: params.taskId,
             requestId: params.requestId,
             taskTitle: params.taskTitle,
+            posterPhone: params.posterPhone,
+            amountBreakdown: {
+              taskAmount: params.amount,
+              platformFee: 0,
+              gst: 0,
+              totalPaid: params.amount,
+              paymentKind: "additional",
+            },
           },
         },
         {

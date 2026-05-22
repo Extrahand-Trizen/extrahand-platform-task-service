@@ -18,6 +18,21 @@ const COMPRESSION_SUPPORTED_TYPES = new Set([
   'image/webp',
 ]);
 
+/** Max edge length — matches mobile picker (1920) to limit bandwidth. */
+const WEBP_MAX_EDGE = 1920;
+const WEBP_QUALITY = 85;
+
+function toWebpFilename(filename: string): string {
+  const base = String(filename || 'image')
+    .replace(/\.[^.]+$/, '')
+    .trim() || 'image';
+  return `${base}.webp`;
+}
+
+/**
+ * Normalize uploads to WebP for smaller storage/CDN transfer.
+ * Mobile clients may send JPEG/PNG from the camera; we convert server-side with sharp.
+ */
 async function compressImageIfSupported(
   fileBuffer: Buffer,
   filename: string,
@@ -30,36 +45,38 @@ async function compressImageIfSupported(
   }
 
   try {
-    let pipeline = sharp(fileBuffer, { failOn: 'none' }).rotate();
+    const originalSize = fileBuffer.length;
+    const webpBuffer = await sharp(fileBuffer, { failOn: 'none' })
+      .rotate()
+      .resize({
+        width: WEBP_MAX_EDGE,
+        height: WEBP_MAX_EDGE,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({ quality: WEBP_QUALITY, effort: 4 })
+      .toBuffer();
 
-    if (normalizedType === 'image/png') {
-      // Lossless PNG optimization (no quality/color reduction)
-      pipeline = pipeline.png({ compressionLevel: 9, palette: false, adaptiveFiltering: true });
-    } else if (normalizedType === 'image/webp') {
-      // Lossless WebP optimization
-      pipeline = pipeline.webp({ lossless: true, effort: 6 });
-    } else {
-      // JPEG cannot be strictly losslessly recompressed with sharp while preserving size optimally.
-      // Use max-quality settings and entropy optimization to keep visual quality intact.
-      pipeline = pipeline.jpeg({ quality: 100, mozjpeg: true, chromaSubsampling: '4:4:4' });
-    }
+    const webpFilename = toWebpFilename(filename);
 
-    const compressed = await pipeline.toBuffer();
-
-    if (compressed.length >= fileBuffer.length) {
-      return { buffer: fileBuffer, filename, mimetype };
-    }
-
-    logger.info('Image compressed before storage', {
-      filename,
-      originalSize: fileBuffer.length,
-      compressedSize: compressed.length,
-      reductionPercent: Number((((fileBuffer.length - compressed.length) / fileBuffer.length) * 100).toFixed(2)),
+    logger.info('Image converted to WebP for storage', {
+      originalFilename: filename,
+      webpFilename,
+      originalMimetype: mimetype,
+      originalSize,
+      webpSize: webpBuffer.length,
+      reductionPercent: Number(
+        (((originalSize - webpBuffer.length) / originalSize) * 100).toFixed(2),
+      ),
     });
 
-    return { buffer: compressed, filename, mimetype };
+    return {
+      buffer: webpBuffer,
+      filename: webpFilename,
+      mimetype: 'image/webp',
+    };
   } catch (error) {
-    logger.warn('Image compression skipped due to processing error', {
+    logger.warn('WebP conversion skipped due to processing error', {
       filename,
       mimetype,
       error: error instanceof Error ? error.message : 'unknown',

@@ -4,6 +4,57 @@ import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppErr
 import logger from '../config/logger';
 import { ReviewRatings } from '../types';
 import mongoose from 'mongoose';
+import { ProfileUtils } from '../utils/ProfileUtils';
+
+function readProfileDisplayName(profile: any): string {
+  if (!profile) return 'Anonymous';
+  const direct =
+    (typeof profile.name === 'string' && profile.name.trim()) ||
+    (typeof profile.fullName === 'string' && profile.fullName.trim()) ||
+    (typeof profile.displayName === 'string' && profile.displayName.trim()) ||
+    '';
+  if (direct) return direct;
+  const first = typeof profile.firstName === 'string' ? profile.firstName.trim() : '';
+  const last = typeof profile.lastName === 'string' ? profile.lastName.trim() : '';
+  const combined = `${first} ${last}`.trim();
+  return combined || 'Anonymous';
+}
+
+async function enrichReviewsWithReviewerProfiles(reviews: any[]): Promise<any[]> {
+  if (!Array.isArray(reviews) || reviews.length === 0) return [];
+
+  const reviewerIds = [
+    ...new Set(
+      reviews
+        .map((r) => r?.reviewerId)
+        .filter((id) => id != null)
+        .map((id) => String(id)),
+    ),
+  ];
+
+  const profileMap = await ProfileUtils.getBatchByIds(reviewerIds);
+
+  return reviews.map((review) => {
+    const reviewerProfileId = review?.reviewerId ? String(review.reviewerId) : '';
+    const profile = reviewerProfileId ? profileMap.get(reviewerProfileId) : null;
+    const reviewerName = readProfileDisplayName(profile);
+    const reviewerUid =
+      (typeof profile?.uid === 'string' && profile.uid.trim()) || reviewerProfileId;
+    const reviewerPhotoUrl =
+      (typeof profile?.photoURL === 'string' && profile.photoURL.trim()) ||
+      (typeof profile?.avatar === 'string' && profile.avatar.trim()) ||
+      null;
+
+    return {
+      ...review,
+      reviewerName,
+      reviewerUid,
+      reviewerPhotoUrl,
+      reviewerAvatar: reviewerPhotoUrl,
+      createdByName: reviewerName,
+    };
+  });
+}
 
 export class ReviewService {
   /**
@@ -122,7 +173,10 @@ export class ReviewService {
     }
 
     logger.info(`✅ Review created successfully: ${review._id} for task ${taskId}`);
-    return review;
+    const [enriched] = await enrichReviewsWithReviewerProfiles([
+      typeof (review as any).toObject === 'function' ? (review as any).toObject() : review,
+    ]);
+    return (enriched ?? review) as IReview;
   }
 
   /**
@@ -250,7 +304,8 @@ export class ReviewService {
       .limit(effectiveLimit)
       .lean() as unknown as IReview[];
 
-    return { reviews: reviews as unknown as IReview[] };
+    const enriched = await enrichReviewsWithReviewerProfiles(reviews as any[]);
+    return { reviews: enriched as unknown as IReview[] };
   }
 }
 
