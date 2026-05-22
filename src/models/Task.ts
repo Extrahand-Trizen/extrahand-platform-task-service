@@ -64,6 +64,8 @@ export interface ITask extends Document {
 
   pickDropDetails?: {
     itemType?: string;
+    itemDescription?: string;
+    itemWeight?: string;
     pickupAddress?: string;
     pickupLabel?: string;
     dropAddress?: string;
@@ -71,8 +73,8 @@ export interface ITask extends Document {
     receiverMobile?: string;
     useMyNumber?: boolean;
     specialInstructions?: string;
-    otpRequired?: boolean;
     estimatedItemValue?: number;
+    deliveryBudget?: number;
   };
 
   budget: {
@@ -301,6 +303,8 @@ const TaskSchema = new Schema<ITask>(
     pickDropDetails: {
       type: {
         itemType: String,
+        itemDescription: String,
+        itemWeight: String,
         pickupAddress: String,
         pickupLabel: String,
         dropAddress: String,
@@ -308,8 +312,8 @@ const TaskSchema = new Schema<ITask>(
         receiverMobile: String,
         useMyNumber: { type: Boolean, default: false },
         specialInstructions: String,
-        otpRequired: { type: Boolean, default: false },
         estimatedItemValue: Number,
+        deliveryBudget: Number,
       },
       default: undefined,
     },

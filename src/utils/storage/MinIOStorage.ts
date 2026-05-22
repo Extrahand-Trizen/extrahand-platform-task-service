@@ -230,16 +230,9 @@ export class MinIOStorage extends BaseStorage {
 
       await this.s3.upload(params).promise();
 
-      // Generate presigned read URL (valid for 1 year) for secure access
-      let url: string;
-      try {
-        url = await this.getPresignedReadUrl(key, 31536000); // 1 year expiry
-        logger.debug('Using presigned read URL for uploaded file');
-      } catch (presignedError) {
-        // Fallback to public URL if presigned fails
-        logger.warn('Could not generate presigned URL, using public URL:', (presignedError as Error).message);
-        url = this.getFileUrl(key);
-      }
+      // Use public URL directly — MinIO bucket is publicly accessible
+      // (Presigned read URLs with SigV4 are capped at 7 days which is impractical for stored images)
+      const url = this.getFileUrl(key);
 
       logger.info('File uploaded to MinIO', {
         key,

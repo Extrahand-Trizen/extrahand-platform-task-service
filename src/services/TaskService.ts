@@ -1019,6 +1019,8 @@ export class TaskService {
         const pd = taskData.pickDropDetails;
         taskPayload.pickDropDetails = {
           itemType: pd.itemType,
+          itemDescription: pd.itemDescription,
+          itemWeight: pd.itemWeight,
           pickupAddress: pd.pickupAddress,
           pickupLabel: pd.pickupLabel,
           dropAddress: pd.dropAddress,
@@ -1026,8 +1028,8 @@ export class TaskService {
           receiverMobile: pd.receiverMobile,
           useMyNumber: pd.useMyNumber ?? false,
           specialInstructions: pd.specialInstructions,
-          otpRequired: pd.otpRequired ?? false,
           estimatedItemValue: typeof pd.estimatedItemValue === 'number' ? pd.estimatedItemValue : parseFloat(pd.estimatedItemValue) || 0,
+          deliveryBudget: typeof pd.deliveryBudget === 'number' ? pd.deliveryBudget : parseFloat(pd.deliveryBudget) || 0,
         };
       }
     }
