@@ -12,6 +12,7 @@ import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { MainAdminNotificationClient } from "../clients/MainAdminNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
@@ -1075,6 +1076,15 @@ export class TaskService {
         : new mongoose.Types.ObjectId(task.requesterId);
 
       const requesterProfile = await Profile.findOne({ _id: requesterId });
+      MainAdminNotificationClient.send({
+        type: 'task_posted',
+        taskId: task._id.toString(),
+        taskTitle: task.title,
+        userId: requesterProfile?.uid,
+        userName: requesterProfile?.name || requesterProfile?.fullName,
+        userEmail: requesterProfile?.email,
+        occurredAt: new Date().toISOString(),
+      });
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;

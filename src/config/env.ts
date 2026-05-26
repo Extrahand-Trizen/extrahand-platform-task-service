@@ -53,6 +53,7 @@ const envSchema = z.object({
   PAYMENT_SERVICE_URL: z.string().url().default('http://localhost:4003'),
   EMAIL_SERVICE_URL: z.string().url().optional(),
   WEB_APP_URL: z.string().url().optional(),
+  MAIN_ADMIN_SERVICE_URL: z.string().url().default('http://localhost:4007'),
   
   // SMS Configuration
   FAST2SMS_API_KEY: z.string().optional(),
@@ -277,6 +278,10 @@ export class Config {
 
   static get EMAIL_SERVICE_URL(): string {
     return this.env.EMAIL_SERVICE_URL || 'http://localhost:4007';
+  }
+
+  static get MAIN_ADMIN_SERVICE_URL(): string {
+    return this.env.MAIN_ADMIN_SERVICE_URL || 'http://localhost:4007';
   }
 
   static get WEB_APP_URL(): string {
