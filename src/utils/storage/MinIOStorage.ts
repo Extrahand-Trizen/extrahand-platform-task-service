@@ -298,8 +298,10 @@ export class MinIOStorage extends BaseStorage {
 
   /**
    * Generate presigned URL for reading a file (GET)
+   * Kept for potential future use — public bucket policy is preferred over presigned read URLs
+   * since SigV4 presigned URLs are capped at 7 days.
    */
-  private async getPresignedReadUrl(key: string, expiresIn: number = 3600): Promise<string> {
+  public async getPresignedReadUrl(key: string, expiresIn: number = 3600): Promise<string> {
     try {
       if (!this.accessKeyId || !this.secretAccessKey) {
         throw new Error('MinIO credentials not configured');

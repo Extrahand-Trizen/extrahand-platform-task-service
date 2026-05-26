@@ -16,6 +16,8 @@ export interface StorageInterface {
 
   getFileUrl(key: string): string;
 
+  getPresignedReadUrl(key: string, expiresIn?: number): Promise<string>;
+
   getPresignedUploadUrl(key: string, contentType: string, expiresIn?: number): Promise<string>;
 
   healthCheck(): Promise<boolean>;
@@ -33,6 +35,8 @@ export abstract class BaseStorage implements StorageInterface {
   abstract deleteFile(key: string): Promise<boolean>;
 
   abstract getFileUrl(key: string): string;
+
+  abstract getPresignedReadUrl(key: string, expiresIn?: number): Promise<string>;
 
   abstract getPresignedUploadUrl(key: string, contentType: string, expiresIn?: number): Promise<string>;
 

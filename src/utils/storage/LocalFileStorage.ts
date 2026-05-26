@@ -122,6 +122,13 @@ export class LocalFileStorage extends BaseStorage {
   }
 
   /**
+   * Generate presigned read URL (not needed for local storage, returns public URL)
+   */
+  async getPresignedReadUrl(key: string, _expiresIn: number = 3600): Promise<string> {
+    return this.getFileUrl(key);
+  }
+
+  /**
    * Generate presigned URL (not needed for local storage, returns public URL)
    */
   async getPresignedUploadUrl(

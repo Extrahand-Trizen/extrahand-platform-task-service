@@ -121,6 +121,17 @@ export function getFileUrl(key: string): string {
 }
 
 /**
+ * Generate presigned URL for reading a file
+ */
+export async function getPresignedReadUrl(
+  key: string,
+  expiresIn: number = 3600
+): Promise<string> {
+  const storage = getStorage();
+  return await storage.getPresignedReadUrl(key, expiresIn);
+}
+
+/**
  * Generate presigned URL for direct upload
  */
 export async function getPresignedUploadUrl(
@@ -163,6 +174,10 @@ export class StorageManager {
 
   static async healthCheck(): Promise<boolean> {
     return await healthCheck();
+  }
+
+  static async getPresignedReadUrl(key: string, expiresIn?: number): Promise<string> {
+    return await getPresignedReadUrl(key, expiresIn);
   }
 }
 
