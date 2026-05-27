@@ -518,7 +518,7 @@ export class CompletionService {
 
         // In-app Notification
         await InAppNotificationClient.send({
-       userId: task.assigneeId!.toString(),
+          userId: String(assigneeProfile.uid),
           title: 'Changes requested on your submission',
           body: `${reason || 'Please revise and resubmit your work.'}`,
           type: 'warning',
@@ -528,6 +528,8 @@ export class CompletionService {
             status: 'started',
             action: 'resubmit_required',
             taskUrl: resubmitUrl,
+            eventKey: 'TASK_UPDATED',
+            entityType: 'task',
           },
         });
       }

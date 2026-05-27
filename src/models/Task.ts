@@ -66,6 +66,10 @@ export interface ITask extends Document {
     itemType?: string;
     itemDescription?: string;
     itemWeight?: string;
+    packageType?: string;
+    packageContents?: string[];
+    packageTypeOther?: string;
+    packageContentsOther?: string;
     pickupAddress?: string;
     pickupLabel?: string;
     dropAddress?: string;
@@ -75,6 +79,7 @@ export interface ITask extends Document {
     specialInstructions?: string;
     estimatedItemValue?: number;
     deliveryBudget?: number;
+    packagePhotoUrl?: string;
   };
 
   budget: {
@@ -305,6 +310,10 @@ const TaskSchema = new Schema<ITask>(
         itemType: String,
         itemDescription: String,
         itemWeight: String,
+        packageType: String,
+        packageContents: [String],
+        packageTypeOther: String,
+        packageContentsOther: String,
         pickupAddress: String,
         pickupLabel: String,
         dropAddress: String,
@@ -314,6 +323,7 @@ const TaskSchema = new Schema<ITask>(
         specialInstructions: String,
         estimatedItemValue: Number,
         deliveryBudget: Number,
+        packagePhotoUrl: String,
       },
       default: undefined,
     },

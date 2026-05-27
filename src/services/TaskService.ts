@@ -12,7 +12,6 @@ import { NotificationClient } from "./NotificationClient";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
-import { MainAdminNotificationClient } from "../clients/MainAdminNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
@@ -1022,6 +1021,10 @@ export class TaskService {
           itemType: pd.itemType,
           itemDescription: pd.itemDescription,
           itemWeight: pd.itemWeight,
+          packageType: pd.packageType,
+          packageContents: Array.isArray(pd.packageContents) ? pd.packageContents : undefined,
+          packageTypeOther: pd.packageTypeOther || undefined,
+          packageContentsOther: pd.packageContentsOther || undefined,
           pickupAddress: pd.pickupAddress,
           pickupLabel: pd.pickupLabel,
           dropAddress: pd.dropAddress,
@@ -1031,6 +1034,7 @@ export class TaskService {
           specialInstructions: pd.specialInstructions,
           estimatedItemValue: typeof pd.estimatedItemValue === 'number' ? pd.estimatedItemValue : parseFloat(pd.estimatedItemValue) || 0,
           deliveryBudget: typeof pd.deliveryBudget === 'number' ? pd.deliveryBudget : parseFloat(pd.deliveryBudget) || 0,
+          packagePhotoUrl: pd.packagePhotoUrl || undefined,
         };
       }
     }
@@ -1076,16 +1080,6 @@ export class TaskService {
         : new mongoose.Types.ObjectId(task.requesterId);
 
       const requesterProfile = await Profile.findOne({ _id: requesterId });
-      MainAdminNotificationClient.send({
-        type: 'task_posted',
-        taskId: task._id.toString(),
-        taskTitle: task.title,
-        userId: requesterProfile?.uid,
-        userName: requesterProfile?.name || requesterProfile?.fullName,
-        userEmail: requesterProfile?.email,
-        userPhone: requesterProfile?.phone,
-        occurredAt: new Date().toISOString(),
-      });
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
@@ -1766,12 +1760,24 @@ export class TaskService {
 
     if (statusChanged || scheduledDateChanged || assigneeChanged) {
       // STEP 3: Emit TASK_UPDATED notification
-      // Recipients: Task requester + assignee (if assigned)
-      // Note: recipients need to be UIDs, not ObjectIds - will need to populate Profile
-      const recipients: string[] = [updatedTask.requesterId.toString()]; // Temporary - will need UID
-      if (updatedTask.assigneeId) {
-        recipients.push(updatedTask.assigneeId.toString()); // Temporary - will need UID
-      }
+      // Resolve Firebase UIDs upfront so both push and in-app use correct IDs.
+      const Profile = mongoose.connection.collection('profiles');
+      const requesterProfileForNotif = await Profile.findOne({ _id: updatedTask.requesterId });
+      const assigneeProfileForNotif = updatedTask.assigneeId
+        ? await Profile.findOne({ _id: updatedTask.assigneeId })
+        : null;
+
+      const posterUidForNotif = requesterProfileForNotif?.uid
+        ? String(requesterProfileForNotif.uid)
+        : null;
+      const taskerUidForNotif = assigneeProfileForNotif?.uid
+        ? String(assigneeProfileForNotif.uid)
+        : null;
+
+      // Firebase UIDs only — ObjectIds are not valid notification recipients.
+      const uidRecipients: string[] = [];
+      if (posterUidForNotif) uidRecipients.push(posterUidForNotif);
+      if (taskerUidForNotif) uidRecipients.push(taskerUidForNotif);
 
       try {
         // Determine what changed for the notification body
@@ -1780,26 +1786,108 @@ export class TaskService {
         if (scheduledDateChanged) changeDetails += `Scheduled date has been changed. `;
         if (assigneeChanged) changeDetails += `Assignment has been updated. `;
 
-        await NotificationClient.send(
-          {
+        // Push only actionable updates; keep everything else in in-app history.
+        const actionableStatuses = new Set([
+          'assigned',
+          'started',
+          'in_progress',
+          'review',
+          'completed',
+          'cancelled',
+          'canceled',
+        ]);
+        const nextStatus = String(updatedTask.status || '').toLowerCase();
+        const isActionable =
+          (statusChanged && actionableStatuses.has(nextStatus)) ||
+          scheduledDateChanged ||
+          assigneeChanged;
+
+        if (isActionable && uidRecipients.length > 0) {
+          await NotificationClient.send({
             eventKey: 'TASK_UPDATED',
             category: 'taskUpdates',
-            actorId: profileId.toString(), // Temporary - will need UID lookup
-            recipients,
+            actorId: posterUidForNotif ?? profileId.toString(),
+            recipients: uidRecipients,
             entity: { type: 'task', id: taskId },
-            title: `Task Updated: ${updatedTask.title}`,
-            body: changeDetails || 'This task has been updated.',
+            title: `Work Updated: ${updatedTask.title}`,
+            body: changeDetails || 'This work has been updated.',
             data: {
               taskId,
               status: updatedTask.status,
-              scheduledDate: updatedTask.scheduledDate?.toISOString()
-            }
-          }
-        );
+              scheduledDate: updatedTask.scheduledDate?.toISOString(),
+              entityType: 'task',
+              eventKey: 'TASK_UPDATED',
+            },
+          });
+        } else if (!isActionable) {
+          logger.info('Skipping TASK_UPDATED push (non-actionable update)', {
+            taskId,
+            status: updatedTask.status,
+            statusChanged,
+            scheduledDateChanged,
+            assigneeChanged,
+          });
+        }
       } catch (error) {
         logger.error('Error sending TASK_UPDATED notification', {
           taskId,
           error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+
+      // Always record update in in-app notification history (poster + tasker)
+      // Uses Firebase UIDs (not ObjectIds) so the notification service can find the user.
+      try {
+        const Profile = mongoose.connection.collection('profiles');
+        const requesterProfile = await Profile.findOne({ _id: updatedTask.requesterId });
+        const assigneeProfile = updatedTask.assigneeId
+          ? await Profile.findOne({ _id: updatedTask.assigneeId })
+          : null;
+
+        const uidRecipients: Array<{ uid: string; isTasker: boolean }> = [];
+        if (requesterProfile?.uid) {
+          uidRecipients.push({ uid: String(requesterProfile.uid), isTasker: false });
+        }
+        if (assigneeProfile?.uid) {
+          uidRecipients.push({ uid: String(assigneeProfile.uid), isTasker: true });
+        }
+
+        for (const { uid, isTasker } of uidRecipients) {
+          let title = `Work updated: ${updatedTask.title}`;
+          let body = changeDetails || 'This work has been updated.';
+
+          if (isTasker) {
+            if (scheduledDateChanged) {
+              title = 'Schedule changed';
+              body = `The schedule for "${updatedTask.title}" has been updated. Please check the new date.`;
+            } else if (statusChanged) {
+              title = 'Work status updated';
+              body = `"${updatedTask.title}" status changed to ${updatedTask.status}.`;
+            } else if (assigneeChanged) {
+              title = 'Assignment updated';
+              body = `Your assignment for "${updatedTask.title}" has been updated.`;
+            }
+          }
+
+          await InAppNotificationClient.send({
+            userId: uid,
+            title,
+            body,
+            category: 'taskUpdates',
+            type: 'info',
+            data: {
+              taskId,
+              status: updatedTask.status,
+              scheduledDate: updatedTask.scheduledDate?.toISOString(),
+              entityType: 'task',
+              eventKey: 'TASK_UPDATED',
+            },
+          });
+        }
+      } catch (inAppErr) {
+        logger.warn('Error sending TASK_UPDATED in-app notification', {
+          taskId,
+          error: inAppErr instanceof Error ? inAppErr.message : 'Unknown error',
         });
       }
 
@@ -2116,6 +2204,152 @@ export class TaskService {
 
     // Emit real-time status update
     emitTaskStatusChanged(taskId, updatedTask);
+
+    // ── Push + in-app notifications for progress status changes ─────────────
+    // Notify the poster whenever the tasker moves the task forward.
+    // Runs non-blocking so it never delays the HTTP response.
+    const PROGRESS_STATUSES = new Set(['started', 'in_progress', 'review']);
+    if (PROGRESS_STATUSES.has(status) && isPerformer) {
+      setImmediate(async () => {
+        try {
+          const Profile = mongoose.connection.collection('profiles');
+          const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+          const posterUid =
+            requesterProfile &&
+            typeof requesterProfile === 'object' &&
+            'uid' in requesterProfile
+              ? String((requesterProfile as any).uid || '')
+              : '';
+
+          if (!posterUid) {
+            logger.warn('[TaskService] Progress notification: could not resolve poster UID', { taskId, status });
+            return;
+          }
+
+          const assigneeProfile = task.assigneeId
+            ? await Profile.findOne({ _id: task.assigneeId })
+            : null;
+          const taskerName: string =
+            (assigneeProfile as any)?.name ||
+            (assigneeProfile as any)?.fullName ||
+            'Your helper';
+
+          const statusLabels: Record<string, { title: string; body: string }> = {
+            started: {
+              title: 'Work has started',
+              body: `${taskerName} has started working on "${task.title}".`,
+            },
+            in_progress: {
+              title: 'Work is in progress',
+              body: `${taskerName} has marked "${task.title}" as in progress.`,
+            },
+            review: {
+              title: 'Work submitted for review',
+              body: `${taskerName} has submitted "${task.title}" for your review. Please check and approve.`,
+            },
+          };
+
+          const { title, body } = statusLabels[status] ?? {
+            title: 'Task update',
+            body: `The status of "${task.title}" has been updated to ${status}.`,
+          };
+
+          const notificationData = {
+            taskId,
+            status,
+            eventKey: 'TASK_UPDATED',
+            entityType: 'task',
+          };
+
+          // Push notification (FCM)
+          await NotificationClient.send({
+            eventKey: 'TASK_UPDATED',
+            category: 'taskUpdates',
+            actorId: String(profileId),
+            recipients: [posterUid],
+            entity: { type: 'task', id: taskId },
+            title,
+            body,
+            data: notificationData,
+          });
+
+          // In-app notification (polling / notification centre)
+          await InAppNotificationClient.send({
+            userId: posterUid,
+            title,
+            body,
+            type: status === 'review' ? 'success' : 'info',
+            category: 'taskUpdates',
+            data: notificationData,
+          });
+
+          logger.info('[TaskService] Progress notification sent to poster', {
+            taskId,
+            status,
+            posterUid,
+          });
+        } catch (err) {
+          logger.warn('[TaskService] Failed to send progress notification to poster', {
+            taskId,
+            status,
+            error: err instanceof Error ? err.message : err,
+          });
+        }
+      });
+    }
+
+    // ── Push + in-app notifications to tasker for poster-triggered status changes ──
+    // When the poster marks the task completed, notify the tasker immediately.
+    if (status === 'completed' && isCreator && task.assigneeId) {
+      setImmediate(async () => {
+        try {
+          const Profile = mongoose.connection.collection('profiles');
+          const assigneeProfile = await Profile.findOne({ _id: task.assigneeId });
+          const taskerUid = assigneeProfile?.uid ? String(assigneeProfile.uid) : '';
+
+          if (!taskerUid) {
+            logger.warn('[TaskService] Completed notification: could not resolve tasker UID', { taskId });
+            return;
+          }
+
+          const notifData = {
+            taskId,
+            status: 'completed',
+            eventKey: 'TASK_UPDATED',
+            entityType: 'task',
+          };
+
+          // Push notification
+          await NotificationClient.send({
+            eventKey: 'TASK_UPDATED',
+            category: 'taskUpdates',
+            actorId: String(profileId),
+            recipients: [taskerUid],
+            entity: { type: 'task', id: taskId },
+            title: 'Work approved',
+            body: `The poster has approved your work on "${task.title}". Payment will be processed shortly.`,
+            data: notifData,
+          });
+
+          // In-app notification
+          await InAppNotificationClient.send({
+            userId: taskerUid,
+            title: 'Work approved',
+            body: `The poster has approved your work on "${task.title}". Payment will be processed shortly.`,
+            type: 'success',
+            category: 'taskUpdates',
+            data: notifData,
+          });
+
+          logger.info('[TaskService] Completion notification sent to tasker', { taskId, taskerUid });
+        } catch (err) {
+          logger.warn('[TaskService] Failed to send completion notification to tasker', {
+            taskId,
+            error: err instanceof Error ? err.message : err,
+          });
+        }
+      });
+    }
 
     // Email: task cancelled → notify the other party
     if (status === "cancelled") {
@@ -2731,23 +2965,55 @@ export class TaskService {
           );
         }
 
-        // Send in-app notification
-        await InAppNotificationClient.send({
-          userId: task.assigneeId.toString(),
-          title: 'Changes Requested',
-          body: `${requesterProfile?.name || 'The task requester'} has requested changes on: ${task.title}`,
-          type: 'info',
-          category: 'taskUpdates',
-          data: {
+        // Send in-app + push notification to tasker using Firebase UID
+        if (assigneeProfile?.uid) {
+          const taskerUid = String(assigneeProfile.uid);
+          const posterName = requesterProfile?.name || requesterProfile?.fullName || 'The poster';
+          const notifData = {
             taskId,
             changeMessage: message,
-          },
-        }).catch((err: Error) =>
-          logger.error("Error sending in-app notification for changes_requested", {
+            status: 'started',
+            eventKey: 'TASK_UPDATED',
+            entityType: 'task',
+          };
+
+          // Push notification (FCM — works when app is closed)
+          await NotificationClient.send({
+            eventKey: 'TASK_UPDATED',
+            category: 'taskUpdates',
+            actorId: profileId.toString(),
+            recipients: [taskerUid],
+            entity: { type: 'task', id: taskId },
+            title: 'Revision requested',
+            body: `${posterName} has requested changes on "${task.title}". Please review and resubmit.`,
+            data: notifData,
+          }).catch((err: Error) =>
+            logger.error('Error sending push notification for changes_requested', {
+              taskId,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
+
+          // In-app notification
+          await InAppNotificationClient.send({
+            userId: taskerUid,
+            title: 'Revision requested',
+            body: `${posterName} has requested changes on "${task.title}". Please review and resubmit.`,
+            type: 'warning',
+            category: 'taskUpdates',
+            data: notifData,
+          }).catch((err: Error) =>
+            logger.error('Error sending in-app notification for changes_requested', {
+              taskId,
+              error: err instanceof Error ? err.message : 'Unknown error',
+            })
+          );
+        } else {
+          logger.warn('[TaskService.requestChanges] Could not resolve tasker Firebase UID for notification', {
             taskId,
-            error: err instanceof Error ? err.message : "Unknown error",
-          })
-        );
+            assigneeId: task.assigneeId?.toString(),
+          });
+        }
       } catch (error) {
         logger.error("Error notifying assignee about change request", {
           taskId,
