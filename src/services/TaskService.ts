@@ -1083,6 +1083,7 @@ export class TaskService {
         userId: requesterProfile?.uid,
         userName: requesterProfile?.name || requesterProfile?.fullName,
         userEmail: requesterProfile?.email,
+        userPhone: requesterProfile?.phone,
         occurredAt: new Date().toISOString(),
       });
       if (requesterProfile?.email) {

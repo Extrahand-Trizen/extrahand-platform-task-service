@@ -7,6 +7,7 @@ export type MainAdminNotificationEvent = {
   userId?: string;
   userName?: string;
   userEmail?: string;
+  userPhone?: string;
   taskId?: string;
   taskTitle?: string;
   occurredAt?: string;
