@@ -151,4 +151,38 @@ export class UserServiceClient {
       });
     }
   }
+
+  /**
+   * Forward domain events to user-service rewards qualification engine.
+   */
+  static async processRewardEvent(params: {
+    eventType: string;
+    payload: Record<string, unknown>;
+    correlationId?: string;
+  }): Promise<void> {
+    if (!this.isInitialized) {
+      this.initialize();
+    }
+    if (!this.serviceAuthToken) return;
+
+    try {
+      await axios.post(
+        `${this.baseURL}/api/v1/user/internal/rewards/process-event`,
+        params,
+        {
+          headers: {
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+            'Content-Type': 'application/json',
+          },
+          timeout: 10_000,
+        }
+      );
+    } catch (error) {
+      logger.warn('UserServiceClient: processRewardEvent failed (non-critical)', {
+        eventType: params.eventType,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
 }

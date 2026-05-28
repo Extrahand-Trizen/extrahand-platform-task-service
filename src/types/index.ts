@@ -30,7 +30,11 @@ export type BudgetType = 'fixed' | 'hourly' | 'negotiable';
 export type Urgency = 'low' | 'medium' | 'high' | 'urgent';
 export type Priority = 'low' | 'normal' | 'high';
 export type Flexibility = 'strict' | 'flexible' | 'anytime';
-export type CompletionStatus = 'pending_approval' | 'approved' | 'rejected';
+export type CompletionStatus =
+  | 'pending_approval'
+  | 'approved'
+  | 'rejected'
+  | 'revision_requested';
 
 // Application types
 export type ApplicationStatus = 'pending' | 'accepted' | 'rejected' | 'withdrawn';

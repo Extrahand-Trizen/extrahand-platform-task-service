@@ -19,6 +19,7 @@ import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
 import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 import { getMeaningfulTextError } from '../utils/textValidation';
+import { isActiveEscrow } from '../utils/taskCommitment';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -1987,6 +1988,16 @@ export class TaskService {
       throw new BadRequestError("Task can only be cancelled before it is started");
     }
 
+    // Performer cannot cancel after payment is held (poster cancel on assigned still refunds).
+    if (status === "cancelled" && isPerformer && !isCreator) {
+      const escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
+      if (isActiveEscrow(escrowForCancel)) {
+        throw new BadRequestError(
+          "Cannot cancel after payment is held. Contact support if you need help."
+        );
+      }
+    }
+
     let cancellationPaymentResult:
       | { success: boolean; cancelled?: boolean; refundRequired?: boolean; refund?: unknown; error?: string }
       | null = null;
@@ -2320,60 +2331,23 @@ export class TaskService {
         });
       }
 
-      // Trigger direct payout workflow (same behavior as CompletionService.approveCompletion)
+      // Payout is now helper-requested from app (not auto-processed here).
       try {
-        const Profile = mongoose.connection.collection("profiles");
-        const assigneeProfile = task.assigneeId
-          ? await Profile.findOne({ _id: task.assigneeId })
-          : null;
-
-        const performerUid = assigneeProfile?.uid;
-        const taskAmount = task.budget?.amount || 0;
-
-        if (performerUid && taskAmount > 0) {
-          logger.info(`🔔 Triggering task completion payout from updateTaskStatus`, {
-            taskId,
-            performerUid,
-            taskAmount,
-            statusTransition: `${task.status} -> ${status}`,
-          });
-
-          const payoutResult = await PaymentClient.processTaskCompletionPayout({
-            taskId,
-            performerUid,
-            amount: taskAmount,
-            taskTitle: task.title,
-          });
-
-          if (payoutResult.success) {
-            logger.info(`✅ Task completion payout processed from updateTaskStatus`, {
+        if (task.assigneeId) {
+          await InAppNotificationClient.send({
+            userId: task.assigneeId.toString(),
+            title: "Request your payout",
+            body: `Task completed. Open task tracking and request payout for \"${task.title}\".`,
+            type: "info",
+            category: "payments",
+            data: {
               taskId,
-              performerUid,
-              payoutId: payoutResult.payout?.payoutId,
-              netAmount: payoutResult.payout?.netAmount,
-            });
-          } else if (payoutResult.requiresBankAccount) {
-            logger.warn(`Payout pending bank account from updateTaskStatus`, {
-              taskId,
-              performerUid,
-              error: payoutResult.error,
-            });
-          } else {
-            logger.warn(`Task payout failed from updateTaskStatus`, {
-              taskId,
-              performerUid,
-              error: payoutResult.error,
-            });
-          }
-        } else {
-          logger.warn(`Payout skipped from updateTaskStatus: performer UID or task amount missing`, {
-            taskId,
-            hasPerformerUid: Boolean(performerUid),
-            taskAmount,
+              actionUrl: "/profile?section=payments",
+            },
           });
         }
       } catch (paymentError) {
-        logger.error(`Error processing payout from updateTaskStatus for task ${taskId}:`, paymentError);
+        logger.error(`Error sending payout-request notification from updateTaskStatus for task ${taskId}:`, paymentError);
       }
     }
 
@@ -2673,7 +2647,7 @@ export class TaskService {
       throw new BadRequestError('Can only request changes when task is in review status');
     }
 
-    // Add feedback to task and revert status to "started" for quick revise/resubmit flow.
+    // Move to in_progress + revision_requested so performer can resubmit but cannot withdraw.
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
@@ -2684,8 +2658,10 @@ export class TaskService {
             createdAt: new Date(),
           }
         },
-        status: 'started',
-        startOtp: undefined,
+        status: 'in_progress',
+        completionStatus: 'revision_requested',
+        completionRejectedReason: message.trim(),
+        completionRejectedAt: new Date(),
         updatedAt: new Date(),
       },
       { new: true, runValidators: true }

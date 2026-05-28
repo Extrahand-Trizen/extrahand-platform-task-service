@@ -153,7 +153,11 @@ export interface ITask extends Document {
     uploadedAt?: Date;
     uploadedBy?: string;
   }>;
-  completionStatus?: "pending_approval" | "approved" | "rejected";
+  completionStatus?:
+    | "pending_approval"
+    | "approved"
+    | "rejected"
+    | "revision_requested";
   completionNotes?: string;
   completionRejectedReason?: string;
   completionApprovedAt?: Date;
@@ -454,7 +458,7 @@ const TaskSchema = new Schema<ITask>(
     }],
     completionStatus: {
       type: String,
-      enum: ["pending_approval", "approved", "rejected"],
+      enum: ["pending_approval", "approved", "rejected", "revision_requested"],
       index: true,
     },
     completionNotes: String,

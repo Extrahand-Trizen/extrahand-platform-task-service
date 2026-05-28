@@ -14,6 +14,8 @@ import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { PaymentClient } from "./PaymentClient";
+import { canWithdrawAcceptedApplication } from "../utils/taskCommitment";
 
 export class ApplicationService {
   /**
@@ -1394,6 +1396,33 @@ export class ApplicationService {
       throw new BadRequestError("Only accepted applications can be withdrawn");
     }
 
+    const task = await Task.findById(application.taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    let escrow: { status?: string } | null = null;
+    try {
+      escrow = await PaymentClient.getEscrowByTaskId(application.taskId.toString());
+    } catch (err) {
+      logger.error("Failed to check escrow before withdraw", {
+        taskId: application.taskId.toString(),
+        applicationId,
+        error: err instanceof Error ? err.message : "Unknown error",
+      });
+      throw new BadRequestError(
+        "Unable to verify payment status. Withdraw is blocked until payment state is confirmed."
+      );
+    }
+
+    const withdrawCheck = canWithdrawAcceptedApplication(task.status, escrow);
+    if (!withdrawCheck.allowed) {
+      throw new BadRequestError(
+        withdrawCheck.reason ||
+          "Cannot withdraw from this task after payment or work has started"
+      );
+    }
+
     // 1️⃣ Mark application withdrawn using findByIdAndUpdate to avoid validation issues
     await TaskApplication.findByIdAndUpdate(
       applicationId,
@@ -1415,10 +1444,9 @@ export class ApplicationService {
       }
     );
 
-    logger.warn(`Accepted application withdrawn: ${applicationId}`);
-
-    // 3️⃣ (Optional but recommended)
-    // Cancel escrow, notify poster, etc.
-    // These should be NON-BLOCKING
+    logger.warn(`Accepted application withdrawn: ${applicationId}`, {
+      taskId: application.taskId.toString(),
+      previousTaskStatus: task.status,
+    });
   }
 }
