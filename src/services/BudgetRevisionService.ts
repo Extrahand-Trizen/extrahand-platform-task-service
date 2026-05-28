@@ -318,7 +318,7 @@ export class BudgetRevisionService {
         await NotificationClient.send({
           eventKey: "BUDGET_REVISION_RESPONSE",
           category: "taskUpdates",
-          actorId: actorUid,
+          actorId: actorProfileId.toString(),
           recipients: [posterUid],
           entity: { type: "application", id: applicationId },
           title: "Offer updated after budget change",

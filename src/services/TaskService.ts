@@ -1780,12 +1780,13 @@ export class TaskService {
       if (posterUidForNotif) uidRecipients.push(posterUidForNotif);
       if (taskerUidForNotif) uidRecipients.push(taskerUidForNotif);
 
+      // Determine what changed for notification bodies
+      let changeDetails = '';
+      if (statusChanged) changeDetails += `Status updated to ${updatedTask.status}. `;
+      if (scheduledDateChanged) changeDetails += `Scheduled date has been changed. `;
+      if (assigneeChanged) changeDetails += `Assignment has been updated. `;
+
       try {
-        // Determine what changed for the notification body
-        let changeDetails = '';
-        if (statusChanged) changeDetails += `Status updated to ${updatedTask.status}. `;
-        if (scheduledDateChanged) changeDetails += `Scheduled date has been changed. `;
-        if (assigneeChanged) changeDetails += `Assignment has been updated. `;
 
         // Push only actionable updates; keep everything else in in-app history.
         const actionableStatuses = new Set([
@@ -2312,10 +2313,12 @@ export class TaskService {
     // ── Push + in-app notifications to tasker for poster-triggered status changes ──
     // When the poster marks the task completed, notify the tasker immediately.
     if (status === 'completed' && isCreator && task.assigneeId) {
+      const assigneeId = task.assigneeId;
       setImmediate(async () => {
         try {
+          if (!assigneeId) return;
           const Profile = mongoose.connection.collection('profiles');
-          const assigneeProfile = await Profile.findOne({ _id: task.assigneeId });
+          const assigneeProfile = await Profile.findOne({ _id: assigneeId });
           const taskerUid = assigneeProfile?.uid ? String(assigneeProfile.uid) : '';
 
           if (!taskerUid) {
