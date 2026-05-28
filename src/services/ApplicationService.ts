@@ -957,6 +957,28 @@ export class ApplicationService {
             error: error instanceof Error ? error.message : 'Unknown error'
           });
         }
+
+        // 📬 In-app notification history for applicant (tasker/helper)
+        try {
+          await InAppNotificationClient.send({
+            userId: applicantUid,
+            title: 'Offer rejected',
+            body: `Your offer for "${task.title}" was not selected this time. Keep applying!`,
+            category: 'taskUpdates',
+            type: 'warning',
+            data: {
+              taskId: task._id.toString(),
+              applicationId,
+              status: 'rejected',
+            },
+          });
+        } catch (inAppErr) {
+          logger.warn('Error sending APPLICATION_REJECTED in-app notification', {
+            applicationId,
+            taskId: task._id,
+            error: inAppErr instanceof Error ? inAppErr.message : 'Unknown error',
+          });
+        }
         // Email: application rejected → applicant
         if (applicantProfile?.email) {
           EmailServiceClient.sendApplicationRejected(applicantProfile.email, {
@@ -1240,64 +1262,112 @@ export class ApplicationService {
       applicationStatus: application.status,
     });
 
-    // Polling in-app notification for negotiation updates (price counter / accept / reject)
-    try {
-      const Profile = mongoose.connection.collection("profiles");
-      const posterProfile = await Profile.findOne({ _id: task.requesterId });
-      const posterUid =
-        posterProfile && typeof posterProfile === "object" && "uid" in posterProfile
-          ? (posterProfile as { uid?: unknown }).uid
-          : undefined;
+    // Push + in-app notification for negotiation updates (counter / accept / reject)
+    setImmediate(async () => {
+      try {
+        const Profile = mongoose.connection.collection("profiles");
+        const posterProfile = await Profile.findOne({ _id: task.requesterId });
+        const posterUid =
+          posterProfile && typeof posterProfile === "object" && "uid" in posterProfile
+            ? (posterProfile as { uid?: unknown }).uid
+            : undefined;
 
-      const counterpartyUid =
-        actorRole === "poster"
-          ? application.applicantUid
-          : typeof posterUid === "string"
-          ? posterUid
-          : undefined;
+        const counterpartyUid =
+          actorRole === "poster"
+            ? application.applicantUid
+            : typeof posterUid === "string"
+            ? posterUid
+            : undefined;
 
-      if (counterpartyUid) {
-        const amount = application.negotiation.currentAmount;
-        let title = "Offer update";
-        let body = `Offer updated for "${task.title}".`;
-        let type: "info" | "warning" | "error" | "success" = "info";
-
-        if (action === "counter") {
-          title = "Offer updated";
-          body = `A new counter offer of Rs ${amount} was proposed for "${task.title}".`;
-          type = "info";
-        } else if (action === "accept") {
-          title = "Offer accepted";
-          body = `Your negotiated offer for "${task.title}" was accepted at Rs ${amount}.`;
-          type = "success";
-        } else if (action === "reject") {
-          title = "Offer rejected";
-          body = `The negotiated offer for "${task.title}" was rejected.`;
-          type = "warning";
+        if (!counterpartyUid) {
+          logger.warn("[negotiateApplication] Could not resolve counterparty UID for notification", {
+            applicationId,
+            actorRole,
+          });
+          return;
         }
 
+        const amount = application.negotiation!.currentAmount;
+        const taskTitle = task.title || "a task";
+        const taskIdStr = task._id.toString();
+        const appIdStr = application._id.toString();
+
+        let eventKey: string;
+        let pushTitle: string;
+        let pushBody: string;
+        let inAppTitle: string;
+        let inAppBody: string;
+        let inAppType: "info" | "warning" | "error" | "success" = "info";
+
+        if (action === "counter") {
+          eventKey = "NEGOTIATION_COUNTER";
+          if (actorRole === "tasker") {
+            pushTitle = "Counter offer received";
+            pushBody = `A helper proposed ₹${amount.toLocaleString("en-IN")} for "${taskTitle}". Tap to review.`;
+            inAppTitle = "Counter offer received";
+            inAppBody = `A helper proposed ₹${amount.toLocaleString("en-IN")} for "${taskTitle}".`;
+          } else {
+            pushTitle = "Counter offer from poster";
+            pushBody = `The poster proposed ₹${amount.toLocaleString("en-IN")} for "${taskTitle}". Tap to respond.`;
+            inAppTitle = "Counter offer from poster";
+            inAppBody = `The poster proposed ₹${amount.toLocaleString("en-IN")} for "${taskTitle}".`;
+          }
+        } else if (action === "accept") {
+          eventKey = "NEGOTIATION_ACCEPTED";
+          pushTitle = "Offer accepted";
+          pushBody = `Your negotiated offer of ₹${amount.toLocaleString("en-IN")} for "${taskTitle}" was accepted.`;
+          inAppTitle = "Offer accepted";
+          inAppBody = pushBody;
+          inAppType = "success";
+        } else {
+          // reject
+          eventKey = "NEGOTIATION_REJECTED";
+          pushTitle = "Offer rejected";
+          pushBody = `The negotiated offer for "${taskTitle}" was rejected.`;
+          inAppTitle = "Offer rejected";
+          inAppBody = pushBody;
+          inAppType = "warning";
+        }
+
+        const notificationData = {
+          taskId: taskIdStr,
+          applicationId: appIdStr,
+          negotiationAction: action,
+          negotiationStatus: application.negotiation!.status,
+          amount,
+          eventKey,
+          entityType: "application",
+        };
+
+        // Push notification (FCM via notification service)
+        await NotificationClient.send({
+          eventKey,
+          category: "taskUpdates",
+          actorId: actorUid,
+          recipients: [counterpartyUid],
+          entity: { type: "application", id: appIdStr },
+          title: pushTitle,
+          body: pushBody,
+          data: notificationData,
+        });
+
+        // In-app notification (polling)
         await InAppNotificationClient.send({
           userId: counterpartyUid,
-          title,
-          body,
+          title: inAppTitle,
+          body: inAppBody,
           category: "taskUpdates",
-          type,
-          data: {
-            taskId: task._id.toString(),
-            applicationId: application._id.toString(),
-            negotiationAction: action,
-            negotiationStatus: application.negotiation.status,
-            amount,
-          },
+          type: inAppType,
+          data: notificationData,
+        });
+      } catch (notificationError) {
+        logger.warn("[negotiateApplication] Failed to send negotiation notification", {
+          applicationId,
+          action,
+          error: notificationError instanceof Error ? notificationError.message : "Unknown error",
         });
       }
-    } catch (notificationError) {
-      logger.warn("Failed to send in-app negotiation update notification", {
-        applicationId,
-        action,
-        error: notificationError instanceof Error ? notificationError.message : "Unknown error",
-      });
-    }
+    });
 
     return application;
   }

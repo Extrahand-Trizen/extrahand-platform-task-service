@@ -145,6 +145,31 @@ export class S3Storage extends BaseStorage {
   }
 
   /**
+   * Generate presigned URL for reading a file
+   */
+  async getPresignedReadUrl(key: string, expiresIn: number = 3600): Promise<string> {
+    try {
+      if (!this.accessKeyId || !this.secretAccessKey) {
+        throw new Error('AWS S3 credentials not configured');
+      }
+
+      const params = {
+        Bucket: this.bucketName,
+        Key: key,
+        Expires: expiresIn,
+      };
+
+      return await this.s3.getSignedUrlPromise('getObject', params);
+    } catch (error: any) {
+      logger.error('Error generating presigned read URL:', {
+        error: error.message,
+        key,
+      });
+      throw new Error(`Failed to generate presigned read URL: ${error.message}`);
+    }
+  }
+
+  /**
    * Generate presigned URL for direct upload
    */
   async getPresignedUploadUrl(key: string, contentType: string, expiresIn: number = 3600): Promise<string> {

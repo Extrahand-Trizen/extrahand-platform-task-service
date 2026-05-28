@@ -297,6 +297,34 @@ export class MinIOStorage extends BaseStorage {
   }
 
   /**
+   * Generate presigned URL for reading a file (GET)
+   * Kept for potential future use — public bucket policy is preferred over presigned read URLs
+   * since SigV4 presigned URLs are capped at 7 days.
+   */
+  public async getPresignedReadUrl(key: string, expiresIn: number = 3600): Promise<string> {
+    try {
+      if (!this.accessKeyId || !this.secretAccessKey) {
+        throw new Error('MinIO credentials not configured');
+      }
+
+      const params = {
+        Bucket: this.bucketName,
+        Key: key,
+        Expires: expiresIn,
+      };
+
+      const url = await this.s3.getSignedUrlPromise('getObject', params);
+      return url;
+    } catch (error: any) {
+      logger.error('Error generating presigned read URL:', {
+        error: error.message,
+        key,
+      });
+      throw new Error(`Failed to generate presigned read URL: ${error.message}`);
+    }
+  }
+
+  /**
    * Generate presigned URL for direct upload (PUT)
    */
   async getPresignedUploadUrl(key: string, contentType: string, expiresIn: number = 3600): Promise<string> {
