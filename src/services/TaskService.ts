@@ -289,14 +289,14 @@ export class TaskService {
               tasks: ITask[];
               pagination: any;
             };
-            logger.info("Task list cache HIT", {
+            logger.debug("Task list cache HIT", {
               key: cacheKey,
               page: effectivePage,
               taskCount: parsed.tasks.length,
             });
             return parsed;
           }
-          logger.info("Task list cache MISS", { key: cacheKey, page: effectivePage });
+          logger.debug("Task list cache MISS", { key: cacheKey, page: effectivePage });
         }
       } catch (err) {
         logger.error("Redis get error for task list cache", {
@@ -802,7 +802,7 @@ export class TaskService {
     const categorySlug = taskData.categorySlug || frontendCategory;
     const categoryLabel = taskData.categoryLabel;
 
-    logger.info(
+    logger.debug(
       `🔍 Category mapping: "${frontendCategory}" → "${mappedCategory}"`
     );
 
@@ -875,7 +875,7 @@ export class TaskService {
     };
 
     // DEBUG: Log images field received
-    logger.info(`[TaskService.createTask] images DEBUG`, {
+    logger.debug(`[TaskService.createTask] images DEBUG`, {
       hasImagesInInput: !!taskData.images,
       inputImagesCount: taskData.images?.length || 0,
       inputImages: taskData.images,

@@ -574,6 +574,7 @@ TaskSchema.index({ "schedule.date": 1, status: 1 });
 TaskSchema.index({ category: 1, status: 1, createdAt: -1 });
 TaskSchema.index({ category: 1, status: 1, "budget.amount": 1 });
 TaskSchema.index({ status: 1, createdAt: -1 });
+TaskSchema.index({ status: 1, scheduledDate: 1 });
 // Global revision: poster's revisable open tasks
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 
