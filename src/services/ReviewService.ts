@@ -5,6 +5,22 @@ import logger from '../config/logger';
 import { ReviewRatings } from '../types';
 import mongoose from 'mongoose';
 
+function extractProfileDisplayName(profile: any): string | null {
+  if (!profile || typeof profile !== 'object') return null;
+
+  const direct =
+    (typeof profile.name === 'string' && profile.name.trim()) ||
+    (typeof profile.fullName === 'string' && profile.fullName.trim()) ||
+    (typeof profile.displayName === 'string' && profile.displayName.trim()) ||
+    '';
+  if (direct) return direct;
+
+  const first = typeof profile.firstName === 'string' ? profile.firstName.trim() : '';
+  const last = typeof profile.lastName === 'string' ? profile.lastName.trim() : '';
+  const combined = `${first} ${last}`.trim();
+  return combined || null;
+}
+
 export class ReviewService {
   /**
    * Create a review
@@ -163,9 +179,9 @@ export class ReviewService {
       // Attach profile data to review
       const enrichedReview: any = {
         ...review,
-        reviewerName: reviewerProfile?.name || 'Anonymous',
+        reviewerName: extractProfileDisplayName(reviewerProfile) || 'Anonymous',
         reviewerAvatar: reviewerProfile?.photoURL || reviewerProfile?.avatar || null,
-        reviewedName: reviewedProfile?.name || 'User',
+        reviewedName: extractProfileDisplayName(reviewedProfile) || 'User',
         reviewedAvatar: reviewedProfile?.photoURL || reviewedProfile?.avatar || null,
       };
 
@@ -250,7 +266,53 @@ export class ReviewService {
       .limit(effectiveLimit)
       .lean() as unknown as IReview[];
 
-    return { reviews: reviews as unknown as IReview[] };
+    if (reviews.length === 0) {
+      return { reviews: [] };
+    }
+
+    try {
+      const Profile = mongoose.connection.collection('profiles');
+      const reviewerIds = [
+        ...new Set(
+          reviews
+            .map((review) => review.reviewerId?.toString?.())
+            .filter((id): id is string => Boolean(id && mongoose.Types.ObjectId.isValid(id))),
+        ),
+      ];
+
+      const reviewerProfiles = reviewerIds.length
+        ? await Profile.find({
+            _id: {
+              $in: reviewerIds.map((id) => new mongoose.Types.ObjectId(id)),
+            },
+          }).toArray()
+        : [];
+
+      const profileById = new Map(
+        reviewerProfiles.map((profile: any) => [profile._id.toString(), profile]),
+      );
+
+      const enrichedReviews = reviews.map((review) => {
+        const reviewerProfile = profileById.get(review.reviewerId?.toString?.() || '');
+        const reviewerName = extractProfileDisplayName(reviewerProfile);
+
+        return {
+          ...review,
+          reviewerName: reviewerName || undefined,
+          reviewerPhoto:
+            reviewerProfile?.photoURL ||
+            reviewerProfile?.avatar ||
+            reviewerProfile?.profileImageUrl ||
+            undefined,
+          reviewerUid: reviewerProfile?.uid || undefined,
+        };
+      });
+
+      return { reviews: enrichedReviews as unknown as IReview[] };
+    } catch (error) {
+      logger.warn('Could not enrich user reviews with reviewer profiles:', error);
+      return { reviews: reviews as unknown as IReview[] };
+    }
   }
 }
 

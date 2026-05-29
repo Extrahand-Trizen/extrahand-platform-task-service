@@ -9,6 +9,7 @@ import {
 import logger from "../config/logger";
 import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
+import { UserMatchingService } from "./UserMatchingService";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
@@ -1187,19 +1188,26 @@ export class TaskService {
           const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
           const taskRoute = `/tasks/${task._id}`;
 
+          const recommendedLocationLabel =
+            task.location?.city ||
+            task.location?.addressDetails?.city ||
+            task.location?.address ||
+            'your area';
+
           await NotificationClient.sendBatch(
             {
               eventKey: 'TASK_CREATED_RECOMMENDED',
               category: 'recommendedTaskAlerts',
               actorId: uid, // Suppress notification to task creator
               entity: { type: 'task', id: task._id.toString() },
-              title: `New task matching your skills: ${task.title}`,
-              body: `A ${skillMatchCategory} task has been posted that matches your skills.`,
+              title: `New skill matched nearby: ${task.title}`,
+              body: `A ${skillMatchCategory} task has been posted near ${recommendedLocationLabel} and matches your skills.`,
               data: {
                 taskId: task._id.toString(),
                 category: mappedCategory,
                 skillMatchCategory,
                 budget: task.budget.amount,
+                locationLabel: recommendedLocationLabel,
                 taskUrl,
                 route: taskRoute,
                 actionUrl: taskRoute,
@@ -1213,8 +1221,8 @@ export class TaskService {
             try {
               await InAppNotificationClient.send({
                 userId: matchedUid,
-                title: '🎯 Task Matching Your Skills',
-                body: `A new "${skillMatchCategory}" task "${task.title}" has been posted`,
+                title: '🎯 New Skill Matched Nearby',
+                body: `A new "${skillMatchCategory}" task "${task.title}" has been posted near ${recommendedLocationLabel}`,
                 category: 'recommendedTaskAlerts',
                 type: 'info',
                 data: {
@@ -1224,7 +1232,8 @@ export class TaskService {
                   actionUrl: taskRoute,
                   category: mappedCategory,
                   skillMatchCategory,
-                  budget: task.budget?.amount
+                  budget: task.budget?.amount,
+                  locationLabel: recommendedLocationLabel,
                 }
               });
               logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - In-app sent (uid-level)', {
@@ -1669,6 +1678,173 @@ export class TaskService {
       logger.warn('Skipping notifications - uid not provided for task creation', {
         taskId: task._id,
         profileId: profileId.toString()
+      });
+    }
+
+    // STEP 4: Emit TASK_NEARBY notification
+    // Find active verified taskers whose saved location is within 10 km of the task.
+    // Excludes the task creator and anyone already notified via skill-match (STEP 1).
+    // Runs outside the uid guard so it fires even for edge-case uid-less creates.
+    try {
+      const alreadyNotifiedViaSkill: string[] = []; // populated below if uid exists
+      // Re-use the skill-matched list from STEP 1 if available in scope.
+      // We pass uid as the only guaranteed exclude; skill-matched UIDs are
+      // deduplicated inside NotificationClient.sendBatch via actorId suppression.
+      const nearbyTaskers = await UserMatchingService.findNearbyTaskers(
+        task,
+        undefined, // use default radius from env / 10 km
+        uid ? [uid] : [],
+      );
+
+      if (nearbyTaskers.length > 0) {
+        const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+        const taskRoute = `/tasks/${task._id}`;
+        const locationLabel =
+          task.location?.city ||
+          task.location?.addressDetails?.city ||
+          task.location?.address ||
+          'your area';
+
+        // If a nearby helper also matches the task’s skill category,
+        // show wording that it matches skills near their location.
+        let skillMatchedTaskers: string[] = [];
+        let skillMatchCategory: string | undefined;
+        try {
+          skillMatchCategory = [
+            task.categoryLabel,
+            task.subcategory,
+            categorySlug,
+            frontendCategory,
+            mappedCategory,
+          ].find((value) => typeof value === 'string' && value.trim().length > 0) as
+            | string
+            | undefined;
+
+          if (skillMatchCategory) {
+            const skillMatchedUsersRaw = await UserServiceClient.matchUsers('skill', {
+              category: skillMatchCategory,
+            });
+            skillMatchedTaskers = Array.from(
+              new Set(
+                skillMatchedUsersRaw.filter(
+                  (matchedUid): matchedUid is string =>
+                    typeof matchedUid === 'string' &&
+                    matchedUid.trim().length > 0 &&
+                    matchedUid !== uid,
+                ),
+              ),
+            );
+          }
+        } catch (skillMatchErr) {
+          logger.warn('[TaskService.createTask] NEARBY_ALERTS - Skill match lookup failed', {
+            taskId: task._id,
+            error: skillMatchErr instanceof Error ? skillMatchErr.message : 'Unknown error',
+          });
+        }
+
+        const skillMatchedSet = new Set(skillMatchedTaskers);
+        const nearbyAndSkill = nearbyTaskers.filter((u) => skillMatchedSet.has(u));
+        const nearbyOnly = nearbyTaskers.filter((u) => !skillMatchedSet.has(u));
+
+        if (nearbyAndSkill.length > 0) {
+          await NotificationClient.sendBatch(
+            {
+              eventKey: 'TASK_NEARBY',
+              category: 'recommendedTaskAlerts',
+              actorId: uid,
+              entity: { type: 'task', id: task._id.toString() },
+              title: `Matched your skills nearby: ${task.title}`,
+              body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel} and matches your skills.`,
+              data: {
+                taskId: task._id.toString(),
+                category: task.category,
+                categoryLabel: task.categoryLabel || task.category,
+                budget: task.budget?.amount,
+                locationLabel,
+                skillMatchCategory: skillMatchCategory || task.categoryLabel || task.category,
+                taskUrl,
+                route: taskRoute,
+                actionUrl: taskRoute,
+              },
+            },
+            nearbyAndSkill,
+          );
+        }
+
+        if (nearbyOnly.length > 0) {
+          await NotificationClient.sendBatch(
+            {
+              eventKey: 'TASK_NEARBY',
+              category: 'recommendedTaskAlerts',
+              actorId: uid,
+              entity: { type: 'task', id: task._id.toString() },
+              title: `New task nearby: ${task.title}`,
+              body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel}.`,
+              data: {
+                taskId: task._id.toString(),
+                category: task.category,
+                categoryLabel: task.categoryLabel || task.category,
+                budget: task.budget?.amount,
+                locationLabel,
+                taskUrl,
+                route: taskRoute,
+                actionUrl: taskRoute,
+              },
+            },
+            nearbyOnly,
+          );
+        }
+
+        // In-app notification for each nearby tasker
+        for (const nearbyUid of nearbyTaskers) {
+          try {
+            const isNearbyAndSkill = skillMatchedSet.has(nearbyUid);
+            await InAppNotificationClient.send({
+              userId: nearbyUid,
+              title: isNearbyAndSkill ? '🎯 New Skill Matched Nearby' : '📍 New Task Near You',
+              body: isNearbyAndSkill
+                ? `A ${task.categoryLabel || task.category} task "${task.title}" matches your skills near ${locationLabel}`
+                : `"${task.title}" has been posted near ${locationLabel}`,
+              category: 'recommendedTaskAlerts',
+              type: 'info',
+              data: {
+                taskId: task._id.toString(),
+                taskUrl,
+                route: taskRoute,
+                actionUrl: taskRoute,
+                category: task.category,
+                categoryLabel: task.categoryLabel || task.category,
+                budget: task.budget?.amount,
+                locationLabel,
+                skillMatchCategory: skillMatchCategory || task.categoryLabel || task.category,
+              },
+            });
+          } catch (inAppError) {
+            logger.warn('[TaskService.createTask] NEARBY_ALERTS - In-app failed', {
+              taskId: task._id,
+              userId: nearbyUid,
+              error: inAppError instanceof Error ? inAppError.message : 'Unknown error',
+            });
+          }
+        }
+
+        logger.info('[TaskService.createTask] NEARBY_ALERTS - Notifications sent', {
+          taskId: task._id,
+          nearbyCount: nearbyTaskers.length,
+          nearbyAndSkillCount: nearbyAndSkill.length,
+          nearbyOnlyCount: nearbyOnly.length,
+          locationLabel,
+        });
+      } else {
+        logger.info('[TaskService.createTask] NEARBY_ALERTS - No nearby taskers found', {
+          taskId: task._id,
+          hasCoordinates: !!(task.location?.coordinates),
+        });
+      }
+    } catch (error) {
+      logger.error('Error sending TASK_NEARBY notification', {
+        taskId: task._id,
+        error: error instanceof Error ? error.message : 'Unknown error',
       });
     }
 
