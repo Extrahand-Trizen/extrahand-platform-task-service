@@ -1190,7 +1190,6 @@ export class TaskService {
 
           const recommendedLocationLabel =
             task.location?.city ||
-            task.location?.addressDetails?.city ||
             task.location?.address ||
             'your area';
 
@@ -1686,7 +1685,6 @@ export class TaskService {
     // Excludes the task creator and anyone already notified via skill-match (STEP 1).
     // Runs outside the uid guard so it fires even for edge-case uid-less creates.
     try {
-      const alreadyNotifiedViaSkill: string[] = []; // populated below if uid exists
       // Re-use the skill-matched list from STEP 1 if available in scope.
       // We pass uid as the only guaranteed exclude; skill-matched UIDs are
       // deduplicated inside NotificationClient.sendBatch via actorId suppression.
@@ -1701,7 +1699,6 @@ export class TaskService {
         const taskRoute = `/tasks/${task._id}`;
         const locationLabel =
           task.location?.city ||
-          task.location?.addressDetails?.city ||
           task.location?.address ||
           'your area';
 
