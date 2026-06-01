@@ -1092,9 +1092,16 @@ export class TaskService {
     }
 
     try {
+      logger.info("[TaskPostedInAppNotification][task-service] Task created — triggering ops in-app notification", {
+        service: "extrahand-platform-task-service",
+        taskId: String(task._id),
+        taskTitle: task.title,
+        budget: task.budget?.amount,
+      });
+
       await MainAdminNotificationClient.send({
         type: "task_posted",
-        taskId: task._id.toString(),
+        taskId: String(task._id),
         taskTitle: task.title,
         userId: requesterProfile?.uid,
         userName: requesterProfile?.name || requesterProfile?.fullName,
@@ -1102,12 +1109,17 @@ export class TaskService {
         userPhone: requesterProfile?.phone,
         occurredAt: new Date().toISOString(),
       });
-      logger.info("[TaskService.createTask] Main admin task_posted notification sent", {
-        taskId: task._id,
+
+      logger.info("[TaskPostedInAppNotification][task-service] Ops in-app notification flow completed for task", {
+        service: "extrahand-platform-task-service",
+        taskId: String(task._id),
+        taskTitle: task.title,
       });
     } catch (adminNotifyError) {
-      logger.error("[TaskService.createTask] Failed to send main admin task_posted notification", {
-        taskId: task._id,
+      logger.error("[TaskPostedInAppNotification][task-service] Ops in-app notification flow failed for task", {
+        service: "extrahand-platform-task-service",
+        taskId: String(task._id),
+        taskTitle: task.title,
         error:
           adminNotifyError instanceof Error
             ? adminNotifyError.message
