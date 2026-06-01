@@ -2,12 +2,21 @@ import logger from '../config/logger';
 import mongoose from 'mongoose';
 
 /**
+ * Default radius in metres for nearby-task alerts.
+ * Taskers within this distance of the task location receive a TASK_NEARBY push.
+ * Override via NEARBY_TASK_RADIUS_METERS env var.
+ */
+const NEARBY_TASK_RADIUS_METERS =
+  parseInt(process.env.NEARBY_TASK_RADIUS_METERS ?? '', 10) || 10_000; // 10 km
+
+/**
  * UserMatchingService
- * 
+ *
  * Finds users who should receive notifications based on:
  * 1. Skill category matching (for recommended task alerts)
  * 2. Keyword matching (for keyword-based task alerts)
- * 
+ * 3. Geo-proximity matching (for nearby task alerts)
+ *
  * All methods apply strict cost-control filters:
  * - Role: includes tasker (dual poster+tasker counts)
  * - Active: isActive = true
@@ -196,14 +205,129 @@ export class UserMatchingService {
   }
 
   /**
+   * Find active, verified taskers whose saved location is within
+   * `radiusMeters` of the task's location coordinates.
+   *
+   * Uses MongoDB $near on the `location` field (2dsphere index on profiles).
+   *
+   * Cost-control filters applied:
+   * - Role filter: roles array includes 'tasker'
+   * - Active filter: isActive = true
+   * - Verification filter: canAcceptTasks = true
+   * - Geo filter: location within radiusMeters of task coordinates
+   *
+   * @param task         - Task document (must have location.coordinates [lng, lat])
+   * @param radiusMeters - Search radius in metres (default: NEARBY_TASK_RADIUS_METERS env / 10 km)
+   * @param excludeUids  - UIDs to exclude (e.g. task creator, already-notified skill-match taskers)
+   * @returns Array of unique user IDs (taskers near the task)
+   *
+   * Used by: TaskService.createTask() → TASK_NEARBY event
+   */
+  static async findNearbyTaskers(
+    task: any,
+    radiusMeters: number = NEARBY_TASK_RADIUS_METERS,
+    excludeUids: string[] = [],
+  ): Promise<string[]> {
+    try {
+      const coords: [number, number] | undefined = task?.location?.coordinates;
+
+      if (
+        !Array.isArray(coords) ||
+        coords.length !== 2 ||
+        typeof coords[0] !== 'number' ||
+        typeof coords[1] !== 'number'
+      ) {
+        logger.warn('findNearbyTaskers: Task has no valid coordinates — skipping geo match', {
+          taskId: task?._id,
+          coordinates: coords,
+        });
+        return [];
+      }
+
+      const [longitude, latitude] = coords;
+
+      const Profile = mongoose.connection.collection('profiles');
+
+      const baseFilters = {
+        roles: 'tasker',
+        isActive: true,
+        // Support both the current nested verification flag and legacy profile shape.
+        $or: [
+          { 'roleVerifications.tasker.canAcceptTasks': true },
+          { canAcceptTasks: true },
+        ],
+      };
+
+      const taskersByProfileLocation = await Profile.find({
+        ...baseFilters,
+        location: {
+          $near: {
+            $geometry: {
+              type: 'Point',
+              coordinates: [longitude, latitude],
+            },
+            $maxDistance: radiusMeters,
+          },
+        },
+      })
+        .project({ uid: 1 })
+        .toArray();
+
+      const fallbackTaskersByHomeLocation = await Profile.find({
+        ...baseFilters,
+        homeLocation: {
+          $near: {
+            $geometry: {
+              type: 'Point',
+              coordinates: [longitude, latitude],
+            },
+            $maxDistance: radiusMeters,
+          },
+        },
+      })
+        .project({ uid: 1 })
+        .toArray();
+
+      const excludeSet = new Set(excludeUids.filter(Boolean));
+
+      const userIds = Array.from(
+        new Set(
+          [...taskersByProfileLocation, ...fallbackTaskersByHomeLocation]
+            .map((p: any) => p.uid)
+            .filter((uid: any): uid is string => typeof uid === 'string' && uid.trim().length > 0)
+            .filter((uid: string) => !excludeSet.has(uid)),
+        ),
+      );
+
+      logger.info('findNearbyTaskers', {
+        taskId: task._id,
+        coordinates: [longitude, latitude],
+        radiusMeters,
+        matchedByProfileLocationCount: taskersByProfileLocation.length,
+        matchedByHomeLocationFallbackCount: fallbackTaskersByHomeLocation.length,
+        matchedCount: userIds.length,
+        excludedCount: excludeSet.size,
+      });
+
+      return userIds;
+    } catch (error) {
+      logger.error('Error finding nearby taskers', {
+        taskId: task?._id,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return [];
+    }
+  }
+
+  /**
    * Helper: Extract all keywords from a task
-   * 
+   *
    * Used by createTask trigger to find all users who might be interested
    * Extracts from:
    * - Task title
    * - Task tags
    * - Task description (first few words)
-   * 
+   *
    * @param task - Task document
    * @returns Array of normalized keywords
    */

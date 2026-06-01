@@ -66,6 +66,10 @@ export interface ITask extends Document {
     itemType?: string;
     itemDescription?: string;
     itemWeight?: string;
+    packageType?: string;
+    packageContents?: string[];
+    packageTypeOther?: string;
+    packageContentsOther?: string;
     pickupAddress?: string;
     pickupLabel?: string;
     dropAddress?: string;
@@ -75,6 +79,7 @@ export interface ITask extends Document {
     specialInstructions?: string;
     estimatedItemValue?: number;
     deliveryBudget?: number;
+    packagePhotoUrl?: string;
   };
 
   budget: {
@@ -153,7 +158,11 @@ export interface ITask extends Document {
     uploadedAt?: Date;
     uploadedBy?: string;
   }>;
-  completionStatus?: "pending_approval" | "approved" | "rejected";
+  completionStatus?:
+    | "pending_approval"
+    | "approved"
+    | "rejected"
+    | "revision_requested";
   completionNotes?: string;
   completionRejectedReason?: string;
   completionApprovedAt?: Date;
@@ -305,6 +314,10 @@ const TaskSchema = new Schema<ITask>(
         itemType: String,
         itemDescription: String,
         itemWeight: String,
+        packageType: String,
+        packageContents: [String],
+        packageTypeOther: String,
+        packageContentsOther: String,
         pickupAddress: String,
         pickupLabel: String,
         dropAddress: String,
@@ -314,6 +327,7 @@ const TaskSchema = new Schema<ITask>(
         specialInstructions: String,
         estimatedItemValue: Number,
         deliveryBudget: Number,
+        packagePhotoUrl: String,
       },
       default: undefined,
     },
@@ -454,7 +468,7 @@ const TaskSchema = new Schema<ITask>(
     }],
     completionStatus: {
       type: String,
-      enum: ["pending_approval", "approved", "rejected"],
+      enum: ["pending_approval", "approved", "rejected", "revision_requested"],
       index: true,
     },
     completionNotes: String,
@@ -560,6 +574,7 @@ TaskSchema.index({ "schedule.date": 1, status: 1 });
 TaskSchema.index({ category: 1, status: 1, createdAt: -1 });
 TaskSchema.index({ category: 1, status: 1, "budget.amount": 1 });
 TaskSchema.index({ status: 1, createdAt: -1 });
+TaskSchema.index({ status: 1, scheduledDate: 1 });
 // Global revision: poster's revisable open tasks
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 

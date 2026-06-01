@@ -314,6 +314,23 @@ export class BudgetRevisionService {
         const actionLabel =
           action === "keep" ? "kept their offer" : `updated their offer to ₹${payload.newAmount.toLocaleString("en-IN")}`;
 
+        // Push notification (poster) - actionable update
+        await NotificationClient.send({
+          eventKey: "BUDGET_REVISION_RESPONSE",
+          category: "taskUpdates",
+          actorId: actorProfileId.toString(),
+          recipients: [posterUid],
+          entity: { type: "application", id: applicationId },
+          title: "Offer updated after budget change",
+          body: `A bidder has ${actionLabel} on "${task.title}".`,
+          data: {
+            taskId: application.taskId.toString(),
+            applicationId,
+            action,
+            eventKey: "BUDGET_REVISION_RESPONSE",
+          },
+        });
+
         await InAppNotificationClient.send({
           userId: posterUid,
           title: "A bidder responded to your budget revision",

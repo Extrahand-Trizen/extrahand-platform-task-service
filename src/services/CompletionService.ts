@@ -4,7 +4,6 @@ import TaskApplication from '../models/TaskApplication';
 import { NotFoundError, BadRequestError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
-import { PaymentClient } from '../services/PaymentClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { UserServiceClient } from '../clients/UserServiceClient';
@@ -47,6 +46,16 @@ export class CompletionService {
 
     if (!isAssignedPerformer && !hasAcceptedApplication) {
       throw new ForbiddenError('Only the assigned performer can submit completion proof');
+    }
+
+    const allowedSubmitStatuses = ['in_progress', 'started', 'review'];
+    const isRevisionResubmit =
+      task.completionStatus === 'revision_requested' &&
+      String(task.status) === 'in_progress';
+    if (!allowedSubmitStatuses.includes(String(task.status)) && !isRevisionResubmit) {
+      throw new BadRequestError(
+        'Completion proof can only be submitted while work is in progress or under revision'
+      );
     }
 
     const normalizedProofUrls = Array.isArray(proofUrls)
@@ -203,7 +212,7 @@ export class CompletionService {
         ? await Profiles.findOne({ _id: new mongoose.Types.ObjectId(updatedTask.requesterId) })
         : null;
 
-      const assigneeUid = assigneeProfile?.uid || updatedTask?.assigneeId?.toString();
+      const assigneeUid = assigneeProfile?.uid;
       const requesterUid = requesterProfile?.uid || taskOwnerProfileId;
       const taskTitle = updatedTask?.title;
 
@@ -251,6 +260,29 @@ export class CompletionService {
             status: 'completed'
           }
         });
+      }
+
+      if (!assigneeUid) {
+        logger.warn('[CompletionService] Skipping TASK_COMPLETED reward event — missing performer Firebase uid', {
+          taskId,
+          assigneeProfileId: updatedTask?.assigneeId?.toString(),
+        });
+      } else if (requesterUid) {
+        const taskAmount =
+          typeof updatedTask?.budget === 'number'
+            ? updatedTask.budget
+            : Number(updatedTask?.budget) || 0;
+        UserServiceClient.processRewardEvent({
+          eventType: 'TASK_COMPLETED',
+          payload: {
+            taskId,
+            performerUid: assigneeUid,
+            posterUid: requesterUid,
+            taskAmountInr: taskAmount,
+            refereeUid: assigneeUid,
+          },
+          correlationId: taskId,
+        }).catch(() => undefined);
       }
 
       // REVIEW_REQUEST - Prompt requester to review the tasker
@@ -344,80 +376,21 @@ export class CompletionService {
       });
     }
 
-    // Trigger direct payout workflow (RazorpayX-only, non-escrow)
+    // Payout is now helper-requested from app (not auto-processed here).
     try {
-      const Profile = mongoose.connection.collection('profiles');
-      const assigneeProfile = task.assigneeId
-        ? await Profile.findOne({ _id: task.assigneeId })
-        : null;
-
-      const performerUid = assigneeProfile?.uid;
-      const taskAmount = task.budget?.amount || 0;
-
-      if (performerUid && taskAmount > 0) {
-          logger.info(`🔔 Triggering task completion payout`, {
-            taskId,
-            performerUid,
-            taskAmount,
-            taskTitle: task.title,
-          });
-        const payoutResult = await PaymentClient.processTaskCompletionPayout({
+      await InAppNotificationClient.send({
+        userId: task.assigneeId!.toString(),
+        title: 'Request your payout',
+        body: `Task approved. Open task tracking and request payout for \"${task.title}\".`,
+        type: 'info',
+        category: 'payments',
+        data: {
           taskId,
-          performerUid,
-          amount: taskAmount,
-          taskTitle: task.title,
-        });
-
-        if (payoutResult.success) {
-          logger.info(`✅ Task completion payout processed for task ${taskId}`, {
-            performerUid,
-            payoutId: payoutResult.payout?.payoutId,
-            netAmount: payoutResult.payout?.netAmount,
-          });
-
-          await InAppNotificationClient.send({
-            userId: task.assigneeId!.toString(),
-            title: 'Amount credited',
-            body: `Rs ${payoutResult.payout?.netAmount || taskAmount} credited for \"${task.title}\".`,
-            type: 'success',
-            category: 'payments',
-            data: {
-              taskId,
-              payoutId: payoutResult.payout?.payoutId,
-              actionUrl: '/profile?section=payments',
-            },
-          });
-        } else if (payoutResult.requiresBankAccount) {
-          logger.warn(`Payout pending bank account for task ${taskId}`, {
-            performerUid,
-            error: payoutResult.error,
-          });
-
-          await InAppNotificationClient.send({
-            userId: task.assigneeId!.toString(),
-            title: 'Add account to get amount',
-            body: 'Add and verify your bank account to receive your task payout.',
-            type: 'warning',
-            category: 'payments',
-            data: {
-              taskId,
-              actionUrl: '/profile?section=bank-account',
-            },
-          });
-        } else {
-          logger.warn(`Task payout failed for task ${taskId}`, {
-            performerUid,
-            error: payoutResult.error,
-          });
-        }
-      } else {
-        logger.warn(`Payout skipped for task ${taskId}: performer UID or task amount missing`, {
-          hasPerformerUid: Boolean(performerUid),
-          taskAmount,
-        });
-      }
+          actionUrl: '/profile?section=payments',
+        },
+      });
     } catch (paymentError) {
-      logger.error(`Error processing payout for task ${taskId}:`, paymentError);
+      logger.error(`Error sending payout-request notification for task ${taskId}:`, paymentError);
     }
 
     // Emit real-time proof approval
@@ -458,20 +431,14 @@ export class CompletionService {
       throw new BadRequestError('Task is not pending approval');
     }
 
-    // Update task status - move back to started so performer can revise and resubmit
-    // and record feedback so both poster and tasker can see the requested changes
+    // Move to in_progress + revision_requested — performer stays assigned and cannot withdraw.
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
-        status: 'started',
-        completionStatus: 'rejected',
+        status: 'in_progress',
+        completionStatus: 'revision_requested',
         completionRejectedReason: reason,
         completionRejectedAt: new Date(),
-        // Clear completion proof and notes so performer can resubmit
-        $unset: {
-          completionProof: '',
-          completionNotes: ''
-        },
         $push: {
           feedback: {
             message: reason,
@@ -510,7 +477,7 @@ export class CompletionService {
           body: `${reason || 'Please revise and resubmit your work.'}`,
           data: {
             taskId,
-            status: 'started',
+            status: 'in_progress',
             action: 'resubmit_required',
             taskUrl: resubmitUrl,
           },
@@ -518,16 +485,18 @@ export class CompletionService {
 
         // In-app Notification
         await InAppNotificationClient.send({
-       userId: task.assigneeId!.toString(),
+          userId: String(assigneeProfile.uid),
           title: 'Changes requested on your submission',
           body: `${reason || 'Please revise and resubmit your work.'}`,
           type: 'warning',
           category: 'taskUpdates',
           data: {
             taskId,
-            status: 'started',
+            status: 'in_progress',
             action: 'resubmit_required',
             taskUrl: resubmitUrl,
+            eventKey: 'TASK_UPDATED',
+            entityType: 'task',
           },
         });
       }
