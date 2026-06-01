@@ -26,7 +26,7 @@ export class MainAdminNotificationClient {
     }
 
     try {
-      await axios.post(
+      const response = await axios.post(
         `${config.MAIN_ADMIN_SERVICE_URL}/api/v1/notifications/events`,
         event,
         {
@@ -37,11 +37,20 @@ export class MainAdminNotificationClient {
           timeout: 8000,
         }
       );
+      logger.info('Main admin notification delivered', {
+        eventType: event.type,
+        taskId: event.taskId,
+        skipped: response.data?.skipped === true,
+      });
     } catch (error: any) {
       logger.error('Failed to notify main admin service', {
         error: error.message,
         eventType: event.type,
+        taskId: event.taskId,
+        status: error.response?.status,
+        responseData: error.response?.data,
       });
+      throw error;
     }
   }
 }

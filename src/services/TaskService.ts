@@ -1066,18 +1066,27 @@ export class TaskService {
       });
     }
 
-    // Email: task posted confirmation → requester
+    let requesterProfile: Record<string, any> | null = null;
     try {
       const Profile = mongoose.connection.collection("profiles");
-
-      // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
       const requesterId = task.requesterId instanceof mongoose.Types.ObjectId
         ? task.requesterId
         : new mongoose.Types.ObjectId(task.requesterId);
+      requesterProfile = await Profile.findOne({ _id: requesterId });
+    } catch (profileLookupError) {
+      logger.warn("[TaskService.createTask] Requester profile lookup failed", {
+        taskId: task._id,
+        requesterId: task.requesterId?.toString?.() ?? task.requesterId,
+        error:
+          profileLookupError instanceof Error
+            ? profileLookupError.message
+            : String(profileLookupError),
+      });
+    }
 
-      const requesterProfile = await Profile.findOne({ _id: requesterId });
-      MainAdminNotificationClient.send({
-        type: 'task_posted',
+    try {
+      await MainAdminNotificationClient.send({
+        type: "task_posted",
         taskId: task._id.toString(),
         taskTitle: task.title,
         userId: requesterProfile?.uid,
@@ -1086,6 +1095,21 @@ export class TaskService {
         userPhone: requesterProfile?.phone,
         occurredAt: new Date().toISOString(),
       });
+      logger.info("[TaskService.createTask] Main admin task_posted notification sent", {
+        taskId: task._id,
+      });
+    } catch (adminNotifyError) {
+      logger.error("[TaskService.createTask] Failed to send main admin task_posted notification", {
+        taskId: task._id,
+        error:
+          adminNotifyError instanceof Error
+            ? adminNotifyError.message
+            : String(adminNotifyError),
+      });
+    }
+
+    // Email: task posted confirmation → requester
+    try {
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
@@ -1148,10 +1172,10 @@ export class TaskService {
         });
       }
     } catch (error) {
-      logger.error('Error fetching requester profile or sending task_posted_confirmation email', {
+      logger.error("Error sending task_posted_confirmation email", {
         taskId: task._id,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        error: error instanceof Error ? error.message : "Unknown error",
+        stack: error instanceof Error ? error.stack : undefined,
       });
     }
 
