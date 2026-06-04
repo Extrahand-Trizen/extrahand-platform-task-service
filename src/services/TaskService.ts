@@ -1249,6 +1249,9 @@ export class TaskService {
               title: `New skill matched nearby: ${task.title}`,
               body: `A ${skillMatchCategory} task has been posted near ${recommendedLocationLabel} and matches your skills.`,
               data: {
+                eventKey: 'TASK_CREATED_RECOMMENDED',
+                entityType: 'task',
+                skillMatch: true,
                 taskId: task._id.toString(),
                 category: mappedCategory,
                 skillMatchCategory,
@@ -1800,6 +1803,9 @@ export class TaskService {
               title: `Matched your skills nearby: ${task.title}`,
               body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel} and matches your skills.`,
               data: {
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: true,
                 taskId: task._id.toString(),
                 category: task.category,
                 categoryLabel: task.categoryLabel || task.category,
@@ -1825,6 +1831,9 @@ export class TaskService {
               title: `New task nearby: ${task.title}`,
               body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel}.`,
               data: {
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: false,
                 taskId: task._id.toString(),
                 category: task.category,
                 categoryLabel: task.categoryLabel || task.category,
@@ -2881,6 +2890,15 @@ export class TaskService {
     await task.save();
 
     const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
+    const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Task Start OTP';
+    const notificationData = {
+      taskId,
+      otp,
+      otpType: 'task_start',
+      expiresAt: expiresAt.toISOString(),
+      eventKey: 'TASK_UPDATED',
+      entityType: 'task',
+    };
 
     // Send via both email and in-app notifications for redundancy
     let taskerName = "tasker";
@@ -2919,20 +2937,31 @@ export class TaskService {
       logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
     }
 
+    // Push notification (FCM) to poster — same content as in-app for lock-screen visibility
+    try {
+      await NotificationClient.send({
+        eventKey: 'TASK_UPDATED',
+        category: 'taskUpdates',
+        actorId: _uid,
+        recipients: [requesterUid],
+        entity: { type: 'task', id: taskId },
+        title: pushTitle,
+        body: otpBody,
+        data: notificationData,
+      });
+    } catch (pushError) {
+      logger.warn("Failed to send task start OTP via push notification", { taskId, error: pushError });
+    }
+
     // Send in-app notification for immediate visibility
     try {
       await InAppNotificationClient.send({
         userId: requesterUid,
-        title: "Task Start OTP",
+        title: pushTitle,
         body: otpBody,
         type: "info",
         category: "taskUpdates",
-        data: {
-          taskId,
-          otp,
-          otpType: "task_start",
-          expiresAt: expiresAt.toISOString(),
-        },
+        data: notificationData,
       });
     } catch (inAppError) {
       logger.warn("Failed to send task start OTP via in-app notification", { taskId, error: inAppError });
