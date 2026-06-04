@@ -5,6 +5,12 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { BadRequestError } from '../errors/AppError';
 import logger from '../config/logger';
 import Task from '../models/Task';
+import { config } from '../config/env';
+
+function isTrustedServiceRequest(req: AuthenticatedRequest): boolean {
+  const token = req.headers['x-service-auth'] as string | undefined;
+  return Boolean(config.SERVICE_AUTH_TOKEN && token && token === config.SERVICE_AUTH_TOKEN);
+}
 
 export class ApplicationController {
   /**
@@ -87,9 +93,9 @@ export class ApplicationController {
       filters
     );
 
-    // ✅ Filter budget information for non-owners when viewing task applications
+    // Hide budget for non-owners on public views; admin/service callers see all amounts.
     let applications = result.applications;
-    if (taskId && !mine) {
+    if (taskId && !mine && !isTrustedServiceRequest(req)) {
       try {
         const task = await Task.findById(taskId);
         const isOwner = task && profileId && task.requesterId.equals(profileId);
