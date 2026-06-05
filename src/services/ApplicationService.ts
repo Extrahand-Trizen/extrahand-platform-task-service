@@ -14,6 +14,8 @@ import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { OfferDigestService } from "./OfferDigestService";
 import { PaymentClient } from "./PaymentClient";
 import { canWithdrawAcceptedApplication } from "../utils/taskCommitment";
 
@@ -371,6 +373,15 @@ export class ApplicationService {
               applicantUid,
             },
           });
+
+          // WhatsApp: first offer instant; later offers batched (OfferDigestService).
+          await OfferDigestService.onNewApplication({
+            taskId,
+            applicationId: application._id.toString(),
+            requesterUid: String(requesterProfile.uid),
+            applicantDisplayName: applicantProfileSnapshot?.name || 'A tasker',
+            taskTitle: task.title || 'your task',
+          });
         }
         
         // Email: application submitted → requester
@@ -490,6 +501,14 @@ export class ApplicationService {
       const task = await Task.findById(taskId);
       if (!task) {
         throw new NotFoundError("Task not found");
+      }
+
+      // Poster opened applicants — used to suppress offer digest spam for 30 minutes.
+      if (
+        currentUserProfileId &&
+        task.requesterId?.equals(currentUserProfileId)
+      ) {
+        void OfferDigestService.markApplicantsViewed(taskId, currentUserProfileId);
       }
 
       // ✅ Everyone sees all applications for a task
@@ -880,6 +899,16 @@ export class ApplicationService {
               applicationId,
               status: 'accepted'
             }
+          });
+
+          fireWhatsAppNotify({
+            uid: applicantUid,
+            templateKey: 'wa_work_assigned',
+            category: 'taskUpdates',
+            templateBody: {
+              var_1: task.title || 'your task',
+            },
+            idempotencyKey: `assigned:${applicationId}`,
           });
         } catch (error) {
           logger.error('Error sending APPLICATION_ACCEPTED notification', {
@@ -1360,6 +1389,34 @@ export class ApplicationService {
           type: inAppType,
           data: notificationData,
         });
+
+        if (action === "counter") {
+          const waKey =
+            actorRole === "tasker"
+              ? "wa_counter_offer_received"
+              : "wa_counter_offer_from_poster";
+          fireWhatsAppNotify({
+            uid: counterpartyUid,
+            templateKey: waKey,
+            category: "taskUpdates",
+            templateBody: {
+              var_1: taskTitle,
+              var_2: String(amount),
+            },
+            idempotencyKey: `counter:${appIdStr}:${actorRole}:${amount}`,
+          });
+        } else if (action === "accept") {
+          fireWhatsAppNotify({
+            uid: counterpartyUid,
+            templateKey: "wa_negotiation_accepted",
+            category: "taskUpdates",
+            templateBody: {
+              var_1: taskTitle,
+              var_2: String(amount),
+            },
+            idempotencyKey: `nego-accept:${appIdStr}`,
+          });
+        }
       } catch (notificationError) {
         logger.warn("[negotiateApplication] Failed to send negotiation notification", {
           applicationId,

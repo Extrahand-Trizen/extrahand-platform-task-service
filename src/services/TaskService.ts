@@ -13,6 +13,9 @@ import { UserMatchingService } from "./UserMatchingService";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { buildScheduleVersion } from "../utils/workSchedule";
+import TaskApplication from "../models/TaskApplication";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
@@ -874,6 +877,16 @@ export class TaskService {
       createdAt: new Date(),
       updatedAt: new Date(),
     };
+
+    if (taskPayload.scheduledDate) {
+      taskPayload.notificationGovernance = {
+        scheduleVersion: buildScheduleVersion({
+          scheduledDate: taskPayload.scheduledDate,
+          scheduledTimeStart: taskPayload.scheduledTimeStart,
+          scheduledTimeEnd: taskPayload.scheduledTimeEnd,
+        }),
+      };
+    }
 
     // DEBUG: Log images field received
     logger.debug(`[TaskService.createTask] images DEBUG`, {
@@ -1792,10 +1805,38 @@ export class TaskService {
           );
         }
 
-        // In-app notification for each nearby tasker
+        // In-app + WhatsApp for skill-matched nearby helpers
         for (const nearbyUid of nearbyTaskers) {
           try {
             const isNearbyAndSkill = skillMatchedSet.has(nearbyUid);
+            if (isNearbyAndSkill) {
+              // Governance: one WA per work+helper; skip if already applied.
+              const alreadyApplied = await TaskApplication.exists({
+                taskId: task._id,
+                applicantUid: nearbyUid,
+                status: { $in: ['pending', 'accepted'] },
+              });
+              if (alreadyApplied) continue;
+
+              const categoryLabel =
+                skillMatchCategory || task.categoryLabel || task.category || 'work';
+              fireWhatsAppNotify({
+                uid: nearbyUid,
+                templateKey: 'wa_nearby_work_skill_match',
+                category: 'recommendedTaskAlerts',
+                templateBody: {
+                  var_1: task.title || 'New work',
+                  var_2: String(categoryLabel),
+                  var_3: String(locationLabel),
+                },
+                idempotencyKey: `wa_nearby_work_skill_match:${task._id.toString()}:${nearbyUid}`,
+                metadata: {
+                  workId: task._id.toString(),
+                  triggerType: 'skill_nearby',
+                  recipientRole: 'helper',
+                },
+              });
+            }
             await InAppNotificationClient.send({
               userId: nearbyUid,
               title: isNearbyAndSkill ? '🎯 New Skill Matched Nearby' : '📍 New Task Near You',
@@ -1909,6 +1950,21 @@ export class TaskService {
     }
     if (updateData.categoryLabel) {
       updateData.categoryLabel = updateData.categoryLabel.toString();
+    }
+
+    // Reschedule invalidates prior start-soon WhatsApp idempotency keys.
+    const scheduleFieldsTouched =
+      updateData.scheduledDate !== undefined ||
+      updateData.scheduledTimeStart !== undefined ||
+      updateData.scheduledTimeEnd !== undefined;
+    if (scheduleFieldsTouched) {
+      const mergedSchedule = {
+        scheduledDate: updateData.scheduledDate ?? task.scheduledDate,
+        scheduledTimeStart: updateData.scheduledTimeStart ?? task.scheduledTimeStart,
+        scheduledTimeEnd: updateData.scheduledTimeEnd ?? task.scheduledTimeEnd,
+      };
+      (updateData as Record<string, unknown>)['notificationGovernance.scheduleVersion'] =
+        buildScheduleVersion(mergedSchedule);
     }
 
     logger.info("🔍 Update data after budget normalization:", updateData);
@@ -2608,6 +2664,16 @@ export class TaskService {
                 taskId: taskId.toString(),
                 actionUrl: `/tasks/${taskId}/track`,
               },
+            });
+
+            fireWhatsAppNotify({
+              uid: otherProfile.uid,
+              templateKey: isRequesterCancelled
+                ? 'wa_work_cancelled_helper'
+                : 'wa_work_cancelled_customer',
+              category: 'taskUpdates',
+              templateBody: { var_1: task.title || 'your task' },
+              idempotencyKey: `cancel:${taskId.toString()}:${otherProfile.uid}`,
             });
           }
         }

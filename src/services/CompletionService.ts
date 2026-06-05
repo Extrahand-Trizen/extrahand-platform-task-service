@@ -6,6 +6,7 @@ import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
 import { UserServiceClient } from '../clients/UserServiceClient';
 import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
@@ -259,6 +260,26 @@ export class CompletionService {
             taskId,
             status: 'completed'
           }
+        });
+
+        fireWhatsAppNotify({
+          uid: assigneeUid,
+          templateKey: 'wa_work_completed_helper',
+          category: 'taskUpdates',
+          templateBody: { var_1: taskTitle || 'your task' },
+          idempotencyKey: `completed-helper:${taskId}`,
+          metadata: { workId: taskId, recipientRole: 'helper' },
+        });
+      }
+
+      if (requesterUid) {
+        fireWhatsAppNotify({
+          uid: requesterUid,
+          templateKey: 'wa_work_completed_customer',
+          category: 'taskUpdates',
+          templateBody: { var_1: taskTitle || 'your task' },
+          idempotencyKey: `completed-poster:${taskId}`,
+          metadata: { workId: taskId, recipientRole: 'customer' },
         });
       }
 

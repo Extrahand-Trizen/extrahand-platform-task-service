@@ -48,7 +48,7 @@ const envSchema = z.object({
   /** Comma-separated *poster* Firebase UIDs (test); assignee may use 123123 to start */
   TASK_START_OTP_BYPASS_UIDS: z.string().optional(),
   USER_SERVICE_URL: z.string().url().default('http://localhost:4001'),
-  MESSAGING_SERVICE_URL: z.string().url().default('http://localhost:4006'),
+  MESSAGING_SERVICE_URL: z.string().url().default('http://localhost:4010'),
   NOTIFICATION_SERVICE_URL: z.string().url().default('http://localhost:4005'),
   PAYMENT_SERVICE_URL: z.string().url().default('http://localhost:4003'),
   EMAIL_SERVICE_URL: z.string().url().optional(),

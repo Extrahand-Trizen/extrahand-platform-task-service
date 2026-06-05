@@ -227,6 +227,23 @@ export interface ITask extends Document {
   cancelledById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   cancellationReason?: string;
 
+  /**
+   * WhatsApp / notification governance (digest caps, schedule versioning, etc.).
+   */
+  notificationGovernance?: {
+    /** Bumped when scheduled date/time changes — invalidates old start-soon idempotency keys. */
+    scheduleVersion?: string;
+    /** Last time poster opened the applicants list for this work. */
+    applicantsViewedAt?: Date;
+    offerDigest?: {
+      pendingSinceLastDigest?: number;
+      lastDigestAt?: Date;
+      digestsToday?: number;
+      digestDayKey?: string;
+      firstOfferWaSent?: boolean;
+    };
+  };
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -559,6 +576,18 @@ const TaskSchema = new Schema<ITask>(
       index: true,
     },
     cancellationReason: String,
+
+    notificationGovernance: {
+      scheduleVersion: String,
+      applicantsViewedAt: Date,
+      offerDigest: {
+        pendingSinceLastDigest: { type: Number, default: 0 },
+        lastDigestAt: Date,
+        digestsToday: { type: Number, default: 0 },
+        digestDayKey: String,
+        firstOfferWaSent: { type: Boolean, default: false },
+      },
+    },
   },
   { timestamps: true }
 );

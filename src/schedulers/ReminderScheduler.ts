@@ -5,6 +5,8 @@ import logger from '../config/logger';
 import { config } from '../config/env';
 import { NotificationClient } from '../services/NotificationClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
+import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
+import { buildScheduleVersion } from '../utils/workSchedule';
 
 /**
  * ReminderScheduler
@@ -76,7 +78,7 @@ export class ReminderScheduler {
         status: { $in: ['assigned', 'started'] },
         // Exclude tasks that already had reminder sent (optional - use eventId dedup in notification-service)
       })
-        .select('_id scheduledDate scheduledTimeStart scheduledTimeEnd requesterId assigneeId title location')
+        .select('_id scheduledDate scheduledTimeStart scheduledTimeEnd requesterId assigneeId title location notificationGovernance')
         .lean();
 
       logger.info('ReminderScheduler: Found tasks needing reminders', {
@@ -137,6 +139,29 @@ export class ReminderScheduler {
             const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
             const locationStr = task.location?.city || task.location?.address;
 
+            const scheduleVersion =
+              (task as { notificationGovernance?: { scheduleVersion?: string } })
+                .notificationGovernance?.scheduleVersion ??
+              buildScheduleVersion(task);
+
+            if (requesterProfile?.uid) {
+              fireWhatsAppNotify({
+                uid: requesterProfile.uid,
+                templateKey: 'wa_task_reminder',
+                category: 'taskReminders',
+                templateBody: {
+                  var_1: task.title || 'your task',
+                  var_2: scheduledDateStr || 'soon',
+                },
+                idempotencyKey: `wa_task_reminder:${task._id.toString()}:${requesterProfile.uid}:24h:${scheduleVersion}`,
+                metadata: {
+                  workId: task._id.toString(),
+                  triggerType: '24h',
+                  recipientRole: 'customer',
+                },
+              });
+            }
+
             if (requesterProfile?.email && requesterProfile?.uid) {
               // Check if user has enabled task reminder emails
               const { NotificationPreferenceChecker } = await import('../services/NotificationPreferenceChecker');
@@ -169,6 +194,24 @@ export class ReminderScheduler {
                 });
               }
             }
+            if (assigneeProfile?.uid) {
+              fireWhatsAppNotify({
+                uid: assigneeProfile.uid,
+                templateKey: 'wa_task_reminder',
+                category: 'taskReminders',
+                templateBody: {
+                  var_1: task.title || 'your task',
+                  var_2: scheduledDateStr || 'soon',
+                },
+                idempotencyKey: `wa_task_reminder:${task._id.toString()}:${assigneeProfile.uid}:24h:${scheduleVersion}`,
+                metadata: {
+                  workId: task._id.toString(),
+                  triggerType: '24h',
+                  recipientRole: 'helper',
+                },
+              });
+            }
+
             if (assigneeProfile?.email && assigneeProfile?.uid) {
               // Check if user has enabled task reminder emails
               const { NotificationPreferenceChecker } = await import('../services/NotificationPreferenceChecker');
@@ -253,7 +296,7 @@ export class ReminderScheduler {
         },
         status: { $in: ['assigned', 'started'] }
       })
-        .select('_id scheduledDate scheduledTimeStart scheduledTimeEnd requesterId assigneeId title location')
+        .select('_id scheduledDate scheduledTimeStart scheduledTimeEnd requesterId assigneeId title location notificationGovernance')
         .lean();
 
       for (const task of tasksNeedingReminders) {
