@@ -33,17 +33,6 @@ export class QuestionService {
       throw new BadRequestError('Cannot ask questions on your own task');
     }
 
-    // Check if user already asked the same question
-    const existingQuestion = await TaskQuestion.findOne({
-      taskId,
-      askedById,
-      question: question.trim()
-    });
-
-    if (existingQuestion) {
-      throw new BadRequestError('You have already asked this question');
-    }
-
     //@ts-ignore
     // Create question
     const taskQuestion = await TaskQuestion.create({

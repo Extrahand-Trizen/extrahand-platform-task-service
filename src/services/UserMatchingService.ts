@@ -249,7 +249,7 @@ export class UserMatchingService {
       const Profile = mongoose.connection.collection('profiles');
 
       const baseFilters = {
-        roles: 'tasker',
+        roles: { $in: ['tasker', 'helper', 'performer'] },
         isActive: true,
         // Support both the current nested verification flag and legacy profile shape.
         $or: [

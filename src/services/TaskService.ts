@@ -16,6 +16,7 @@ import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
 import { buildScheduleVersion } from "../utils/workSchedule";
 import TaskApplication from "../models/TaskApplication";
+import { MainAdminNotificationClient } from "../clients/MainAdminNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
@@ -1085,16 +1086,62 @@ export class TaskService {
       });
     }
 
-    // Email: task posted confirmation → requester
+    let requesterProfile: Record<string, any> | null = null;
     try {
       const Profile = mongoose.connection.collection("profiles");
-
-      // ✅ FIX: Convert requesterId to ObjectId for proper MongoDB query
       const requesterId = task.requesterId instanceof mongoose.Types.ObjectId
         ? task.requesterId
         : new mongoose.Types.ObjectId(task.requesterId);
+      requesterProfile = await Profile.findOne({ _id: requesterId });
+    } catch (profileLookupError) {
+      logger.warn("[TaskService.createTask] Requester profile lookup failed", {
+        taskId: task._id,
+        requesterId: task.requesterId?.toString?.() ?? task.requesterId,
+        error:
+          profileLookupError instanceof Error
+            ? profileLookupError.message
+            : String(profileLookupError),
+      });
+    }
 
-      const requesterProfile = await Profile.findOne({ _id: requesterId });
+    try {
+      logger.info("[TaskPostedInAppNotification][task-service] Task created — triggering ops in-app notification", {
+        service: "extrahand-platform-task-service",
+        taskId: String(task._id),
+        taskTitle: task.title,
+        budget: task.budget?.amount,
+      });
+
+      await MainAdminNotificationClient.send({
+        type: "task_posted",
+        taskId: String(task._id),
+        taskTitle: task.title,
+        userId: requesterProfile?.uid,
+        userName: requesterProfile?.name || requesterProfile?.fullName,
+        userEmail: requesterProfile?.email,
+        userPhone: requesterProfile?.phone,
+        occurredAt: new Date().toISOString(),
+      });
+
+      logger.info("[TaskPostedInAppNotification][task-service] Ops in-app notification flow completed for task", {
+        service: "extrahand-platform-task-service",
+        taskId: String(task._id),
+        taskTitle: task.title,
+      });
+    } catch (adminNotifyError) {
+      logger.error("[TaskPostedInAppNotification][task-service] Ops in-app notification flow failed for task", {
+        service: "extrahand-platform-task-service",
+        taskId: String(task._id),
+        taskTitle: task.title,
+        error:
+          adminNotifyError instanceof Error
+            ? adminNotifyError.message
+            : String(adminNotifyError),
+      });
+    }
+
+    // Email: task posted confirmation → requester
+    try {
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
@@ -1157,10 +1204,10 @@ export class TaskService {
         });
       }
     } catch (error) {
-      logger.error('Error fetching requester profile or sending task_posted_confirmation email', {
+      logger.error("Error sending task_posted_confirmation email", {
         taskId: task._id,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        error: error instanceof Error ? error.message : "Unknown error",
+        stack: error instanceof Error ? error.stack : undefined,
       });
     }
 
@@ -1215,6 +1262,9 @@ export class TaskService {
               title: `New skill matched nearby: ${task.title}`,
               body: `A ${skillMatchCategory} task has been posted near ${recommendedLocationLabel} and matches your skills.`,
               data: {
+                eventKey: 'TASK_CREATED_RECOMMENDED',
+                entityType: 'task',
+                skillMatch: true,
                 taskId: task._id.toString(),
                 category: mappedCategory,
                 skillMatchCategory,
@@ -1766,6 +1816,9 @@ export class TaskService {
               title: `Matched your skills nearby: ${task.title}`,
               body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel} and matches your skills.`,
               data: {
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: true,
                 taskId: task._id.toString(),
                 category: task.category,
                 categoryLabel: task.categoryLabel || task.category,
@@ -1791,6 +1844,9 @@ export class TaskService {
               title: `New task nearby: ${task.title}`,
               body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel}.`,
               data: {
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: false,
                 taskId: task._id.toString(),
                 category: task.category,
                 categoryLabel: task.categoryLabel || task.category,
@@ -2900,6 +2956,15 @@ export class TaskService {
     await task.save();
 
     const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
+    const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Task Start OTP';
+    const notificationData = {
+      taskId,
+      otp,
+      otpType: 'task_start',
+      expiresAt: expiresAt.toISOString(),
+      eventKey: 'TASK_UPDATED',
+      entityType: 'task',
+    };
 
     // Send via both email and in-app notifications for redundancy
     let taskerName = "tasker";
@@ -2938,20 +3003,31 @@ export class TaskService {
       logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
     }
 
+    // Push notification (FCM) to poster — same content as in-app for lock-screen visibility
+    try {
+      await NotificationClient.send({
+        eventKey: 'TASK_UPDATED',
+        category: 'taskUpdates',
+        actorId: _uid,
+        recipients: [requesterUid],
+        entity: { type: 'task', id: taskId },
+        title: pushTitle,
+        body: otpBody,
+        data: notificationData,
+      });
+    } catch (pushError) {
+      logger.warn("Failed to send task start OTP via push notification", { taskId, error: pushError });
+    }
+
     // Send in-app notification for immediate visibility
     try {
       await InAppNotificationClient.send({
         userId: requesterUid,
-        title: "Task Start OTP",
+        title: pushTitle,
         body: otpBody,
         type: "info",
         category: "taskUpdates",
-        data: {
-          taskId,
-          otp,
-          otpType: "task_start",
-          expiresAt: expiresAt.toISOString(),
-        },
+        data: notificationData,
       });
     } catch (inAppError) {
       logger.warn("Failed to send task start OTP via in-app notification", { taskId, error: inAppError });
