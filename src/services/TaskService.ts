@@ -14,6 +14,7 @@ import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import { buildScheduleVersion } from "../utils/workSchedule";
 import TaskApplication from "../models/TaskApplication";
 import { MainAdminNotificationClient } from "../clients/MainAdminNotificationClient";
@@ -1885,6 +1886,7 @@ export class TaskService {
                   var_2: String(categoryLabel),
                   var_3: String(locationLabel),
                 },
+                templateButtons: taskOpenAppButton(task._id.toString()),
                 idempotencyKey: `wa_nearby_work_skill_match:${task._id.toString()}:${nearbyUid}`,
                 metadata: {
                   workId: task._id.toString(),

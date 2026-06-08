@@ -15,6 +15,7 @@ import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import { OfferDigestService } from "./OfferDigestService";
 import { PaymentClient } from "./PaymentClient";
 import { canWithdrawAcceptedApplication } from "../utils/taskCommitment";
@@ -908,6 +909,7 @@ export class ApplicationService {
             templateBody: {
               var_1: task.title || 'your task',
             },
+            templateButtons: taskOpenAppButton(task._id.toString()),
             idempotencyKey: `assigned:${applicationId}`,
           });
         } catch (error) {

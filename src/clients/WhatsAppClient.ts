@@ -20,11 +20,18 @@ export type WhatsAppTemplateKey =
   | 'wa_work_starting_soon'
   | 'wa_application_still_open';
 
+export type WhatsAppTemplateButtonVar = {
+  index: number;
+  var_1: string;
+};
+
 export type WhatsAppNotifyPayload = {
   uid: string;
   templateKey: WhatsAppTemplateKey;
   category: 'taskUpdates' | 'taskReminders' | 'payments' | 'recommendedTaskAlerts';
   templateBody?: Record<string, string>;
+  /** Dynamic URL button suffixes (e.g. task id for extrahand.in/open/tasks/{{1}}). */
+  templateButtons?: WhatsAppTemplateButtonVar[];
   idempotencyKey?: string;
   /** Passed to messaging-service for governance caps and ops logs. */
   metadata?: Record<string, unknown>;
@@ -92,6 +99,7 @@ export class WhatsAppClient {
           templateKey: payload.templateKey,
           category: payload.category,
           templateBody: payload.templateBody,
+          templateButtons: payload.templateButtons,
           idempotencyKey: payload.idempotencyKey,
           metadata: payload.metadata,
         },

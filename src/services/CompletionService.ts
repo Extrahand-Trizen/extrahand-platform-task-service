@@ -7,6 +7,7 @@ import { NotificationClient } from './NotificationClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
+import { taskOpenAppButton } from '../utils/whatsappTaskButtons';
 import { UserServiceClient } from '../clients/UserServiceClient';
 import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
@@ -267,6 +268,7 @@ export class CompletionService {
           templateKey: 'wa_work_completed_helper',
           category: 'taskUpdates',
           templateBody: { var_1: taskTitle || 'your task' },
+          templateButtons: taskOpenAppButton(taskId),
           idempotencyKey: `completed-helper:${taskId}`,
           metadata: { workId: taskId, recipientRole: 'helper' },
         });

@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import Task from '../models/Task';
 import logger from '../config/logger';
 import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
+import { taskOpenAppButton } from '../utils/whatsappTaskButtons';
 import { resolveWorkStartInstant, buildScheduleVersion } from '../utils/workSchedule';
 import {
   hasStartedBeforeSchedule,
@@ -107,6 +108,7 @@ export class WorkStartSoonScheduler {
                   var_1: taskTitle,
                   var_2: cfg.label,
                 },
+                templateButtons: taskOpenAppButton(String(task._id)),
                 idempotencyKey: `wa_work_starting_soon:${task._id}:${requesterProfile.uid}:${slot}:${scheduleVersion}`,
                 metadata: {
                   workId: String(task._id),
@@ -126,6 +128,7 @@ export class WorkStartSoonScheduler {
                 var_1: taskTitle,
                 var_2: cfg.label,
               },
+              templateButtons: taskOpenAppButton(String(task._id)),
               idempotencyKey: `wa_work_starting_soon:${task._id}:${assigneeProfile.uid}:${slot}:${scheduleVersion}`,
               metadata: {
                 workId: String(task._id),
