@@ -11,8 +11,12 @@ import uploadRoutes from './uploads';
 import testReminderRoutes from './test-reminders';
 import analyticsRoutes from './analytics';
 import statsRoutes from './stats';
+import catalogRoutes from './catalog';
+import bookingsRoutes from './bookings';
+import assignmentsRoutes from './assignments';
 import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
+import { BookingController } from '../controllers/BookingController';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
 import { gatewayAuthMiddleware } from '../middleware/gatewayAuth';
 
@@ -27,6 +31,13 @@ router.get('/health', asyncHandler(async (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 }));
+
+// Book Now: payment-service callback (service auth only)
+router.post(
+  '/bookings/internal/payment-captured',
+  serviceAuthMiddleware,
+  asyncHandler(BookingController.paymentCaptured)
+);
 
 // Gateway auth middleware (requires gateway auth)
 router.use(gatewayAuthMiddleware);
@@ -84,6 +95,9 @@ router.use('/uploads', uploadRoutes);
 router.use('/test/reminders', testReminderRoutes); // Test endpoints (dev only)
 router.use('/analytics', analyticsRoutes);
 router.use('/stats', statsRoutes);
+router.use('/catalog', catalogRoutes);
+router.use('/bookings', bookingsRoutes);
+router.use('/admin/assignments', assignmentsRoutes);
 
 export default router;
 

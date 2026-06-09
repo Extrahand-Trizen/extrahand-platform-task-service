@@ -40,6 +40,10 @@ export class OfferDigestService {
     const task = await Task.findById(args.taskId).lean();
     if (!task) return;
 
+    if ((task as { bookingSource?: string }).bookingSource === 'book_now') {
+      return;
+    }
+
     if (!isDigestEligibleTask({ status: task.status, assigneeId: task.assigneeId })) {
       return;
     }
@@ -117,6 +121,10 @@ export class OfferDigestService {
   }): Promise<void> {
     const task = await Task.findById(args.taskId).lean();
     if (!task) return;
+
+    if ((task as { bookingSource?: string }).bookingSource === 'book_now') {
+      return;
+    }
 
     if (!isDigestEligibleTask({ status: task.status, assigneeId: task.assigneeId })) {
       return;

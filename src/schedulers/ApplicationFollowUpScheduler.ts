@@ -39,9 +39,12 @@ export class ApplicationFollowUpScheduler {
     for (const app of applications) {
       try {
         const task = await Task.findById(app.taskId)
-          .select('_id title status assigneeId requesterId')
+          .select('_id title status assigneeId requesterId bookingSource')
           .lean();
         if (!task) continue;
+        if ((task as { bookingSource?: string }).bookingSource === 'book_now') {
+          continue;
+        }
         if (!isDigestEligibleTask({ status: task.status, assigneeId: task.assigneeId })) {
           continue;
         }

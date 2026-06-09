@@ -53,6 +53,10 @@ export class ApplicationService {
         throw new BadRequestError("Task is not open for applications");
       }
 
+      if (task.bookingSource === "book_now") {
+        throw new BadRequestError("This task uses Book Now assignment — bidding is not available");
+      }
+
       // Compare ObjectIds
       if (task.requesterId.equals(applicantProfileId)) {
         throw new BadRequestError("Cannot apply to your own task");
@@ -702,6 +706,9 @@ export class ApplicationService {
 
     // Validate status transition
     if (status === "accepted") {
+      if (task.bookingSource === "book_now") {
+        throw new BadRequestError("Book Now tasks are assigned by operations — cannot accept bids");
+      }
       const negotiationStatus = application.negotiation?.status || "none";
       if (negotiationStatus === "countered_by_poster") {
         throw new BadRequestError(

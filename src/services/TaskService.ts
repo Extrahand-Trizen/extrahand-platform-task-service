@@ -314,6 +314,14 @@ export class TaskService {
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
 
+    // Book Now tasks are not marketplace listings — hide from helper browse/discover.
+    andClauses.push({
+      $or: [
+        { bookingSource: { $exists: false } },
+        { bookingSource: 'marketplace' },
+      ],
+    });
+
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
     if (status) {
       if (Array.isArray(status) && status.length > 1) {

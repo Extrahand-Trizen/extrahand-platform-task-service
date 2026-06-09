@@ -230,6 +230,12 @@ export interface ITask extends Document {
   /**
    * WhatsApp / notification governance (digest caps, schedule versioning, etc.).
    */
+  /** marketplace = bid flow; book_now = paid upfront, ops assigns helper */
+  bookingSource?: 'marketplace' | 'book_now';
+  bookingOrderId?: string;
+  bookingItemId?: string;
+  assignmentStatus?: 'pending' | 'assigned' | 'failed';
+
   notificationGovernance?: {
     /** Bumped when scheduled date/time changes — invalidates old start-soon idempotency keys. */
     scheduleVersion?: string;
@@ -577,6 +583,19 @@ const TaskSchema = new Schema<ITask>(
     },
     cancellationReason: String,
 
+    bookingSource: {
+      type: String,
+      enum: ['marketplace', 'book_now'],
+      default: 'marketplace',
+      index: true,
+    },
+    bookingOrderId: { type: String, index: true },
+    bookingItemId: String,
+    assignmentStatus: {
+      type: String,
+      enum: ['pending', 'assigned', 'failed'],
+    },
+
     notificationGovernance: {
       scheduleVersion: String,
       applicantsViewedAt: Date,
@@ -606,6 +625,8 @@ TaskSchema.index({ status: 1, createdAt: -1 });
 TaskSchema.index({ status: 1, scheduledDate: 1 });
 // Global revision: poster's revisable open tasks
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
+TaskSchema.index({ bookingSource: 1, status: 1 });
+TaskSchema.index({ bookingOrderId: 1 });
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);

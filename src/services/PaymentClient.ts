@@ -17,6 +17,116 @@ export class PaymentClient {
   }
 
   /**
+   * Create Book Now escrow (no performer until ops assigns)
+   */
+  static async createBookingEscrow(params: {
+    taskId: string;
+    bookingOrderId: string;
+    posterUid: string;
+    amount: number;
+    taskAmount?: number;
+    taskCategory?: string;
+    taskTitle?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ success: boolean; escrow?: any; order?: any; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/escrow/create-booking`,
+        params,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        }
+      );
+
+      if (response.data.success) {
+        return {
+          success: true,
+          escrow: response.data.escrow,
+          order: response.data.order,
+        };
+      }
+
+      return {
+        success: false,
+        error: response.data.error || 'Failed to create booking escrow',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to create booking escrow',
+      };
+    }
+  }
+
+  /**
+   * Attach performer after manual ops assignment
+   */
+  static async attachPerformerToEscrow(params: {
+    escrowId: string;
+    performerUid: string;
+    applicationId?: string;
+  }): Promise<{ success: boolean; escrow?: any; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.patch(
+        `${this.baseURL}/api/v1/escrow/${encodeURIComponent(params.escrowId)}/attach-performer`,
+        {
+          performerUid: params.performerUid,
+          applicationId: params.applicationId,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        }
+      );
+
+      if (response.data.success) {
+        return { success: true, escrow: response.data.escrow };
+      }
+
+      return {
+        success: false,
+        error: response.data.error || 'Failed to attach performer',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to attach performer',
+      };
+    }
+  }
+
+  /**
    * Get escrow by task ID
    */
   static async getEscrowByTaskId(taskId: string): Promise<any | null> {
