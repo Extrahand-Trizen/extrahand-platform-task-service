@@ -4,6 +4,12 @@ import ServiceVariant from '../models/ServiceVariant';
 import ServiceAddon from '../models/ServiceAddon';
 import ServiceArea from '../models/ServiceArea';
 import { NotFoundError } from '../errors/AppError';
+import logger from '../config/logger';
+
+/** Mobile parent label vs catalog subcategory slugs */
+const BOOK_NOW_CATEGORY_ALIASES: Record<string, string> = {
+  'home-cleaning': 'full-house',
+};
 
 export class CatalogService {
   static async listCategories() {
@@ -14,7 +20,8 @@ export class CatalogService {
   }
 
   static async getCategoryBySlug(slug: string) {
-    const category = await ServiceCategory.findOne({ slug, isActive: true }).lean();
+    const normalized = BOOK_NOW_CATEGORY_ALIASES[slug] || slug;
+    const category = await ServiceCategory.findOne({ slug: normalized, isActive: true }).lean();
     if (!category) throw new NotFoundError('Category not found');
     return category;
   }
@@ -29,11 +36,32 @@ export class CatalogService {
 
   static async getSkuDetail(skuSlug: string, categorySlug?: string) {
     const skuQuery: Record<string, unknown> = { slug: skuSlug, isActive: true };
+    let categoryFilterApplied = false;
+
     if (categorySlug) {
-      const category = await this.getCategoryBySlug(categorySlug);
-      skuQuery.categoryId = category._id;
+      const normalizedCategory = BOOK_NOW_CATEGORY_ALIASES[categorySlug] || categorySlug;
+      const category = await ServiceCategory.findOne({
+        slug: normalizedCategory,
+        isActive: true,
+      }).lean();
+
+      if (category) {
+        skuQuery.categoryId = category._id;
+        categoryFilterApplied = true;
+      } else {
+        logger.warn('Book Now category slug not in catalog; resolving SKU globally', {
+          categorySlug,
+          skuSlug,
+        });
+      }
     }
-    const sku = await ServiceSku.findOne(skuQuery).lean();
+
+    let sku = await ServiceSku.findOne(skuQuery).lean();
+
+    if (!sku && categoryFilterApplied) {
+      sku = await ServiceSku.findOne({ slug: skuSlug, isActive: true }).lean();
+    }
+
     if (!sku) throw new NotFoundError('Service not found');
 
     const [variants, addons, category] = await Promise.all([
@@ -52,15 +80,24 @@ export class CatalogService {
   }
 
   static async isPinCodeServiceable(pinCode: string, city?: string): Promise<boolean> {
-    const query: Record<string, unknown> = { isActive: true, pinCodes: pinCode };
-    if (city) query.city = new RegExp(`^${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-    const area = await ServiceArea.findOne(query).lean();
-    if (area) return true;
+    const activeAreaCount = await ServiceArea.countDocuments({ isActive: true });
+    if (activeAreaCount === 0) return true;
+
+    if (pinCode) {
+      const pinQuery: Record<string, unknown> = { isActive: true, pinCodes: pinCode };
+      if (city) {
+        pinQuery.city = new RegExp(`^${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+      }
+      const area = await ServiceArea.findOne(pinQuery).lean();
+      if (area) return true;
+    }
+
     if (!city) return false;
+
     const cityWide = await ServiceArea.findOne({
       isActive: true,
       city: new RegExp(`^${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-      pinCodes: { $size: 0 },
+      $or: [{ pinCodes: { $size: 0 } }, { pinCodes: { $exists: false } }],
     }).lean();
     return Boolean(cityWide);
   }

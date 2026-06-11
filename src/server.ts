@@ -14,7 +14,6 @@ import { ApplicationFollowUpScheduler } from './schedulers/ApplicationFollowUpSc
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
 import { initRedis, disconnectRedis } from './config/redis';
-
 async function startServer() {
   try {
     // Connect to MongoDB

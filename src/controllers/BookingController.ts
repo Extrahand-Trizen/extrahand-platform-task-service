@@ -17,16 +17,21 @@ export class BookingController {
       variantSlug,
       addonSlugs,
       quantity,
+      items,
       address,
       scheduledDate,
       scheduledTimeStart,
       scheduledTimeEnd,
       timeSlot,
       notes,
+      name,
+      unitPrice,
+      lineTotal,
     } = req.body;
 
-    if (!skuSlug || !address?.line1 || !address?.city || !address?.pinCode) {
-      throw new BadRequestError('skuSlug and full address are required');
+    const hasItems = Array.isArray(items) && items.length > 0;
+    if ((!skuSlug && !hasItems) || !address?.line1 || !address?.city || !address?.pinCode) {
+      throw new BadRequestError('Service item(s) and full address are required');
     }
 
     const result = await BookingService.createBooking({
@@ -37,12 +42,16 @@ export class BookingController {
       variantSlug,
       addonSlugs,
       quantity,
+      items,
       address,
       scheduledDate,
       scheduledTimeStart,
       scheduledTimeEnd,
       timeSlot,
       notes,
+      name,
+      unitPrice,
+      lineTotal,
     });
 
     res.status(201).json({
@@ -50,11 +59,27 @@ export class BookingController {
       data: {
         order: result.order,
         item: result.item,
+        items: result.items,
         task: result.task,
+        tasks: result.tasks,
         escrow: result.escrow,
         razorpayOrder: result.razorpayOrder,
       },
     });
+  }
+
+  static async getOrderIdForTask(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+    const orderId = await BookingService.findOrderIdForTask(req.params.taskId, user.uid);
+    if (!orderId) {
+      res.status(404).json({ success: false, error: 'Booking not found for this work' });
+      return;
+    }
+    res.json({ success: true, data: { orderId } });
   }
 
   static async getOrder(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -89,6 +114,25 @@ export class BookingController {
       req.params.orderId,
       user.uid,
       req.body?.reason
+    );
+    res.json({ success: true, data });
+  }
+
+  static async cancelOrderItem(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+    const taskId = String(req.body?.taskId || '').trim();
+    if (!taskId) {
+      throw new BadRequestError('taskId is required');
+    }
+    const data = await BookingService.cancelBookingItem(
+      req.params.orderId,
+      taskId,
+      user.uid,
+      req.body?.reason,
     );
     res.json({ success: true, data });
   }

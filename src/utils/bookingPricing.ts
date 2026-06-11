@@ -1,7 +1,4 @@
-/** Default fee snapshot for checkout display; payment-service applies authoritative fee on escrow. */
-const DEFAULT_PLATFORM_FEE_PERCENT = 0.05;
-const DEFAULT_GST_PERCENT = 0.18;
-
+/** Book Now: customer pays package price only — no platform fee or GST on top. */
 export function computeBookingTotals(taskAmount: number): {
   subtotal: number;
   addonsTotal: number;
@@ -10,11 +7,13 @@ export function computeBookingTotals(taskAmount: number): {
   total: number;
 } {
   const subtotal = Math.round(taskAmount * 100) / 100;
-  const addonsTotal = 0;
-  const platformFee = Math.round(subtotal * DEFAULT_PLATFORM_FEE_PERCENT * 100) / 100;
-  const gst = Math.round(platformFee * DEFAULT_GST_PERCENT * 100) / 100;
-  const total = Math.round((subtotal + platformFee + gst) * 100) / 100;
-  return { subtotal, addonsTotal, platformFee, gst, total };
+  return {
+    subtotal,
+    addonsTotal: 0,
+    platformFee: 0,
+    gst: 0,
+    total: subtotal,
+  };
 }
 
 export function computeLinePrice(

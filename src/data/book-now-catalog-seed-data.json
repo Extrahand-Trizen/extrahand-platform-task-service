@@ -1,0 +1,454 @@
+{
+  "categories": [
+    {
+      "slug": "full-house",
+      "name": "Full House Cleaning",
+      "sortOrder": 1
+    },
+    {
+      "slug": "bathroom",
+      "name": "Bathroom Cleaning",
+      "sortOrder": 2
+    },
+    {
+      "slug": "kitchen",
+      "name": "Kitchen Cleaning",
+      "sortOrder": 3
+    },
+    {
+      "slug": "sofa",
+      "name": "Sofa Cleaning",
+      "sortOrder": 4
+    },
+    {
+      "slug": "mattress",
+      "name": "Mattress Cleaning",
+      "sortOrder": 5
+    },
+    {
+      "slug": "window-glass",
+      "name": "Window & Glass Cleaning",
+      "sortOrder": 6
+    },
+    {
+      "slug": "ac-services",
+      "name": "AC Services",
+      "sortOrder": 7
+    },
+    {
+      "slug": "appliance-repair",
+      "name": "Appliance Repair",
+      "sortOrder": 8
+    }
+  ],
+  "packages": [
+    {
+      "catalogId": "full-house",
+      "packageId": "1bhk-economy",
+      "name": "1 BHK Economy Clean",
+      "basePrice": 999,
+      "durationMinutes": 120,
+      "description": "Bedroom · Living · Kitchen · 1 Bathroom."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "1bhk-deep",
+      "name": "1 BHK Deep Clean",
+      "basePrice": 1499,
+      "durationMinutes": 240,
+      "description": "Economy + sofa wipe, appliance exterior, balcony."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "2bhk-economy",
+      "name": "2 BHK Economy Clean",
+      "basePrice": 1299,
+      "durationMinutes": 180,
+      "description": "2 Bedrooms · Living · Kitchen · 2 Bathrooms."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "2bhk-deep",
+      "name": "2 BHK Deep Clean",
+      "basePrice": 1999,
+      "durationMinutes": 300,
+      "description": "Economy + detailed appliance & furniture clean."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "3bhk-economy",
+      "name": "3 BHK Economy Clean",
+      "basePrice": 1599,
+      "durationMinutes": 240,
+      "description": "3 Bedrooms · Living · Kitchen · 3 Bathrooms."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "4bhk-economy",
+      "name": "4 BHK Economy Clean",
+      "basePrice": 1999,
+      "durationMinutes": 300,
+      "description": "4 Bedrooms · Living · Kitchen · 4 Bathrooms."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "combo-1bed",
+      "name": "1 Bedroom Combo",
+      "basePrice": 599,
+      "durationMinutes": 90,
+      "description": "1 Bedroom + attached bathroom."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "combo-2bed",
+      "name": "2 Bedroom Combo",
+      "basePrice": 999,
+      "durationMinutes": 150,
+      "description": "2 Bedrooms + attached bathrooms."
+    },
+    {
+      "catalogId": "full-house",
+      "packageId": "full-home-deep",
+      "name": "Full Home Deep Clean",
+      "basePrice": 2499,
+      "durationMinutes": 360,
+      "description": "Thorough deep cleaning including walls, fans, exhausts."
+    },
+    {
+      "catalogId": "bathroom",
+      "packageId": "regular-clean",
+      "name": "Bathroom Cleaning",
+      "basePrice": 249,
+      "durationMinutes": 45,
+      "description": "Toilet, basin, fixtures, mirror, floor & visible surfaces."
+    },
+    {
+      "catalogId": "kitchen",
+      "packageId": "standard-kitchen-clean",
+      "name": "Standard Kitchen Clean",
+      "basePrice": 599,
+      "durationMinutes": 120,
+      "description": "Platform, tiles, appliances exterior, inside cabinets."
+    },
+    {
+      "catalogId": "kitchen",
+      "packageId": "deep-kitchen-clean",
+      "name": "Deep Kitchen Clean",
+      "basePrice": 899,
+      "durationMinutes": 180,
+      "description": "Standard + degreasing, hob, sink descaling."
+    },
+    {
+      "catalogId": "kitchen",
+      "packageId": "empty-kitchen-clean",
+      "name": "Empty Kitchen Clean",
+      "basePrice": 799,
+      "durationMinutes": 150,
+      "description": "Pre move-in/out."
+    },
+    {
+      "catalogId": "kitchen",
+      "packageId": "kitchen-chimney-clean",
+      "name": "Kitchen Chimney Clean",
+      "basePrice": 499,
+      "durationMinutes": 60,
+      "description": "Filter baffle or mesh clean."
+    },
+    {
+      "catalogId": "kitchen",
+      "packageId": "post-reno-kitchen-clean",
+      "name": "Post Reno Kitchen Clean",
+      "basePrice": 999,
+      "durationMinutes": 180,
+      "description": "Remove construction dust, grout, paint spots."
+    },
+    {
+      "catalogId": "sofa",
+      "packageId": "2-seater-dry-foam",
+      "name": "2 Seater Dry Foam Wash",
+      "basePrice": 599,
+      "durationMinutes": 60,
+      "description": "Dry foam wash + stain treatment."
+    },
+    {
+      "catalogId": "sofa",
+      "packageId": "3-seater-dry-foam",
+      "name": "3 Seater Dry Foam Wash",
+      "basePrice": 749,
+      "durationMinutes": 90,
+      "description": "Dry foam wash + stain treatment."
+    },
+    {
+      "catalogId": "sofa",
+      "packageId": "l-shape-dry-foam",
+      "name": "L-Shape Dry Foam Wash",
+      "basePrice": 999,
+      "durationMinutes": 120,
+      "description": "Dry foam wash for L-shaped sofa."
+    },
+    {
+      "catalogId": "sofa",
+      "packageId": "sofa-chair-clean",
+      "name": "Sofa Chair Clean",
+      "basePrice": 299,
+      "durationMinutes": 45,
+      "description": "Single sofa chair dry foam wash."
+    },
+    {
+      "catalogId": "mattress",
+      "packageId": "single-mattress-clean",
+      "name": "Single Mattress Clean",
+      "basePrice": 499,
+      "durationMinutes": 60,
+      "description": "UV sanitise • vacuum • deodorise."
+    },
+    {
+      "catalogId": "mattress",
+      "packageId": "double-queen-mattress-clean",
+      "name": "Double/Queen Mattress Clean",
+      "basePrice": 649,
+      "durationMinutes": 60,
+      "description": "UV sanitise • vacuum • deodorise."
+    },
+    {
+      "catalogId": "mattress",
+      "packageId": "king-mattress-clean",
+      "name": "King Mattress Clean",
+      "basePrice": 799,
+      "durationMinutes": 90,
+      "description": "UV sanitise • vacuum • deodorise."
+    },
+    {
+      "catalogId": "mattress",
+      "packageId": "mattress-protector-wash",
+      "name": "Mattress Protector Wash",
+      "basePrice": 199,
+      "durationMinutes": 60,
+      "description": "Washed and delivered within 48 hrs."
+    },
+    {
+      "catalogId": "window-glass",
+      "packageId": "interior-windows-per-5",
+      "name": "Interior Windows (per 5)",
+      "basePrice": 399,
+      "durationMinutes": 60,
+      "description": "Streak-free inside clean for up to 5 windows."
+    },
+    {
+      "catalogId": "window-glass",
+      "packageId": "exterior-windows-per-5",
+      "name": "Exterior Windows (per 5)",
+      "basePrice": 499,
+      "durationMinutes": 60,
+      "description": "Outside surface clean for up to 5 windows."
+    },
+    {
+      "catalogId": "window-glass",
+      "packageId": "glass-door-per-door",
+      "name": "Glass Door (per door)",
+      "basePrice": 349,
+      "durationMinutes": 45,
+      "description": "Full glass door clean."
+    },
+    {
+      "catalogId": "window-glass",
+      "packageId": "mirror-clean-per-mirror",
+      "name": "Mirror Clean (per mirror)",
+      "basePrice": 149,
+      "durationMinutes": 20,
+      "description": "Streak-free mirror clean."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "foam-blast-service",
+      "name": "Foam Blast Service",
+      "basePrice": 449,
+      "durationMinutes": 60,
+      "description": "Jet wash + filter clean + coil wash."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "premium-ac-service",
+      "name": "Premium AC Service",
+      "basePrice": 549,
+      "durationMinutes": 90,
+      "description": "Full indoor + outdoor coil clean + gas check."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "anti-rust-service",
+      "name": "Anti-Rust Service",
+      "basePrice": 649,
+      "durationMinutes": 120,
+      "description": "Rust protection coat + full service."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "r22-gas-refill",
+      "name": "R22 Gas Refill",
+      "basePrice": 1299,
+      "durationMinutes": 90,
+      "description": "For older AC models. Per unit."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "r32-gas-refill",
+      "name": "R32 Gas Refill",
+      "basePrice": 1499,
+      "durationMinutes": 90,
+      "description": "For newer inverter ACs."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "split-ac-installation",
+      "name": "Split AC Installation",
+      "basePrice": 849,
+      "durationMinutes": 120,
+      "description": "Labour only · up to 15ft piping."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "split-ac-uninstallation",
+      "name": "Split AC Uninstallation",
+      "basePrice": 499,
+      "durationMinutes": 60,
+      "description": "Safe removal and packing."
+    },
+    {
+      "catalogId": "ac-services",
+      "packageId": "ac-diagnosis-inspection",
+      "name": "AC Diagnosis / Inspection",
+      "basePrice": 249,
+      "durationMinutes": 45,
+      "description": "Technician visit + full inspection report."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "wm-checkup",
+      "name": "WM Checkup / Diagnosis",
+      "basePrice": 199,
+      "durationMinutes": 45,
+      "description": "Technician visit + diagnosis."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "wm-installation",
+      "name": "WM Installation",
+      "basePrice": 349,
+      "durationMinutes": 60,
+      "description": "Labour only."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "wm-drum-deep-cleaning",
+      "name": "WM Drum Deep Cleaning",
+      "basePrice": 399,
+      "durationMinutes": 60,
+      "description": "Descaling + sanitise + deodorise."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "fridge-checkup",
+      "name": "Fridge Checkup",
+      "basePrice": 179,
+      "durationMinutes": 45,
+      "description": "Technician visit + diagnosis."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "fridge-deep-cleaning",
+      "name": "Fridge Deep Cleaning",
+      "basePrice": 399,
+      "durationMinutes": 90,
+      "description": "Coil + interior sanitise + deodorise."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "fridge-gas-refill",
+      "name": "Fridge Gas Refill",
+      "basePrice": 1499,
+      "durationMinutes": 120,
+      "description": "Refrigerant top-up."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "purifier-checkup",
+      "name": "Purifier Checkup",
+      "basePrice": 199,
+      "durationMinutes": 30,
+      "description": "Technician visit + inspection."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "purifier-service",
+      "name": "Purifier Service",
+      "basePrice": 549,
+      "durationMinutes": 60,
+      "description": "6-month full service."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "filter-replacement",
+      "name": "Filter Replacement",
+      "basePrice": 249,
+      "durationMinutes": 45,
+      "description": "Labour only."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "geyser-checkup",
+      "name": "Geyser Checkup",
+      "basePrice": 199,
+      "durationMinutes": 30,
+      "description": "Technician visit + diagnosis."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "geyser-servicing",
+      "name": "Geyser Servicing",
+      "basePrice": 299,
+      "durationMinutes": 60,
+      "description": "Scale removal + flush + safety check."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "geyser-installation",
+      "name": "Geyser Installation",
+      "basePrice": 399,
+      "durationMinutes": 60,
+      "description": "Labour only."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "microwave-checkup",
+      "name": "Microwave Checkup",
+      "basePrice": 179,
+      "durationMinutes": 30,
+      "description": "Technician visit + diagnosis."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "microwave-deep-clean",
+      "name": "Microwave Deep Clean",
+      "basePrice": 249,
+      "durationMinutes": 45,
+      "description": "Degrease + sanitise interior."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "tv-checkup",
+      "name": "TV Checkup",
+      "basePrice": 199,
+      "durationMinutes": 45,
+      "description": "Technician visit + diagnosis."
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "tv-wall-mounting",
+      "name": "TV Wall Mounting",
+      "basePrice": 449,
+      "durationMinutes": 60,
+      "description": "Labour only. Up to 65 inch."
+    }
+  ]
+}

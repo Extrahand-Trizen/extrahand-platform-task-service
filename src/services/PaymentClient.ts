@@ -440,6 +440,63 @@ export class PaymentClient {
   }
 
   /**
+   * Partial refund for one Book Now line item (multi-service checkout).
+   */
+  static async partialRefundBookNowLineItem(params: {
+    bookingOrderId: string;
+    taskId: string;
+    lineAmountRupees: number;
+    taskStartDate: string;
+    assignedAt?: string | null;
+    reason?: string;
+    userId: string;
+    taskTitle?: string;
+    isLastActiveItem: boolean;
+    catalogId?: string;
+    partnerReachedLocation?: boolean;
+  }): Promise<{ success: boolean; refund?: unknown; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payment/book-now/cancel-line-item`,
+        params,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 30000,
+        },
+      );
+
+      if (response.data?.success) {
+        return { success: true, refund: response.data.refund };
+      }
+
+      return {
+        success: false,
+        error: response.data?.error || 'Failed to process partial refund',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to process partial refund',
+      };
+    }
+  }
+
+  /**
    * Cancel escrow / trigger Razorpay payment refund when a task is cancelled (service-to-service).
    * POST /api/v1/payment/cancel
    */
@@ -453,6 +510,8 @@ export class PaymentClient {
     /** Task budget (rupees) — %-fee base to match cancel UI */
     feeBaseAmount?: number;
     taskTitle?: string;
+    catalogId?: string;
+    partnerReachedLocation?: boolean;
   }): Promise<{
     success: boolean;
     cancelled?: boolean;
@@ -485,6 +544,8 @@ export class PaymentClient {
           assignedAt: params.assignedAt ?? undefined,
           feeBaseAmount: params.feeBaseAmount,
           taskTitle: params.taskTitle,
+          catalogId: params.catalogId,
+          partnerReachedLocation: params.partnerReachedLocation,
         },
         {
           headers: {
