@@ -154,6 +154,91 @@ export class UserServiceClient {
   }
 
   /**
+   * Poster / Book Now helper availability — same rules as GET nearby-helpers.
+   * Returns null when user-service cannot be reached (fail-open, like poster UI).
+   */
+  static async checkPosterHelperAvailability(params: {
+    firebaseUid?: string;
+    city?: string;
+    pinCode?: string;
+    lat?: number;
+    lng?: number;
+    limit?: number;
+  }): Promise<{
+    checkPerformed: boolean;
+    resolvedCity: string | null;
+    count: number;
+    hasHelpers: boolean;
+    serviceable: boolean;
+  } | null> {
+    const city = String(params.city || '').trim();
+    const pinCode = String(params.pinCode || '').trim();
+    const firebaseUid = String(params.firebaseUid || '').trim();
+    const limit = params.limit ?? 1;
+
+    if (!this.isInitialized) {
+      logger.warn('UserServiceClient: Not initialized, calling initialize with defaults');
+      this.initialize();
+    }
+
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/api/v1/profiles/internal/helper-availability-by-city`,
+        {
+          params: {
+            ...(city ? { city } : {}),
+            ...(pinCode ? { pinCode } : {}),
+            ...(firebaseUid ? { firebaseUid } : {}),
+            ...(typeof params.lat === 'number' && Number.isFinite(params.lat)
+              ? { lat: params.lat }
+              : {}),
+            ...(typeof params.lng === 'number' && Number.isFinite(params.lng)
+              ? { lng: params.lng }
+              : {}),
+            limit,
+          },
+          headers: {
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 5000,
+        },
+      );
+
+      const payload = response.data?.data ?? response.data;
+      const checkPerformed = Boolean(payload?.checkPerformed);
+      const hasHelpers = Boolean(payload?.hasHelpers);
+      const count = Number(payload?.count) || 0;
+      const resolvedCity =
+        typeof payload?.resolvedCity === 'string' ? payload.resolvedCity : city || null;
+
+      return {
+        checkPerformed,
+        resolvedCity,
+        count,
+        hasHelpers,
+        serviceable: checkPerformed ? hasHelpers : true,
+      };
+    } catch (error) {
+      const axiosError = error as AxiosError;
+      logger.warn('UserServiceClient: Failed poster helper availability check', {
+        city,
+        firebaseUid: firebaseUid || null,
+        status: axiosError.response?.status,
+        message: axiosError.message,
+      });
+      return null;
+    }
+  }
+
+  /** @deprecated Use checkPosterHelperAvailability */
+  static async hasHelpersInCity(city: string): Promise<boolean | null> {
+    const result = await this.checkPosterHelperAvailability({ city, limit: 1 });
+    if (result === null) return null;
+    return result.serviceable;
+  }
+
+  /**
    * Update performer profile stats after task completion
    * Increments completedTasks and totalTasks on the user-service profile.
    *

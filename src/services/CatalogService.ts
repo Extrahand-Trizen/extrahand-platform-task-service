@@ -3,12 +3,21 @@ import ServiceSku from '../models/ServiceSku';
 import ServiceVariant from '../models/ServiceVariant';
 import ServiceAddon from '../models/ServiceAddon';
 import ServiceArea from '../models/ServiceArea';
+import { UserServiceClient } from '../clients/UserServiceClient';
 import { NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
 
 /** Mobile parent label vs catalog subcategory slugs */
 const BOOK_NOW_CATEGORY_ALIASES: Record<string, string> = {
   'home-cleaning': 'full-house',
+};
+
+export type BookNowAreaCheckResult = {
+  serviceable: boolean;
+  hasHelpers: boolean;
+  count: number;
+  checkPerformed: boolean;
+  resolvedCity: string | null;
 };
 
 export class CatalogService {
@@ -79,26 +88,67 @@ export class CatalogService {
     return ServiceArea.find(query).sort({ city: 1 }).lean();
   }
 
-  static async isPinCodeServiceable(pinCode: string, city?: string): Promise<boolean> {
-    const activeAreaCount = await ServiceArea.countDocuments({ isActive: true });
-    if (activeAreaCount === 0) return true;
+  static async checkBookNowArea(params: {
+    pinCode?: string;
+    city?: string;
+    customerUid?: string;
+    lat?: number;
+    lng?: number;
+  }): Promise<BookNowAreaCheckResult> {
+    const normalizedCity = params.city?.trim() || null;
+    const availability = await UserServiceClient.checkPosterHelperAvailability({
+      firebaseUid: params.customerUid,
+      city: normalizedCity || undefined,
+      pinCode: params.pinCode,
+      lat: params.lat,
+      lng: params.lng,
+      limit: 1,
+    });
 
-    if (pinCode) {
-      const pinQuery: Record<string, unknown> = { isActive: true, pinCodes: pinCode };
-      if (city) {
-        pinQuery.city = new RegExp(`^${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-      }
-      const area = await ServiceArea.findOne(pinQuery).lean();
-      if (area) return true;
+    if (availability === null) {
+      logger.warn('Book Now area check: user-service unavailable, allowing checkout (fail-open)', {
+        city: normalizedCity,
+        pinCode: params.pinCode,
+        customerUid: params.customerUid,
+      });
+      return {
+        serviceable: true,
+        hasHelpers: true,
+        count: 0,
+        checkPerformed: false,
+        resolvedCity: normalizedCity,
+      };
     }
 
-    if (!city) return false;
+    logger.info('Book Now area check: poster helper availability', {
+      city: normalizedCity,
+      pinCode: params.pinCode,
+      customerUid: params.customerUid,
+      ...availability,
+    });
 
-    const cityWide = await ServiceArea.findOne({
-      isActive: true,
-      city: new RegExp(`^${city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-      $or: [{ pinCodes: { $size: 0 } }, { pinCodes: { $exists: false } }],
-    }).lean();
-    return Boolean(cityWide);
+    return {
+      serviceable: availability.serviceable,
+      hasHelpers: availability.hasHelpers,
+      count: availability.count,
+      checkPerformed: availability.checkPerformed,
+      resolvedCity: availability.resolvedCity,
+    };
+  }
+
+  static async isPinCodeServiceable(
+    pinCode: string,
+    city?: string,
+    customerUid?: string,
+    coordinates?: [number, number],
+  ): Promise<boolean> {
+    const result = await this.checkBookNowArea({
+      pinCode,
+      city,
+      customerUid,
+      lng: coordinates?.[0],
+      lat: coordinates?.[1],
+    });
+    return result.serviceable;
   }
 }

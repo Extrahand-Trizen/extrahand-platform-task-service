@@ -1,5 +1,8 @@
 import { Request, Response } from 'express';
 import { CatalogService } from '../services/CatalogService';
+import { AuthenticatedRequest } from '../types';
+import logger from '../config/logger';
+
 export class CatalogController {
   static async listCategories(_req: Request, res: Response): Promise<void> {
     const categories = await CatalogService.listCategories();
@@ -25,11 +28,48 @@ export class CatalogController {
   }
 
   static async checkPinCode(req: Request, res: Response): Promise<void> {
-    const pinCode = String(req.query.pinCode || '');
+    const pinCode = String(req.query.pinCode || '').trim();
     const city = req.query.city as string | undefined;
-    const serviceable = pinCode
-      ? await CatalogService.isPinCodeServiceable(pinCode, city)
-      : false;
-    res.json({ success: true, data: { pinCode, city, serviceable } });
+    const lat =
+      req.query.lat !== undefined ? parseFloat(String(req.query.lat)) : undefined;
+    const lng =
+      req.query.lng !== undefined ? parseFloat(String(req.query.lng)) : undefined;
+    const customerUid = [
+      typeof req.query.firebaseUid === 'string' ? req.query.firebaseUid.trim() : '',
+      (req as AuthenticatedRequest).user?.uid,
+      typeof req.headers['x-user-id'] === 'string' ? req.headers['x-user-id'].trim() : '',
+    ].find((value) => Boolean(value));
+
+    const result = await CatalogService.checkBookNowArea({
+      pinCode: pinCode || undefined,
+      city,
+      customerUid,
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lng: Number.isFinite(lng) ? lng : undefined,
+    });
+
+    logger.info('Book Now areas/check result', {
+      customerUid: customerUid || null,
+      city: city || null,
+      pinCode: pinCode || null,
+      serviceable: result.serviceable,
+      hasHelpers: result.hasHelpers,
+      count: result.count,
+      checkPerformed: result.checkPerformed,
+      resolvedCity: result.resolvedCity,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        pinCode,
+        city,
+        resolvedCity: result.resolvedCity,
+        serviceable: result.serviceable,
+        hasHelpers: result.hasHelpers,
+        count: result.count,
+        checkPerformed: result.checkPerformed,
+      },
+    });
   }
 }

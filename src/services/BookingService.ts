@@ -214,7 +214,12 @@ export class BookingService {
       lineTotal,
     } = params;
 
-    const serviceable = await CatalogService.isPinCodeServiceable(address.pinCode, address.city);
+    const serviceable = await CatalogService.isPinCodeServiceable(
+      address.pinCode,
+      address.city,
+      customerUid,
+      address.coordinates,
+    );
     if (!serviceable) {
       throw new BadRequestError('Service is not available in this area yet');
     }
