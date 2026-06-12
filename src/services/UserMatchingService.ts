@@ -249,41 +249,46 @@ export class UserMatchingService {
       const Profile = mongoose.connection.collection('profiles');
 
       const baseFilters = {
-        roles: { $in: ['tasker', 'helper', 'performer'] },
+        roles: { $in: ['tasker', 'helper', 'performer', 'both'] },
         isActive: true,
-        // Support both the current nested verification flag and legacy profile shape.
-        $or: [
-          { 'roleVerifications.tasker.canAcceptTasks': true },
-          { canAcceptTasks: true },
-        ],
+        'dataPrivacy.accountDeleted': { $ne: true },
       };
 
+      // Geo indexes live on location.coordinates / homeLocation.coordinates (see Profile schema).
       const taskersByProfileLocation = await Profile.find({
-        ...baseFilters,
-        location: {
-          $near: {
-            $geometry: {
-              type: 'Point',
-              coordinates: [longitude, latitude],
+        $and: [
+          baseFilters,
+          {
+            'location.coordinates': {
+              $near: {
+                $geometry: {
+                  type: 'Point',
+                  coordinates: [longitude, latitude],
+                },
+                $maxDistance: radiusMeters,
+              },
             },
-            $maxDistance: radiusMeters,
           },
-        },
+        ],
       })
         .project({ uid: 1 })
         .toArray();
 
       const fallbackTaskersByHomeLocation = await Profile.find({
-        ...baseFilters,
-        homeLocation: {
-          $near: {
-            $geometry: {
-              type: 'Point',
-              coordinates: [longitude, latitude],
+        $and: [
+          baseFilters,
+          {
+            'homeLocation.coordinates': {
+              $near: {
+                $geometry: {
+                  type: 'Point',
+                  coordinates: [longitude, latitude],
+                },
+                $maxDistance: radiusMeters,
+              },
             },
-            $maxDistance: radiusMeters,
           },
-        },
+        ],
       })
         .project({ uid: 1 })
         .toArray();

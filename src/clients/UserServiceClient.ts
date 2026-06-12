@@ -71,8 +71,17 @@ export class UserServiceClient {
    * });
    */
    static async matchUsers(
-    type: 'skill' | 'keywords' | 'categories',
-    criteria: { category?: string; keywords?: string[]; categorySlugs?: string[] }
+    type: 'skill' | 'nearby' | 'keywords' | 'categories',
+    criteria: {
+      category?: string;
+      categories?: string[];
+      keywords?: string[];
+      categorySlugs?: string[];
+      longitude?: number;
+      latitude?: number;
+      radiusMeters?: number;
+      excludeUids?: string[];
+    }
   ): Promise<string[]> {
     if (!this.isInitialized) {
       logger.warn('UserServiceClient: Not initialized, calling initialize with defaults');
@@ -116,6 +125,32 @@ export class UserServiceClient {
       // This ensures a task creation failure doesn't prevent notifications
       return [];
     }
+  }
+
+  static async matchSkillCategories(categories: string[]): Promise<string[]> {
+    const unique = Array.from(
+      new Set(
+        (categories || []).filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+        ),
+      ),
+    );
+    if (unique.length === 0) return [];
+
+    if (unique.length === 1) {
+      return this.matchUsers('skill', { category: unique[0] });
+    }
+
+    return this.matchUsers('skill', { categories: unique });
+  }
+
+  static async matchNearbyTaskers(params: {
+    longitude: number;
+    latitude: number;
+    radiusMeters?: number;
+    excludeUids?: string[];
+  }): Promise<string[]> {
+    return this.matchUsers('nearby', params);
   }
 
   /**

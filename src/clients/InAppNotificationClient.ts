@@ -50,7 +50,7 @@ export class InAppNotificationClient {
    */
   static initialize(baseURL?: string, serviceName?: string): void {
     const env = validateEnv();
-    this.baseURL = baseURL || process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:4006';
+    this.baseURL = baseURL || process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:4005';
     this.serviceAuthToken = env.SERVICE_AUTH_TOKEN || '';
     this.serviceName = serviceName || process.env.SERVICE_NAME || 'service-client';
     this.isInitialized = true;

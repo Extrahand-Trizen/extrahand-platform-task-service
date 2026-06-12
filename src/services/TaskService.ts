@@ -217,6 +217,27 @@ const MAX_PAGE = 100;
 const TASK_LIST_SELECT =
   'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId';
 
+/** Post & Choose only — Book Now tasks are assigned via ops, not helper browse. */
+function buildMarketplaceBrowseClause(): Record<string, unknown> {
+  return {
+    $and: [
+      {
+        $or: [
+          { bookingSource: { $exists: false } },
+          { bookingSource: 'marketplace' },
+        ],
+      },
+      {
+        $or: [
+          { bookingOrderId: { $exists: false } },
+          { bookingOrderId: null },
+          { bookingOrderId: '' },
+        ],
+      },
+    ],
+  };
+}
+
 const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
 
@@ -289,7 +310,7 @@ export class TaskService {
     let cacheKey: string | null = null;
 
     if (isCacheable) {
-      cacheKey = `tasks:list:open:p${effectivePage}:20`;
+      cacheKey = `tasks:list:open:marketplace:v2:p${effectivePage}:20`;
 
       try {
         const redis = getRedisClient();
@@ -320,12 +341,7 @@ export class TaskService {
     const andClauses: any[] = [];
 
     // Book Now tasks are not marketplace listings — hide from helper browse/discover.
-    andClauses.push({
-      $or: [
-        { bookingSource: { $exists: false } },
-        { bookingSource: 'marketplace' },
-      ],
-    });
+    andClauses.push(buildMarketplaceBrowseClause());
 
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
     if (status) {
@@ -518,12 +534,7 @@ export class TaskService {
     const andClauses: any[] = [];
 
     // Book Now tasks are ops-assigned — exclude from helper browse/nearby.
-    andClauses.push({
-      $or: [
-        { bookingSource: { $exists: false } },
-        { bookingSource: 'marketplace' },
-      ],
-    });
+    andClauses.push(buildMarketplaceBrowseClause());
 
     // Include nearby tasks (with coordinates) OR remote/packers-movers tasks (without coordinates)
     // This ensures tasks like packers-movers that don't have a fixed location are always shown
@@ -1235,32 +1246,72 @@ export class TaskService {
 
     const posterUid = resolvePosterUid(uid, requesterProfile);
 
-    const skillMatchCategory = [
-      task.categoryLabel,
-      task.subcategory,
-      categorySlug,
-      frontendCategory,
-      mappedCategory,
-    ].find((value) => typeof value === 'string' && value.trim().length > 0) as
-      | string
-      | undefined;
+    const skillMatchCategories = Array.from(
+      new Set(
+        [
+          task.subcategory,
+          task.categorySlug,
+          categorySlug,
+          task.categoryLabel,
+          task.category,
+          frontendCategory,
+          mappedCategory,
+        ].filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+        ),
+      ),
+    );
+
+    const skillMatchCategory = skillMatchCategories[0];
 
     let skillMatchedTaskers: string[] = [];
     let nearbyTaskers: string[] = [];
 
     if (posterUid) {
       try {
-        if (skillMatchCategory) {
-          const skillMatchedUsersRaw = await UserServiceClient.matchUsers('skill', {
-            category: skillMatchCategory,
-          });
+        if (skillMatchCategories.length > 0) {
+          const skillMatchedUsersRaw = await UserServiceClient.matchSkillCategories(
+            skillMatchCategories,
+          );
           skillMatchedTaskers = excludeTaskPoster(skillMatchedUsersRaw, posterUid);
         }
-        nearbyTaskers = await UserMatchingService.findNearbyTaskers(
-          task,
-          undefined,
-          [posterUid],
-        );
+
+        const coords: [number, number] | undefined = task?.location?.coordinates;
+        const hasValidCoords =
+          Array.isArray(coords) &&
+          coords.length === 2 &&
+          typeof coords[0] === 'number' &&
+          typeof coords[1] === 'number';
+
+        if (hasValidCoords) {
+          nearbyTaskers = await UserServiceClient.matchNearbyTaskers({
+            longitude: coords[0],
+            latitude: coords[1],
+            excludeUids: [posterUid],
+          });
+
+          // Fallback to direct DB geo match if user-service is unreachable.
+          if (nearbyTaskers.length === 0) {
+            nearbyTaskers = await UserMatchingService.findNearbyTaskers(
+              task,
+              undefined,
+              [posterUid],
+            );
+          }
+        } else {
+          logger.warn('[TaskService.createTask] Task missing coordinates for nearby alerts', {
+            taskId: task._id,
+            coordinates: coords,
+          });
+        }
+
+        logger.info('[TaskService.createTask] Helper discovery recipient lookup', {
+          taskId: task._id,
+          skillMatchCategories,
+          skillMatchedCount: skillMatchedTaskers.length,
+          nearbyCount: nearbyTaskers.length,
+          hasCoordinates: hasValidCoords,
+        });
       } catch (matchErr) {
         logger.warn('[TaskService.createTask] Helper alert recipient lookup failed', {
           taskId: task._id,
@@ -1899,7 +1950,10 @@ export class TaskService {
                 : `"${task.title}" has been posted near ${locationLabel}`,
               category: 'recommendedTaskAlerts',
               type: 'info',
-              data: {
+              data: withHelperAlertData({
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: isNearbyAndSkill,
                 taskId: task._id.toString(),
                 taskUrl,
                 route: taskRoute,
@@ -1909,7 +1963,7 @@ export class TaskService {
                 budget: task.budget?.amount,
                 locationLabel,
                 skillMatchCategory: skillMatchCategory || task.categoryLabel || task.category,
-              },
+              }, posterUid),
             });
           } catch (inAppError) {
             logger.warn('[TaskService.createTask] NEARBY_ALERTS - In-app failed', {
