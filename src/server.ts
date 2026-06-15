@@ -6,12 +6,14 @@ import { NotificationClient } from './services/NotificationClient';
 import { UserServiceClient } from './clients/UserServiceClient';
 import { EmailServiceClient } from './clients/EmailServiceClient';
 import { InAppNotificationClient } from './clients/InAppNotificationClient';
+import { WhatsAppClient } from './clients/WhatsAppClient';
 import { Fast2SMSClient } from './clients/Fast2SMSClient';
 import { ReminderScheduler } from './schedulers/ReminderScheduler';
+import { WorkStartSoonScheduler } from './schedulers/WorkStartSoonScheduler';
+import { ApplicationFollowUpScheduler } from './schedulers/ApplicationFollowUpScheduler';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
 import { initRedis, disconnectRedis } from './config/redis';
-
 async function startServer() {
   try {
     // Connect to MongoDB
@@ -26,10 +28,13 @@ async function startServer() {
     UserServiceClient.initialize();
     EmailServiceClient.initialize();
     InAppNotificationClient.initialize();
+    WhatsAppClient.initialize();
     Fast2SMSClient.initialize();
 
     // Initialize schedulers
     await ReminderScheduler.initialize('task-service');
+    await WorkStartSoonScheduler.initialize('task-service');
+    await ApplicationFollowUpScheduler.initialize('task-service');
 
     // Initialize Redis (optional, best-effort)
     await initRedis();

@@ -4,7 +4,7 @@
   "description": "Task Service for ExtraHand Platform - Handles tasks, applications, reviews, and task-related operations",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs');const p='dist/data';fs.mkdirSync(p,{recursive:true});fs.copyFileSync('src/data/book-now-catalog-seed-data.json',p+'/book-now-catalog-seed-data.json');\"",
     "start": "node dist/server.js",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "prod": "NODE_ENV=production node dist/server.js",

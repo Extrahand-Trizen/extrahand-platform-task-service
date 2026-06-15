@@ -13,6 +13,10 @@ import { UserMatchingService } from "./UserMatchingService";
 import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
+import { buildScheduleVersion } from "../utils/workSchedule";
+import TaskApplication from "../models/TaskApplication";
 import { MainAdminNotificationClient } from "../clients/MainAdminNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { PaymentClient } from "./PaymentClient";
@@ -22,6 +26,11 @@ import { getRedisClient, REDIS_TTLS } from '../config/redis';
 import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
+import {
+  excludeTaskPoster,
+  resolvePosterUid,
+  withHelperAlertData,
+} from '../utils/helperNotificationRecipients';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -206,7 +215,28 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId';
+
+/** Post & Choose only — Book Now tasks are assigned via ops, not helper browse. */
+function buildMarketplaceBrowseClause(): Record<string, unknown> {
+  return {
+    $and: [
+      {
+        $or: [
+          { bookingSource: { $exists: false } },
+          { bookingSource: 'marketplace' },
+        ],
+      },
+      {
+        $or: [
+          { bookingOrderId: { $exists: false } },
+          { bookingOrderId: null },
+          { bookingOrderId: '' },
+        ],
+      },
+    ],
+  };
+}
 
 const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
@@ -281,7 +311,7 @@ export class TaskService {
     let cacheKey: string | null = null;
 
     if (isCacheable) {
-      cacheKey = `tasks:list:open:p${effectivePage}:20`;
+      cacheKey = `tasks:list:open:marketplace:v2:p${effectivePage}:20`;
 
       try {
         const redis = getRedisClient();
@@ -310,6 +340,9 @@ export class TaskService {
 
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
+
+    // Book Now tasks are not marketplace listings — hide from helper browse/discover.
+    andClauses.push(buildMarketplaceBrowseClause());
 
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
     if (status) {
@@ -502,6 +535,9 @@ export class TaskService {
     const radiusMeters = radiusKm * 1000;
 
     const andClauses: any[] = [];
+
+    // Book Now tasks are ops-assigned — exclude from helper browse/nearby.
+    andClauses.push(buildMarketplaceBrowseClause());
 
     // Include nearby tasks (with coordinates) OR remote/packers-movers tasks (without coordinates)
     // This ensures tasks like packers-movers that don't have a fixed location are always shown
@@ -879,6 +915,16 @@ export class TaskService {
       updatedAt: new Date(),
     };
 
+    if (taskPayload.scheduledDate) {
+      taskPayload.notificationGovernance = {
+        scheduleVersion: buildScheduleVersion({
+          scheduledDate: taskPayload.scheduledDate,
+          scheduledTimeStart: taskPayload.scheduledTimeStart,
+          scheduledTimeEnd: taskPayload.scheduledTimeEnd,
+        }),
+      };
+    }
+
     // DEBUG: Log images field received
     logger.debug(`[TaskService.createTask] images DEBUG`, {
       hasImagesInInput: !!taskData.images,
@@ -1201,28 +1247,91 @@ export class TaskService {
       });
     }
 
-    // STEP 1: Emit TASK_CREATED_RECOMMENDED notification
-    // Find taskers with matching skill category
-    if (uid) {
-      try {
-        const skillMatchCategory = [
-          task.categoryLabel,
+    const posterUid = resolvePosterUid(uid, requesterProfile);
+
+    const skillMatchCategories = Array.from(
+      new Set(
+        [
           task.subcategory,
+          task.categorySlug,
           categorySlug,
+          task.categoryLabel,
+          task.category,
           frontendCategory,
           mappedCategory,
-        ].find((value) => typeof value === 'string' && value.trim().length > 0) as string;
+        ].filter(
+          (value): value is string => typeof value === 'string' && value.trim().length > 0,
+        ),
+      ),
+    );
 
-        const recommendedTaskersRaw = await UserServiceClient.matchUsers('skill', {
-          category: skillMatchCategory
+    const skillMatchCategory = skillMatchCategories[0];
+
+    let skillMatchedTaskers: string[] = [];
+    let nearbyTaskers: string[] = [];
+
+    if (posterUid) {
+      try {
+        if (skillMatchCategories.length > 0) {
+          const skillMatchedUsersRaw = await UserServiceClient.matchSkillCategories(
+            skillMatchCategories,
+          );
+          skillMatchedTaskers = excludeTaskPoster(skillMatchedUsersRaw, posterUid);
+        }
+
+        const coords: [number, number] | undefined = task?.location?.coordinates;
+        const hasValidCoords =
+          Array.isArray(coords) &&
+          coords.length === 2 &&
+          typeof coords[0] === 'number' &&
+          typeof coords[1] === 'number';
+
+        if (hasValidCoords) {
+          nearbyTaskers = await UserServiceClient.matchNearbyTaskers({
+            longitude: coords[0],
+            latitude: coords[1],
+            excludeUids: [posterUid],
+          });
+
+          // Fallback to direct DB geo match if user-service is unreachable.
+          if (nearbyTaskers.length === 0) {
+            nearbyTaskers = await UserMatchingService.findNearbyTaskers(
+              task,
+              undefined,
+              [posterUid],
+            );
+          }
+        } else {
+          logger.warn('[TaskService.createTask] Task missing coordinates for nearby alerts', {
+            taskId: task._id,
+            coordinates: coords,
+          });
+        }
+
+        logger.info('[TaskService.createTask] Helper discovery recipient lookup', {
+          taskId: task._id,
+          skillMatchCategories,
+          skillMatchedCount: skillMatchedTaskers.length,
+          nearbyCount: nearbyTaskers.length,
+          hasCoordinates: hasValidCoords,
         });
-        const recommendedTaskers = Array.from(
-          new Set(
-            recommendedTaskersRaw.filter(
-              (matchedUid): matchedUid is string =>
-                typeof matchedUid === 'string' && matchedUid.trim().length > 0 && matchedUid !== uid
-            )
-          )
+      } catch (matchErr) {
+        logger.warn('[TaskService.createTask] Helper alert recipient lookup failed', {
+          taskId: task._id,
+          error: matchErr instanceof Error ? matchErr.message : 'Unknown error',
+        });
+      }
+    }
+
+    const nearbyTaskerSet = new Set(nearbyTaskers);
+    const skillMatchedSet = new Set(skillMatchedTaskers);
+
+    // STEP 1: Emit TASK_CREATED_RECOMMENDED notification
+    // Skill-matched helpers who are NOT nearby (nearby helpers get TASK_NEARBY instead).
+    if (posterUid) {
+      try {
+        const recommendedTaskers = skillMatchedTaskers.filter(
+          (matchedUid) => !nearbyTaskerSet.has(matchedUid),
         );
 
         logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Matched users by category only', {
@@ -1231,7 +1340,7 @@ export class TaskService {
           category: mappedCategory,
           matchedCount: recommendedTaskers.length,
           matchedUsers: recommendedTaskers,
-          excludedRequesterUid: uid,
+          excludedRequesterUid: posterUid,
         });
 
         if (recommendedTaskers.length > 0) {
@@ -1247,11 +1356,14 @@ export class TaskService {
             {
               eventKey: 'TASK_CREATED_RECOMMENDED',
               category: 'recommendedTaskAlerts',
-              actorId: uid, // Suppress notification to task creator
+              actorId: posterUid,
               entity: { type: 'task', id: task._id.toString() },
               title: `New skill matched nearby: ${task.title}`,
               body: `A ${skillMatchCategory} task has been posted near ${recommendedLocationLabel} and matches your skills.`,
-              data: {
+              data: withHelperAlertData({
+                eventKey: 'TASK_CREATED_RECOMMENDED',
+                entityType: 'task',
+                skillMatch: true,
                 taskId: task._id.toString(),
                 category: mappedCategory,
                 skillMatchCategory,
@@ -1260,7 +1372,7 @@ export class TaskService {
                 taskUrl,
                 route: taskRoute,
                 actionUrl: taskRoute,
-              }
+              }, posterUid),
             },
             recommendedTaskers
           );
@@ -1315,7 +1427,7 @@ export class TaskService {
             });
 
             for (const p of recommendedProfiles) {
-              if (!p?.uid || p.uid === uid) {
+              if (!p?.uid || p.uid === posterUid) {
                 logger.debug('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Skipping invalid/owner recipient', {
                   taskId: task._id,
                   uid: p?.uid,
@@ -1427,21 +1539,14 @@ export class TaskService {
           const keywordMatchedUsersRaw = await UserServiceClient.matchUsers('keywords', {
             keywords: taskKeywords,
           });
-          const keywordMatchedUsers = Array.from(
-            new Set(
-              keywordMatchedUsersRaw.filter(
-                (matchedUid): matchedUid is string =>
-                  typeof matchedUid === 'string' && matchedUid.trim().length > 0 && matchedUid !== uid
-              )
-            )
-          );
+          const keywordMatchedUsers = excludeTaskPoster(keywordMatchedUsersRaw, posterUid);
 
           logger.info('[TaskService.createTask] KEYWORD ALERTS - Matched users by keyword only', {
             taskId: task._id,
             keywords: taskKeywords,
             matchedCount: keywordMatchedUsers.length,
             matchedUsers: keywordMatchedUsers,
-            excludedRequesterUid: uid,
+            excludedRequesterUid: posterUid,
           });
 
           logger.info(`[TaskService.createTask] KEYWORD ALERTS - User matching result`, {
@@ -1456,14 +1561,16 @@ export class TaskService {
               {
                 eventKey: 'TASK_CREATED_KEYWORD',
                 category: 'keywordTaskAlerts',
-                actorId: uid, // Suppress notification to task creator
+                actorId: posterUid,
                 entity: { type: 'task', id: task._id.toString() },
                 title: `Alert: Task matches your saved keywords`,
                 body: `A new task has been posted with keywords you're interested in: ${taskKeywords.slice(0, 2).join(', ')}`,
                 data: {
                   taskId: task._id.toString(),
-                  matchedKeywords: taskKeywords.slice(0, 5)
-                }
+                  matchedKeywords: taskKeywords.slice(0, 5),
+                  posterUid,
+                  actorId: posterUid,
+                },
               },
               keywordMatchedUsers
             );
@@ -1485,10 +1592,10 @@ export class TaskService {
 
               for (const p of keywordProfiles) {
                 // Skip the task creator - they should not receive alerts for their own tasks
-                if (p.uid === uid) {
+                if (p.uid === posterUid) {
                   logger.info(`[TaskService.createTask] KEYWORD ALERTS - Skipping task creator`, {
                     taskId: task._id,
-                    creatorId: uid
+                    creatorId: posterUid
                   });
                   continue;
                 }
@@ -1644,14 +1751,14 @@ export class TaskService {
               {
                 eventKey: 'TASK_CREATED_CATEGORY',
                 category: 'keywordTaskAlerts', // Using same category preference
-                actorId: uid,
+                actorId: posterUid,
                 entity: { type: 'task', id: task._id.toString() },
                 title: `New ${task.categoryLabel || task.category} task posted!`,
                 body: `A new ${task.categoryLabel || task.category} task has been posted: ${task.title.substring(0, 50)}${task.title.length > 50 ? '...' : ''}`,
-                data: {
+                data: withHelperAlertData({
                   taskId: task._id.toString(),
-                  category: task.categoryLabel || task.category
-                }
+                  category: task.categoryLabel || task.category,
+                }, posterUid),
               },
               categoryMatchedUsers
             );
@@ -1724,26 +1831,15 @@ export class TaskService {
         });
       }
     } else {
-      logger.warn('Skipping notifications - uid not provided for task creation', {
+      logger.warn('Skipping helper discovery notifications - poster uid not resolved', {
         taskId: task._id,
         profileId: profileId.toString()
       });
     }
 
     // STEP 4: Emit TASK_NEARBY notification
-    // Find active verified taskers whose saved location is within 10 km of the task.
-    // Excludes the task creator and anyone already notified via skill-match (STEP 1).
-    // Runs outside the uid guard so it fires even for edge-case uid-less creates.
+    // One alert per nearby helper (skill wording when applicable).
     try {
-      // Re-use the skill-matched list from STEP 1 if available in scope.
-      // We pass uid as the only guaranteed exclude; skill-matched UIDs are
-      // deduplicated inside NotificationClient.sendBatch via actorId suppression.
-      const nearbyTaskers = await UserMatchingService.findNearbyTaskers(
-        task,
-        undefined, // use default radius from env / 10 km
-        uid ? [uid] : [],
-      );
-
       if (nearbyTaskers.length > 0) {
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
         const taskRoute = `/tasks/${task._id}`;
@@ -1752,57 +1848,28 @@ export class TaskService {
           task.location?.address ||
           'your area';
 
-        // If a nearby helper also matches the task’s skill category,
-        // show wording that it matches skills near their location.
-        let skillMatchedTaskers: string[] = [];
-        let skillMatchCategory: string | undefined;
-        try {
-          skillMatchCategory = [
-            task.categoryLabel,
-            task.subcategory,
-            categorySlug,
-            frontendCategory,
-            mappedCategory,
-          ].find((value) => typeof value === 'string' && value.trim().length > 0) as
-            | string
-            | undefined;
-
-          if (skillMatchCategory) {
-            const skillMatchedUsersRaw = await UserServiceClient.matchUsers('skill', {
-              category: skillMatchCategory,
-            });
-            skillMatchedTaskers = Array.from(
-              new Set(
-                skillMatchedUsersRaw.filter(
-                  (matchedUid): matchedUid is string =>
-                    typeof matchedUid === 'string' &&
-                    matchedUid.trim().length > 0 &&
-                    matchedUid !== uid,
-                ),
-              ),
-            );
-          }
-        } catch (skillMatchErr) {
-          logger.warn('[TaskService.createTask] NEARBY_ALERTS - Skill match lookup failed', {
-            taskId: task._id,
-            error: skillMatchErr instanceof Error ? skillMatchErr.message : 'Unknown error',
-          });
-        }
-
-        const skillMatchedSet = new Set(skillMatchedTaskers);
-        const nearbyAndSkill = nearbyTaskers.filter((u) => skillMatchedSet.has(u));
-        const nearbyOnly = nearbyTaskers.filter((u) => !skillMatchedSet.has(u));
+        const nearbyAndSkill = excludeTaskPoster(
+          nearbyTaskers.filter((u) => skillMatchedSet.has(u)),
+          posterUid,
+        );
+        const nearbyOnly = excludeTaskPoster(
+          nearbyTaskers.filter((u) => !skillMatchedSet.has(u)),
+          posterUid,
+        );
 
         if (nearbyAndSkill.length > 0) {
           await NotificationClient.sendBatch(
             {
               eventKey: 'TASK_NEARBY',
               category: 'recommendedTaskAlerts',
-              actorId: uid,
+              actorId: posterUid,
               entity: { type: 'task', id: task._id.toString() },
               title: `Matched your skills nearby: ${task.title}`,
               body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel} and matches your skills.`,
-              data: {
+              data: withHelperAlertData({
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: true,
                 taskId: task._id.toString(),
                 category: task.category,
                 categoryLabel: task.categoryLabel || task.category,
@@ -1812,7 +1879,7 @@ export class TaskService {
                 taskUrl,
                 route: taskRoute,
                 actionUrl: taskRoute,
-              },
+              }, posterUid),
             },
             nearbyAndSkill,
           );
@@ -1823,11 +1890,14 @@ export class TaskService {
             {
               eventKey: 'TASK_NEARBY',
               category: 'recommendedTaskAlerts',
-              actorId: uid,
+              actorId: posterUid,
               entity: { type: 'task', id: task._id.toString() },
               title: `New task nearby: ${task.title}`,
               body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel}.`,
-              data: {
+              data: withHelperAlertData({
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: false,
                 taskId: task._id.toString(),
                 category: task.category,
                 categoryLabel: task.categoryLabel || task.category,
@@ -1836,16 +1906,45 @@ export class TaskService {
                 taskUrl,
                 route: taskRoute,
                 actionUrl: taskRoute,
-              },
+              }, posterUid),
             },
             nearbyOnly,
           );
         }
 
-        // In-app notification for each nearby tasker
-        for (const nearbyUid of nearbyTaskers) {
+        // In-app + WhatsApp for skill-matched nearby helpers
+        for (const nearbyUid of excludeTaskPoster(nearbyTaskers, posterUid)) {
           try {
             const isNearbyAndSkill = skillMatchedSet.has(nearbyUid);
+            if (isNearbyAndSkill) {
+              // Governance: one WA per work+helper; skip if already applied.
+              const alreadyApplied = await TaskApplication.exists({
+                taskId: task._id,
+                applicantUid: nearbyUid,
+                status: { $in: ['pending', 'accepted'] },
+              });
+              if (alreadyApplied) continue;
+
+              const categoryLabel =
+                skillMatchCategory || task.categoryLabel || task.category || 'work';
+              fireWhatsAppNotify({
+                uid: nearbyUid,
+                templateKey: 'wa_nearby_work_skill_match',
+                category: 'recommendedTaskAlerts',
+                templateBody: {
+                  var_1: task.title || 'New work',
+                  var_2: String(categoryLabel),
+                  var_3: String(locationLabel),
+                },
+                templateButtons: taskOpenAppButton(task._id.toString()),
+                idempotencyKey: `wa_nearby_work_skill_match:${task._id.toString()}:${nearbyUid}`,
+                metadata: {
+                  workId: task._id.toString(),
+                  triggerType: 'skill_nearby',
+                  recipientRole: 'helper',
+                },
+              });
+            }
             await InAppNotificationClient.send({
               userId: nearbyUid,
               title: isNearbyAndSkill ? '🎯 New Skill Matched Nearby' : '📍 New Task Near You',
@@ -1854,7 +1953,10 @@ export class TaskService {
                 : `"${task.title}" has been posted near ${locationLabel}`,
               category: 'recommendedTaskAlerts',
               type: 'info',
-              data: {
+              data: withHelperAlertData({
+                eventKey: 'TASK_NEARBY',
+                entityType: 'task',
+                skillMatch: isNearbyAndSkill,
                 taskId: task._id.toString(),
                 taskUrl,
                 route: taskRoute,
@@ -1864,7 +1966,7 @@ export class TaskService {
                 budget: task.budget?.amount,
                 locationLabel,
                 skillMatchCategory: skillMatchCategory || task.categoryLabel || task.category,
-              },
+              }, posterUid),
             });
           } catch (inAppError) {
             logger.warn('[TaskService.createTask] NEARBY_ALERTS - In-app failed', {
@@ -1959,6 +2061,21 @@ export class TaskService {
     }
     if (updateData.categoryLabel) {
       updateData.categoryLabel = updateData.categoryLabel.toString();
+    }
+
+    // Reschedule invalidates prior start-soon WhatsApp idempotency keys.
+    const scheduleFieldsTouched =
+      updateData.scheduledDate !== undefined ||
+      updateData.scheduledTimeStart !== undefined ||
+      updateData.scheduledTimeEnd !== undefined;
+    if (scheduleFieldsTouched) {
+      const mergedSchedule = {
+        scheduledDate: updateData.scheduledDate ?? task.scheduledDate,
+        scheduledTimeStart: updateData.scheduledTimeStart ?? task.scheduledTimeStart,
+        scheduledTimeEnd: updateData.scheduledTimeEnd ?? task.scheduledTimeEnd,
+      };
+      (updateData as Record<string, unknown>)['notificationGovernance.scheduleVersion'] =
+        buildScheduleVersion(mergedSchedule);
     }
 
     logger.info("🔍 Update data after budget normalization:", updateData);
@@ -2659,6 +2776,16 @@ export class TaskService {
                 actionUrl: `/tasks/${taskId}/track`,
               },
             });
+
+            fireWhatsAppNotify({
+              uid: otherProfile.uid,
+              templateKey: isRequesterCancelled
+                ? 'wa_work_cancelled_helper'
+                : 'wa_work_cancelled_customer',
+              category: 'taskUpdates',
+              templateBody: { var_1: task.title || 'your task' },
+              idempotencyKey: `cancel:${taskId.toString()}:${otherProfile.uid}`,
+            });
           }
         }
 
@@ -2884,6 +3011,15 @@ export class TaskService {
     await task.save();
 
     const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
+    const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Task Start OTP';
+    const notificationData = {
+      taskId,
+      otp,
+      otpType: 'task_start',
+      expiresAt: expiresAt.toISOString(),
+      eventKey: 'TASK_UPDATED',
+      entityType: 'task',
+    };
 
     // Send via both email and in-app notifications for redundancy
     let taskerName = "tasker";
@@ -2922,20 +3058,31 @@ export class TaskService {
       logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
     }
 
+    // Push notification (FCM) to poster — same content as in-app for lock-screen visibility
+    try {
+      await NotificationClient.send({
+        eventKey: 'TASK_UPDATED',
+        category: 'taskUpdates',
+        actorId: _uid,
+        recipients: [requesterUid],
+        entity: { type: 'task', id: taskId },
+        title: pushTitle,
+        body: otpBody,
+        data: notificationData,
+      });
+    } catch (pushError) {
+      logger.warn("Failed to send task start OTP via push notification", { taskId, error: pushError });
+    }
+
     // Send in-app notification for immediate visibility
     try {
       await InAppNotificationClient.send({
         userId: requesterUid,
-        title: "Task Start OTP",
+        title: pushTitle,
         body: otpBody,
         type: "info",
         category: "taskUpdates",
-        data: {
-          taskId,
-          otp,
-          otpType: "task_start",
-          expiresAt: expiresAt.toISOString(),
-        },
+        data: notificationData,
       });
     } catch (inAppError) {
       logger.warn("Failed to send task start OTP via in-app notification", { taskId, error: inAppError });

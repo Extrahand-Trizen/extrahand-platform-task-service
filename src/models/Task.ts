@@ -227,6 +227,29 @@ export interface ITask extends Document {
   cancelledById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   cancellationReason?: string;
 
+  /**
+   * WhatsApp / notification governance (digest caps, schedule versioning, etc.).
+   */
+  /** marketplace = bid flow; book_now = paid upfront, ops assigns helper */
+  bookingSource?: 'marketplace' | 'book_now';
+  bookingOrderId?: string;
+  bookingItemId?: string;
+  assignmentStatus?: 'pending' | 'assigned' | 'failed';
+
+  notificationGovernance?: {
+    /** Bumped when scheduled date/time changes — invalidates old start-soon idempotency keys. */
+    scheduleVersion?: string;
+    /** Last time poster opened the applicants list for this work. */
+    applicantsViewedAt?: Date;
+    offerDigest?: {
+      pendingSinceLastDigest?: number;
+      lastDigestAt?: Date;
+      digestsToday?: number;
+      digestDayKey?: string;
+      firstOfferWaSent?: boolean;
+    };
+  };
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -559,6 +582,31 @@ const TaskSchema = new Schema<ITask>(
       index: true,
     },
     cancellationReason: String,
+
+    bookingSource: {
+      type: String,
+      enum: ['marketplace', 'book_now'],
+      default: 'marketplace',
+      index: true,
+    },
+    bookingOrderId: { type: String, index: true },
+    bookingItemId: String,
+    assignmentStatus: {
+      type: String,
+      enum: ['pending', 'assigned', 'failed'],
+    },
+
+    notificationGovernance: {
+      scheduleVersion: String,
+      applicantsViewedAt: Date,
+      offerDigest: {
+        pendingSinceLastDigest: { type: Number, default: 0 },
+        lastDigestAt: Date,
+        digestsToday: { type: Number, default: 0 },
+        digestDayKey: String,
+        firstOfferWaSent: { type: Boolean, default: false },
+      },
+    },
   },
   { timestamps: true }
 );
@@ -577,6 +625,8 @@ TaskSchema.index({ status: 1, createdAt: -1 });
 TaskSchema.index({ status: 1, scheduledDate: 1 });
 // Global revision: poster's revisable open tasks
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
+TaskSchema.index({ bookingSource: 1, status: 1 });
+TaskSchema.index({ bookingOrderId: 1 });
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);
