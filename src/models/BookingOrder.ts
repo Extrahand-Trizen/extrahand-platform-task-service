@@ -5,6 +5,7 @@ export type BookingOrderStatus =
   | 'awaiting_payment'
   | 'paid'
   | 'assigning'
+  | 'dispatching'
   | 'assigned'
   | 'cancelled'
   | 'refunded';
@@ -50,7 +51,7 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     customerProfileId: { type: Schema.Types.ObjectId, required: true, index: true },
     status: {
       type: String,
-      enum: ['draft', 'awaiting_payment', 'paid', 'assigning', 'assigned', 'cancelled', 'refunded'],
+      enum: ['draft', 'awaiting_payment', 'paid', 'assigning', 'dispatching', 'assigned', 'cancelled', 'refunded'],
       default: 'awaiting_payment',
       index: true,
     },

@@ -1,6 +1,13 @@
 import mongoose from "mongoose";
 import Task, { ITask } from "../models/Task";
-import { NegotiationUtils } from "../utils/NegotiationUtils";
+import {
+  buildAssignTaskFilter,
+  buildAssignTaskUpdate,
+} from "./pipelines/taskAssignmentPipeline";
+import {
+  buildAtomicReviseBudgetFilter,
+  buildAtomicReviseBudgetUpdatePipeline,
+} from "./pipelines/taskBudgetRevisionPipeline";
 
 /**
  * TaskRepository
@@ -41,41 +48,8 @@ export class TaskRepository {
     const { taskId, actorProfileId, newAmount } = input;
 
     return Task.findOneAndUpdate(
-      {
-        _id: taskId,
-        requesterId: actorProfileId,
-        status: "open",
-        negotiationStatus: { $ne: "closed" },
-        currentRevisionRound: { $lt: NegotiationUtils.MAX_REVISION_ROUNDS },
-        "budget.amount": { $ne: newAmount },
-      },
-      // Aggregation pipeline update (MongoDB 4.2+):
-      // Allows referencing current document fields ($budget.amount, $currentRevisionRound)
-      // inside the same update — no separate read required.
-      [
-        {
-          $set: {
-            "budget.amount": newAmount,
-            negotiationStatus: "revised",
-            currentRevisionRound: { $add: ["$currentRevisionRound", 1] },
-            budgetRevisions: {
-              $concatArrays: [
-                { $ifNull: ["$budgetRevisions", []] },
-                [
-                  {
-                    round: { $add: ["$currentRevisionRound", 1] },
-                    previousAmount: "$budget.amount",
-                    newAmount: newAmount,
-                    revisedAt: "$$NOW",
-                    revisedById: actorProfileId,
-                    notifiedBidderCount: 0,
-                  },
-                ],
-              ],
-            },
-          },
-        },
-      ],
+      buildAtomicReviseBudgetFilter({ taskId, actorProfileId, newAmount }),
+      buildAtomicReviseBudgetUpdatePipeline({ newAmount, actorProfileId }),
       { new: true }
     ).lean() as unknown as ITask | null;
   }
@@ -106,18 +80,11 @@ export class TaskRepository {
     assigneeId: mongoose.Types.ObjectId;
     assignedAt?: Date;
   }): Promise<ITask | null> {
-    const { taskId, assigneeId, assignedAt = new Date() } = input;
+    const { taskId, assigneeId, assignedAt } = input;
 
     return Task.findOneAndUpdate(
-      { _id: taskId, status: "open" },
-      {
-        $set: {
-          status: "assigned",
-          negotiationStatus: "closed",
-          assigneeId,
-          assignedAt,
-        },
-      },
+      buildAssignTaskFilter(taskId),
+      buildAssignTaskUpdate({ taskId, assigneeId, assignedAt }),
       { new: true }
     ).lean() as unknown as ITask | null;
   }

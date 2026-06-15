@@ -5,13 +5,16 @@ import BookingOrder from '../models/BookingOrder';
 import BookingItem from '../models/BookingItem';
 import Task from '../models/Task';
 import { PaymentClient } from './PaymentClient';
+import { TaskTransitionService } from './TaskTransitionService';
+import { NotificationClient } from './NotificationClient';
+import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import { BadRequestError, NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
 
 export class AssignmentService {
   static async listPendingAssignments(limit = 50, page = 1) {
     const skip = (Math.max(page, 1) - 1) * limit;
-    const query = { status: 'assigning' };
+    const query = { status: { $in: ['assigning', 'dispatching'] } };
     const [orders, total] = await Promise.all([
       BookingOrder.find(query).sort({ paidAt: 1 }).skip(skip).limit(limit).lean(),
       BookingOrder.countDocuments(query),
@@ -41,7 +44,7 @@ export class AssignmentService {
 
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
-    if (!['paid', 'assigning'].includes(order.status)) {
+    if (!['paid', 'assigning', 'dispatching'].includes(order.status)) {
       throw new BadRequestError(`Cannot assign helper when order status is ${order.status}`);
     }
 
@@ -91,7 +94,9 @@ export class AssignmentService {
     task.assignedAt = new Date();
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
+    if (!task.executionProfile) task.executionProfile = 'field_service';
     await task.save();
+    await TaskTransitionService.setPartnerExecution(String(task._id), 'assigned');
 
     if (order.paymentEscrowId) {
       const attach = await PaymentClient.attachPerformerToEscrow({
@@ -110,6 +115,16 @@ export class AssignmentService {
 
     order.status = 'assigned';
     await order.save();
+
+    await NotificationClient.send({
+      eventKey: NOTIFICATION_EVENT_KEYS.BOOK_NOW_PARTNER_ASSIGNED,
+      category: 'taskUpdates',
+      recipients: [order.customerUid],
+      entity: { type: 'task', id: String(task._id) },
+      title: 'Partner assigned',
+      body: 'A partner has been assigned to your booking',
+      data: { taskId: String(task._id), orderId },
+    }).catch(() => undefined);
 
     logger.info('Book Now helper assigned', {
       orderId,

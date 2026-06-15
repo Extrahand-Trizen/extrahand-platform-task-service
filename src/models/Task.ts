@@ -236,6 +236,24 @@ export interface ITask extends Document {
   bookingItemId?: string;
   assignmentStatus?: 'pending' | 'assigned' | 'failed';
 
+  executionProfile?: 'field_service' | 'delivery' | 'driver' | 'mover' | 'remote_service';
+  partnerExecution?: {
+    status: string;
+    updatedAt: Date;
+    offeredAt?: Date;
+    offerExpiresAt?: Date;
+    arrivedAt?: Date;
+    otpRequestedAt?: Date;
+    otpVerifiedAt?: Date;
+    proofSubmittedAt?: Date;
+    cancellationReason?: 'customer' | 'partner' | 'expired' | 'ops';
+  };
+  dispatchMeta?: {
+    broadcastRound: number;
+    candidateCount: number;
+    lastDispatchAt: Date;
+  };
+
   notificationGovernance?: {
     /** Bumped when scheduled date/time changes — invalidates old start-soon idempotency keys. */
     scheduleVersion?: string;
@@ -594,6 +612,30 @@ const TaskSchema = new Schema<ITask>(
     assignmentStatus: {
       type: String,
       enum: ['pending', 'assigned', 'failed'],
+    },
+
+    executionProfile: {
+      type: String,
+      enum: ['field_service', 'delivery', 'driver', 'mover', 'remote_service'],
+    },
+    partnerExecution: {
+      status: { type: String, index: true },
+      updatedAt: Date,
+      offeredAt: Date,
+      offerExpiresAt: Date,
+      arrivedAt: Date,
+      otpRequestedAt: Date,
+      otpVerifiedAt: Date,
+      proofSubmittedAt: Date,
+      cancellationReason: {
+        type: String,
+        enum: ['customer', 'partner', 'expired', 'ops'],
+      },
+    },
+    dispatchMeta: {
+      broadcastRound: { type: Number, default: 0 },
+      candidateCount: { type: Number, default: 0 },
+      lastDispatchAt: Date,
     },
 
     notificationGovernance: {

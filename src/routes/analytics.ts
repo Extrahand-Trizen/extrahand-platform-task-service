@@ -13,6 +13,7 @@ router.get('/tasks/cancellations', asyncHandler(AnalyticsController.getTaskCance
 router.get('/posters/summary', asyncHandler(AnalyticsController.getPosterSummary));
 router.get('/posters/:requesterId', asyncHandler(AnalyticsController.getPosterAnalytics));
 router.get('/users/:profileId', asyncHandler(AnalyticsController.getUserAnalytics));
+router.get('/dispatch', asyncHandler(AnalyticsController.getDispatchMetrics));
 
 export default router;
 

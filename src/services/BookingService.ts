@@ -311,6 +311,11 @@ export class BookingService {
           bookingSource: 'book_now',
           bookingOrderId: orderId,
           assignmentStatus: 'pending',
+          executionProfile: 'field_service',
+          partnerExecution: {
+            status: 'awaiting_dispatch',
+            updatedAt: new Date(),
+          },
         });
         createdTasks.push(task);
 
@@ -470,7 +475,12 @@ export class BookingService {
       return { success: false, error: 'Booking not found' };
     }
 
-    if (order.status === 'paid' || order.status === 'assigning' || order.status === 'assigned') {
+    if (
+      order.status === 'paid' ||
+      order.status === 'assigning' ||
+      order.status === 'dispatching' ||
+      order.status === 'assigned'
+    ) {
       return { success: true, duplicate: true };
     }
 
@@ -484,6 +494,16 @@ export class BookingService {
       orderId: order.orderId,
       taskId: params.taskId,
     });
+
+    if (process.env.BOOK_NOW_AUTO_DISPATCH !== 'false') {
+      const { DispatchService } = await import('./DispatchService');
+      DispatchService.startBroadcastForOrder(order.orderId).catch((err) => {
+        logger.error('Auto dispatch failed after payment', {
+          orderId: order.orderId,
+          error: err instanceof Error ? err.message : err,
+        });
+      });
+    }
 
     return { success: true, order };
   }

@@ -275,6 +275,44 @@ export class UserServiceClient {
   /**
    * Forward domain events to user-service rewards qualification engine.
    */
+  static async findEligiblePartners(params: {
+    categorySlug?: string;
+    capabilityType?: string;
+    pinCode?: string;
+    city?: string;
+    limit?: number;
+    requireOnline?: boolean;
+  }): Promise<Array<{ uid: string; profileId: string; name: string }>> {
+    if (!this.isInitialized) this.initialize();
+
+    try {
+      const response = await axios.get(
+        `${this.baseURL}/api/v1/profiles/internal/supply/eligible`,
+        {
+          params: {
+            categorySlug: params.categorySlug,
+            capabilityType: params.capabilityType,
+            pinCode: params.pinCode,
+            city: params.city,
+            limit: params.limit,
+            requireOnline: params.requireOnline ? 'true' : undefined,
+          },
+          headers: {
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 8000,
+        },
+      );
+      return response.data?.data ?? [];
+    } catch (error) {
+      logger.error('UserServiceClient: findEligiblePartners failed', {
+        error: error instanceof Error ? error.message : 'Unknown',
+      });
+      return [];
+    }
+  }
+
   static async processRewardEvent(params: {
     eventType: string;
     payload: Record<string, unknown>;

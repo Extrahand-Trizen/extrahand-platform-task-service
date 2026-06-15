@@ -2,6 +2,7 @@ import { Response } from 'express';
 import mongoose from 'mongoose';
 import { AuthenticatedRequest } from '../types';
 import { AnalyticsService } from '../services/AnalyticsService';
+import { DispatchMetricsService } from '../services/DispatchMetricsService';
 import { BadRequestError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 
@@ -58,6 +59,11 @@ export class AnalyticsController {
 
     const data = await AnalyticsService.getUserAnalytics(profileId, uid, range);
     ApiResponse.success(res, data, 'User analytics fetched successfully');
+  }
+
+  static async getDispatchMetrics(_req: AuthenticatedRequest, res: Response): Promise<void> {
+    const data = await DispatchMetricsService.getOverview();
+    ApiResponse.success(res, data, 'Dispatch metrics fetched successfully');
   }
 }
 

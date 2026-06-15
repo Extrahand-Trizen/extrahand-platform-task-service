@@ -14,6 +14,11 @@ export interface IAssignment extends Document {
   assignedByUid?: string;
   assignedAt?: Date;
   failureReason?: string;
+  offerExpiresAt?: Date;
+  candidateIds?: string[];
+  acceptedBy?: string;
+  respondedAt?: Date;
+  response?: 'accepted' | 'declined' | 'expired';
   createdAt: Date;
   updatedAt: Date;
 }
@@ -39,6 +44,11 @@ const AssignmentSchema = new Schema<IAssignment>(
     assignedByUid: String,
     assignedAt: Date,
     failureReason: String,
+    offerExpiresAt: Date,
+    candidateIds: [String],
+    acceptedBy: String,
+    respondedAt: Date,
+    response: { type: String, enum: ['accepted', 'declined', 'expired'] },
   },
   { timestamps: true }
 );
