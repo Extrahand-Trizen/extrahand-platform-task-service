@@ -270,6 +270,7 @@ export class TaskService {
     suburb?: string;
     remotely?: boolean | null;
     sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
     excludeRequesterId?: string;
     assigneeId?: string;
     posterUid?: string;
@@ -277,7 +278,7 @@ export class TaskService {
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, excludeRequesterId, assigneeId, posterUid, requesterId, limit = 50, page = 1 } = filters;
+    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -431,12 +432,14 @@ export class TaskService {
     const query = andClauses.length > 0 ? { $and: andClauses } : {};
 
     // Sorting
+    const direction = sortOrder === 'asc' ? 1 : -1;
     let sortObj: any = { createdAt: -1 }; // default: recent
     if (sortBy) {
       if (sortBy === 'price-low') sortObj = { 'budget.amount': 1 };
       else if (sortBy === 'price-high') sortObj = { 'budget.amount': -1 };
-      else if (sortBy === 'date') sortObj = { createdAt: 1 };
-      else sortObj = { createdAt: -1 };
+      else if (sortBy === 'date') sortObj = { createdAt: direction };
+      else if (sortBy === 'scheduledDate' || sortBy === 'dueDate') sortObj = { scheduledDate: direction };
+      else sortObj = { createdAt: direction };
     }
 
     const tasks = await Task.find(query)
