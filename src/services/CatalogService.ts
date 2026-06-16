@@ -6,6 +6,7 @@ import ServiceArea from '../models/ServiceArea';
 import { UserServiceClient } from '../clients/UserServiceClient';
 import { NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
+import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
 
 /** Mobile parent label vs catalog subcategory slugs */
 const BOOK_NOW_CATEGORY_ALIASES: Record<string, string> = {
@@ -127,8 +128,12 @@ export class CatalogService {
       ...availability,
     });
 
+    const hardcodedSupported = isHardcodedSupportedLocation({
+      city: availability.resolvedCity ?? normalizedCity,
+    });
+
     return {
-      serviceable: availability.serviceable,
+      serviceable: availability.serviceable || hardcodedSupported,
       hasHelpers: availability.hasHelpers,
       count: availability.count,
       checkPerformed: availability.checkPerformed,

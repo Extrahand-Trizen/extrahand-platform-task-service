@@ -12,6 +12,7 @@ import {
 } from '../utils/bookNowClientCatalog';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
+import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
 
 type BookingAddress = {
   label?: string;
@@ -220,7 +221,12 @@ export class BookingService {
       customerUid,
       address.coordinates,
     );
-    if (!serviceable) {
+    const hardcodedSupported = isHardcodedSupportedLocation({
+      city: address.city,
+      state: address.state,
+      address: address.line1,
+    });
+    if (!serviceable && !hardcodedSupported) {
       throw new BadRequestError('Service is not available in this area yet');
     }
 

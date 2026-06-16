@@ -211,13 +211,19 @@ export class UserServiceClient {
       const count = Number(payload?.count) || 0;
       const resolvedCity =
         typeof payload?.resolvedCity === 'string' ? payload.resolvedCity : city || null;
+      const serviceable =
+        typeof payload?.serviceable === 'boolean'
+          ? payload.serviceable
+          : checkPerformed
+            ? hasHelpers
+            : true;
 
       return {
         checkPerformed,
         resolvedCity,
         count,
         hasHelpers,
-        serviceable: checkPerformed ? hasHelpers : true,
+        serviceable,
       };
     } catch (error) {
       const axiosError = error as AxiosError;
