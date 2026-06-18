@@ -1,4 +1,4 @@
-/** Book Now: customer pays package price only — no platform fee or GST on top. */
+/** Book Now: service subtotal only — customer GST is added server-side via CategoryFeeConfig. */
 export function computeBookingTotals(taskAmount: number): {
   subtotal: number;
   addonsTotal: number;

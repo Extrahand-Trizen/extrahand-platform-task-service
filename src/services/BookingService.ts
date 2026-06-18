@@ -5,7 +5,7 @@ import BookingOrder from '../models/BookingOrder';
 import BookingItem from '../models/BookingItem';
 import { CatalogService } from './CatalogService';
 import { PaymentClient } from './PaymentClient';
-import { computeBookingTotals, computeLinePrice } from '../utils/bookingPricing';
+import { computeLinePrice } from '../utils/bookingPricing';
 import {
   resolveBookNowCategoryLabel,
   resolveBookNowTaskCategory,
@@ -251,9 +251,21 @@ export class BookingService {
     }
 
     const resolvedLines = await Promise.all(rawLines.map((line) => this.resolveLine(line)));
-    const subtotal = resolvedLines.reduce((sum, line) => sum + line.lineTotal, 0);
-    const addonsTotal = 0;
-    const pricing = computeBookingTotals(subtotal);
+    const pricingResult = await PaymentClient.calculateBookNowOrderTotals(
+      resolvedLines.map((line) => ({
+        categorySlug: line.categorySlug,
+        lineTotal: line.lineTotal,
+      })),
+    );
+
+    if (!pricingResult.success || !pricingResult.totals) {
+      throw new BadRequestError(
+        pricingResult.error || 'Failed to calculate Book Now payment totals',
+      );
+    }
+
+    const pricing = pricingResult.totals;
+    const addonsTotal = pricing.addonsTotal ?? 0;
 
     const orderId = crypto.randomUUID();
     const order = await BookingOrder.create({
@@ -352,7 +364,7 @@ export class BookingService {
         bookingOrderId: orderId,
         posterUid: customerUid,
         amount: pricing.total,
-        taskAmount: subtotal,
+        taskAmount: pricing.subtotal,
         taskCategory: primaryLine.taskCategory,
         taskTitle: combinedTitle,
         metadata: {
@@ -360,6 +372,13 @@ export class BookingService {
           bookingMode: 'book_now',
           itemCount: resolvedLines.length,
           skuSlugs: resolvedLines.map((l) => l.packageSlug),
+          gstByCategory: pricing.categories,
+          amountBreakdown: {
+            taskAmount: pricing.subtotal,
+            gst: pricing.gst,
+            platformFee: 0,
+            totalPaid: pricing.total,
+          },
           bookNowLineItems: createdTasks.map((task, index) => ({
             taskId: String(task._id),
             taskTitle: resolvedLines[index]?.title || task.title,

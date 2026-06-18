@@ -18,7 +18,13 @@ import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
 import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import { OfferDigestService } from "./OfferDigestService";
 import { PaymentClient } from "./PaymentClient";
-import { canWithdrawAcceptedApplication } from "../utils/taskCommitment";
+import {
+  canWithdrawAcceptedApplication,
+  taskerHasBlockingActiveTask,
+} from "../utils/taskCommitment";
+import { RecurringVisitService } from "./RecurringVisitService";
+import { isRecurringVisitPlanTask } from "../utils/recurringVisitMeta";
+import { ApplicantProfileSnapshot, ProfileUtils } from "../utils/ProfileUtils";
 
 export class ApplicationService {
   /**
@@ -68,7 +74,13 @@ export class ApplicationService {
             .filter((date) => !Number.isNaN(date.getTime()))
         : [];
 
-      if (task.recurring?.enabled) {
+      const isVisitPlan = RecurringVisitService.isVisitPlanTask(
+        task as unknown as Record<string, unknown>,
+      );
+
+      // Legacy recurring (pick dates from open schedule rows). v2 visit plans apply to the
+      // whole plan — no per-date selection on the helper offer.
+      if (task.recurring?.enabled && !isVisitPlan) {
         if (selectedDates.length === 0) {
           throw new BadRequestError("Please select at least one date");
         }
@@ -92,11 +104,7 @@ export class ApplicationService {
       }
 
       // Prevent taskers with an active task from applying to new ones
-      const activeStatuses = ["assigned", "started", "in_progress", "review"];
-      const hasActiveTask = await Task.exists({
-        assigneeId: applicantProfileId,
-        status: { $in: activeStatuses },
-      });
+      const hasActiveTask = await taskerHasBlockingActiveTask(applicantProfileId);
 
       if (hasActiveTask) {
         throw new BadRequestError(
@@ -150,13 +158,9 @@ export class ApplicationService {
           const profileModel = mongoose.connection.model("Profile");
           const applicantProfile = await profileModel.findById(applicantProfileId);
           if (applicantProfile) {
-            applicantProfileSnapshot = {
-              name: applicantProfile.name || applicantProfile.fullName,
-              photoURL: applicantProfile.photoURL,
-              rating: applicantProfile.rating,
-              totalReviews: applicantProfile.totalReviews,
-              skills: applicantProfile.skills,
-            };
+            applicantProfileSnapshot = ProfileUtils.buildSnapshot(
+              applicantProfile.toObject?.() ?? applicantProfile,
+            );
             logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from Mongoose`, {
               applicantId: applicantProfileId.toString(),
               name: applicantProfileSnapshot.name,
@@ -171,13 +175,7 @@ export class ApplicationService {
               _id: new mongoose.Types.ObjectId(applicantProfileId),
             });
             if (applicantProfile) {
-              applicantProfileSnapshot = {
-                name: applicantProfile.name || applicantProfile.fullName,
-                photoURL: applicantProfile.photoURL,
-                rating: applicantProfile.rating,
-                totalReviews: applicantProfile.totalReviews,
-                skills: applicantProfile.skills,
-              };
+              applicantProfileSnapshot = ProfileUtils.buildSnapshot(applicantProfile);
               logger.info(`[ApplicationService.submitApplication] Profile snapshot captured from raw collection`, {
                 applicantId: applicantProfileId.toString(),
                 name: applicantProfileSnapshot.name,
@@ -546,10 +544,13 @@ export class ApplicationService {
       .lean();
 
     const Profile = mongoose.connection.collection("profiles");
-    const needProfileIds = applications
-      .filter((app) => !app.applicantProfile?.name)
-      .map((app) => app.applicantId);
-    const uniqueApplicantIds = [...new Set(needProfileIds.map((id: any) => id.toString()))];
+    const uniqueApplicantIds = [
+      ...new Set(
+        applications
+          .map((app) => app.applicantId?.toString())
+          .filter(Boolean),
+      ),
+    ];
 
     let profileMap = new Map<string, any>();
     if (uniqueApplicantIds.length > 0) {
@@ -564,29 +565,34 @@ export class ApplicationService {
     }
 
     const enrichedApplications = applications.map((app) => {
-      // Always try to get fresh profile data if not already populated
-      let applicantProfile = null;
-      
-      if (app.applicantProfile && app.applicantProfile.name) {
-        // Use stored snapshot if available
-        applicantProfile = app.applicantProfile;
-      } else if (app.applicantId) {
-        // Fetch from map
-        const profile = profileMap.get(app.applicantId.toString());
-        if (profile) {
-          applicantProfile = {
-            name: profile.name || profile.fullName,
-            photoURL: profile.photoURL,
-            rating: profile.rating,
-            totalReviews: profile.totalReviews,
-            skills: profile.skills,
-          };
-        }
+      const snapshot =
+        app.applicantProfile && typeof app.applicantProfile === "object"
+          ? app.applicantProfile
+          : null;
+      const freshProfile = app.applicantId
+        ? profileMap.get(app.applicantId.toString())
+        : null;
+      const freshSnapshot = freshProfile
+        ? ProfileUtils.buildSnapshot(freshProfile)
+        : undefined;
+      const liveName =
+        ProfileUtils.resolveProfileDisplayName(freshProfile) ||
+        freshSnapshot?.name ||
+        snapshot?.name;
+
+      let applicantProfile: ApplicantProfileSnapshot | null = null;
+      if (freshSnapshot || snapshot) {
+        applicantProfile = {
+          ...(snapshot || {}),
+          ...(freshSnapshot || {}),
+          ...(liveName ? { name: liveName } : {}),
+        };
       }
-      
+
       return {
         ...app,
         applicantProfile,
+        ...(liveName ? { applicantName: liveName } : {}),
       };
     });
 
@@ -657,13 +663,7 @@ export class ApplicationService {
       ...application,
       id: String(application._id),
       applicantProfile: applicantProfile
-        ? {
-            name: applicantProfile.name,
-            photoURL: applicantProfile.photoURL,
-            rating: applicantProfile.rating,
-            totalReviews: applicantProfile.totalReviews,
-            skills: applicantProfile.skills,
-          }
+        ? ProfileUtils.buildSnapshot(applicantProfile)
         : null,
     };
   }
@@ -675,9 +675,14 @@ export class ApplicationService {
     applicationId: string,
     taskOwnerProfileId: mongoose.Types.ObjectId,
     taskOwnerUid: string,
-    updateData: { status?: ApplicationStatus; message?: string }
+    updateData: {
+      status?: ApplicationStatus;
+      message?: string;
+      /** Recurring plan: visit paid before accept (assignment payment). */
+      recurringVisitId?: string;
+    }
   ): Promise<ITaskApplication> {
-    const { status, message } = updateData;
+    const { status, message, recurringVisitId } = updateData;
 
     const application = await TaskApplication.findById(applicationId).populate(
       "taskId",
@@ -704,6 +709,15 @@ export class ApplicationService {
     // STEP 1: Get old status for change detection
     const oldStatus = application.status;
 
+    let recurringVisitPayment:
+      | {
+          visitId: string;
+          amount: number;
+          paymentDeadline?: Date;
+          paymentConfirmed?: boolean;
+        }
+      | undefined;
+
     // Validate status transition
     if (status === "accepted") {
       if (task.bookingSource === "book_now") {
@@ -727,9 +741,14 @@ export class ApplicationService {
         );
       }
 
-      const isRecurring = Boolean(task.recurring?.enabled) && Array.isArray(task.schedule) && task.schedule.length > 0;
+      const isVisitPlan = RecurringVisitService.isVisitPlanTask(task);
+      const isLegacyRecurring =
+        !isVisitPlan &&
+        Boolean(task.recurring?.enabled) &&
+        Array.isArray(task.schedule) &&
+        task.schedule.length > 0;
 
-      if (!isRecurring && task.status !== "open") {
+      if (!isVisitPlan && !isLegacyRecurring && task.status !== "open") {
         throw new BadRequestError("Task is not open for assignment");
       }
 
@@ -737,7 +756,27 @@ export class ApplicationService {
       const Profile = mongoose.connection.collection("profiles");
       const applicantProfile = await Profile.findOne({ _id: application.applicantId });
 
-      if (isRecurring && Array.isArray(application.selectedDates) && application.selectedDates.length > 0) {
+      if (isVisitPlan) {
+        const effectiveAcceptedAmount =
+          Number(application.negotiation?.currentAmount) > 0
+            ? Number(application.negotiation?.currentAmount)
+            : application.proposedBudget.amount;
+
+        recurringVisitPayment = await RecurringVisitService.activatePlanOnApplicationAccept({
+          task,
+          applicationId,
+          applicantProfileId: application.applicantId,
+          applicantUid: applicantProfile?.uid || "",
+          acceptedAmount: effectiveAcceptedAmount,
+          preferredVisitId: recurringVisitId,
+        });
+
+        logger.info(
+          recurringVisitPayment.paymentConfirmed
+            ? `✅ Recurring visit plan ${task._id} activated; visit ${recurringVisitPayment.visitId} payment confirmed`
+            : `✅ Recurring visit plan ${task._id} activated; visit ${recurringVisitPayment.visitId} awaiting payment`,
+        );
+      } else if (isLegacyRecurring && Array.isArray(application.selectedDates) && application.selectedDates.length > 0) {
         const selectedSet = new Set(
           application.selectedDates.map((d: Date) => new Date(d).toDateString())
         );
@@ -865,6 +904,11 @@ export class ApplicationService {
     }
 
     await application.save();
+
+    if (recurringVisitPayment) {
+      (application as unknown as { recurringVisitPayment?: typeof recurringVisitPayment }).recurringVisitPayment =
+        recurringVisitPayment;
+    }
 
     // STEP 3: Emit notifications based on status change
     const statusChanged = oldStatus !== application.status;
@@ -1034,7 +1078,23 @@ export class ApplicationService {
       }
     }
 
-    return application;
+    const applicationPayload =
+      typeof (application as { toObject?: () => Record<string, unknown> }).toObject ===
+      'function'
+        ? (application as { toObject: () => Record<string, unknown> }).toObject()
+        : ({ ...(application as unknown as Record<string, unknown>) } as Record<
+            string,
+            unknown
+          >);
+
+    if (recurringVisitPayment) {
+      return {
+        ...applicationPayload,
+        recurringVisitPayment,
+      } as unknown as ITaskApplication;
+    }
+
+    return applicationPayload as unknown as ITaskApplication;
   }
 
   /**
@@ -1535,6 +1595,28 @@ export class ApplicationService {
     const task = await Task.findById(application.taskId);
     if (!task) {
       throw new NotFoundError("Task not found");
+    }
+
+    if (isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
+      await RecurringVisitService.leavePlanByTasker({
+        taskId: String(task._id),
+        taskerProfileId: applicantProfileId,
+        reason: "Tasker left recurring plan",
+      });
+
+      await TaskApplication.findByIdAndUpdate(
+        applicationId,
+        {
+          status: "withdrawn",
+          updatedAt: new Date(),
+        },
+        { new: true },
+      );
+
+      logger.warn(`Recurring plan left via accepted-application withdraw: ${applicationId}`, {
+        taskId: application.taskId.toString(),
+      });
+      return;
     }
 
     let escrow: { status?: string } | null = null;

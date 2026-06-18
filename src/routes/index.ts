@@ -17,6 +17,7 @@ import assignmentsRoutes from './assignments';
 import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
 import { BookingController } from '../controllers/BookingController';
+import { RecurringVisitController } from '../controllers/RecurringVisitController';
 import { CatalogController } from '../controllers/CatalogController';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
 import { gatewayAuthMiddleware } from '../middleware/gatewayAuth';
@@ -38,6 +39,12 @@ router.post(
   '/bookings/internal/payment-captured',
   serviceAuthMiddleware,
   asyncHandler(BookingController.paymentCaptured)
+);
+
+router.post(
+  '/recurring/internal/visit-payment-captured',
+  serviceAuthMiddleware,
+  asyncHandler(RecurringVisitController.visitPaymentCaptured)
 );
 
 // Book Now area check — service auth only (customer uid via ?firebaseUid= from gateway)

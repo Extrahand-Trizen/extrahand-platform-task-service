@@ -19,6 +19,69 @@ export class PaymentClient {
   /**
    * Create Book Now escrow (no performer until ops assigns)
    */
+  static async calculateBookNowOrderTotals(
+    items: Array<{ categorySlug: string; lineTotal: number }>,
+  ): Promise<{
+    success: boolean;
+    totals?: {
+      subtotal: number;
+      addonsTotal: number;
+      platformFee: number;
+      gst: number;
+      total: number;
+      categories: Array<{
+        categoryKey: string;
+        subtotal: number;
+        gstPercentage: number;
+        gstAmount: number;
+      }>;
+    };
+    error?: string;
+  }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/fees/book-now/calculate`,
+        { items },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        },
+      );
+
+      if (response.data?.success && response.data?.totals) {
+        return { success: true, totals: response.data.totals };
+      }
+
+      return {
+        success: false,
+        error: response.data?.error || 'Failed to calculate Book Now totals',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to calculate Book Now totals',
+      };
+    }
+  }
+
+  /**
+   * Create Book Now escrow (no performer until ops assigns)
+   */
   static async createBookingEscrow(params: {
     taskId: string;
     bookingOrderId: string;
@@ -126,6 +189,59 @@ export class PaymentClient {
     }
   }
 
+  /** Move held recurring visit escrow to the next visit when a paid visit is rescheduled. */
+  static async reassignRecurringVisitEscrow(params: {
+    escrowId: string;
+    taskId: string;
+    fromVisitId: string;
+    toVisitId: string;
+  }): Promise<{ success: boolean; escrow?: any; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.patch(
+        `${this.baseURL}/api/v1/escrow/${encodeURIComponent(params.escrowId)}/reassign-recurring-visit`,
+        {
+          taskId: params.taskId,
+          fromVisitId: params.fromVisitId,
+          toVisitId: params.toVisitId,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        },
+      );
+
+      if (response.data.success) {
+        return { success: true, escrow: response.data.escrow };
+      }
+
+      return {
+        success: false,
+        error: response.data.error || 'Failed to reassign recurring visit escrow',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error:
+          error instanceof Error ? error.message : 'Failed to reassign recurring visit escrow',
+      };
+    }
+  }
+
   /**
    * Get escrow by task ID
    */
@@ -181,6 +297,85 @@ export class PaymentClient {
           ? error
           : new Error('Failed to get escrow by task ID');
       }
+    }
+  }
+
+  /** Load escrow record by public escrow id (for schedule-row escrowId repair). */
+  static async getEscrowByEscrowId(escrowId: string): Promise<any | null> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.get(
+        `${this.baseURL}/api/v1/escrow/status/${encodeURIComponent(escrowId)}`,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 10000,
+        },
+      );
+
+      if (response.data.success && response.data.escrow) {
+        return response.data.escrow;
+      }
+
+      return null;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return null;
+      }
+      logger.warn('Failed to get escrow by escrow id', {
+        escrowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  /** Per-visit escrow for recurring v2 plans. */
+  static async getEscrowByTaskIdAndVisitId(
+    taskId: string,
+    visitId: string,
+  ): Promise<any | null> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.get(
+        `${this.baseURL}/api/v1/escrow/task/${encodeURIComponent(taskId)}?visitId=${encodeURIComponent(visitId)}`,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 10000,
+        },
+      );
+
+      if (response.data.success && response.data.escrow) {
+        return response.data.escrow;
+      }
+
+      return null;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        if (axiosError.response?.status === 404) {
+          return null;
+        }
+      }
+      logger.warn('Failed to get escrow by task ID and visit ID', {
+        taskId,
+        visitId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
     }
   }
 
@@ -369,6 +564,7 @@ export class PaymentClient {
     performerUid: string;
     amount: number;
     taskTitle?: string;
+    visitId?: string;
   }): Promise<{ success: boolean; payout?: any; requiresBankAccount?: boolean; error?: string }> {
     try {
       if (!this.baseURL || !this.serviceAuthToken) {
@@ -501,7 +697,8 @@ export class PaymentClient {
    * POST /api/v1/payment/cancel
    */
   static async cancelPaymentForTask(params: {
-    taskId: string;
+    taskId?: string;
+    escrowId?: string;
     reason?: string;
     userId?: string;
     cancelledBy: 'poster' | 'performer';
@@ -527,6 +724,7 @@ export class PaymentClient {
       logger.info('[PaymentClient.cancelPaymentForTask] Calling payment cancel API', {
         baseURL: this.baseURL,
         taskId: params.taskId,
+        escrowId: params.escrowId,
         cancelledBy: params.cancelledBy,
         taskStartDate: params.taskStartDate,
         hasAssignedAt: Boolean(params.assignedAt),
@@ -537,6 +735,7 @@ export class PaymentClient {
         `${this.baseURL}/api/v1/payment/cancel`,
         {
           taskId: params.taskId,
+          escrowId: params.escrowId,
           reason: params.reason,
           userId: params.userId,
           cancelledBy: params.cancelledBy,

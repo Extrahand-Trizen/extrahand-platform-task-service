@@ -17,6 +17,9 @@ import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
 import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import { buildScheduleVersion } from "../utils/workSchedule";
 import TaskApplication from "../models/TaskApplication";
+import TaskQuestion from "../models/TaskQuestion";
+import TaskFollow from "../models/TaskFollow";
+import TaskReport from "../models/TaskReport";
 import { MainAdminNotificationClient } from "../clients/MainAdminNotificationClient";
 import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { PaymentClient } from "./PaymentClient";
@@ -31,6 +34,9 @@ import {
   resolvePosterUid,
   withHelperAlertData,
 } from '../utils/helperNotificationRecipients';
+import { RecurringVisitService } from './RecurringVisitService';
+import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
+import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -85,6 +91,12 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "appliance-repair": "repair",
     "pest-control": "repair",
     "car-washing": "cleaning",
+    "roadside-assistance": "repair",
+    maid: "cleaning",
+    "personal-assistance": "other",
+    "Roadside Assistance": "repair",
+    Maid: "cleaning",
+    "Personal Assistance": "other",
     handyperson: "repair",
     "furniture-assembly": "assembly",
     "security-patrol": "other",
@@ -215,7 +227,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId schedule tags';
 
 /** Post & Choose only — Book Now tasks are assigned via ops, not helper browse. */
 function buildMarketplaceBrowseClause(): Record<string, unknown> {
@@ -700,7 +712,10 @@ export class TaskService {
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
 
-    const query: any = { requesterId: profileId }; // ✅ ObjectId reference
+    const query: any = {
+      requesterId: profileId,
+      $or: [{ parentTaskId: { $exists: false } }, { parentTaskId: null }],
+    };
     if (status) query.status = status;
 
     const tasks = await Task.find(query)
@@ -743,31 +758,81 @@ export class TaskService {
    */
   static async getTaskById(taskId: string): Promise<ITask> {
     const cacheKey = `task:detail:${taskId}`;
+    let cachedTask: ITask | null = null;
+
     try {
       const redis = getRedisClient();
       if (redis) {
         const cached = await redis.get(cacheKey);
         if (cached) {
-          const parsed = JSON.parse(cached) as ITask;
+          cachedTask = JSON.parse(cached) as ITask;
           logger.debug("Task detail cache HIT", { taskId });
-          return parsed;
         }
       }
     } catch (err) {
       logger.warn("Task detail cache read error", { taskId, error: err instanceof Error ? err.message : String(err) });
     }
 
-    const task = await Task.findById(taskId).lean();
+    if (cachedTask) {
+      const stillExists = await Task.findById(taskId).select('_id').lean();
+      if (!stillExists) {
+        TaskService.invalidateTaskCache(taskId);
+        cachedTask = null;
+      }
+    }
+
+    let task =
+      cachedTask ??
+      ((await Task.findById(taskId).lean()) as unknown as ITask | null);
+
+    if (!task) {
+      const recovered = await RecurringVisitService.resolveDeletedRecurringChildTaskAccess(
+        taskId,
+      );
+      if (recovered) {
+        TaskService.invalidateTaskCache(taskId);
+        task = recovered as unknown as ITask;
+      }
+    }
+
     if (!task) {
       throw new NotFoundError("Task not found");
     }
+
+    if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
+      await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
+      task = (await Task.findById(taskId).lean()) as unknown as ITask;
+      if (!task) {
+        throw new NotFoundError("Task not found");
+      }
+      const planDoc = await Task.findById(taskId);
+      if (planDoc) {
+        await RecurringVisitService.sanitizeOrphanedScheduleChildReferences(planDoc);
+      }
+      void RecurringVisitService.scheduleReconcilePlanState(taskId);
+    }
+
     const result = task as unknown as ITask;
+    const resolvedTaskId = String((result as unknown as { _id?: unknown })._id ?? taskId);
 
     try {
       const redis = getRedisClient();
       if (redis) {
-        await redis.setex(cacheKey, REDIS_TTLS.TASK_DETAIL_SECONDS, JSON.stringify(result));
-        logger.debug("Task detail cache SET", { taskId });
+        const payload = JSON.stringify(result);
+        if (resolvedTaskId === taskId) {
+          await redis.setex(cacheKey, REDIS_TTLS.TASK_DETAIL_SECONDS, payload);
+          logger.debug("Task detail cache SET", { taskId });
+        } else {
+          await redis.setex(
+            `task:detail:${resolvedTaskId}`,
+            REDIS_TTLS.TASK_DETAIL_SECONDS,
+            payload,
+          );
+          logger.debug("Task detail cache SET for resolved recurring child", {
+            requestedTaskId: taskId,
+            resolvedTaskId,
+          });
+        }
       }
     } catch (err) {
       logger.warn("Task detail cache write error", { taskId, error: err instanceof Error ? err.message : String(err) });
@@ -896,9 +961,7 @@ export class TaskService {
       // ❌ Removed requesterName - API Gateway will enrich with Profile data
       estimatedDuration: taskData.estimatedDuration || taskData.duration,
       scheduledDate: taskData.scheduledDate
-        ? typeof taskData.scheduledDate === "string"
-          ? new Date(taskData.scheduledDate)
-          : taskData.scheduledDate
+        ? parseIncomingCalendarDate(taskData.scheduledDate)
         : undefined,
       scheduledTimeStart: taskData.scheduledTimeStart,
       scheduledTimeEnd: taskData.scheduledTimeEnd,
@@ -937,6 +1000,42 @@ export class TaskService {
 
     const recurring = taskData.recurring;
     if (recurring?.enabled) {
+      const visitMeta = RecurringVisitService.tryDecodeMetaFromTaskData(
+        taskData as Record<string, unknown>,
+      );
+
+      if (visitMeta) {
+        RecurringVisitService.applyPlanOnCreate(
+          taskPayload as Record<string, unknown>,
+          taskData as Record<string, unknown>,
+          visitMeta,
+        );
+
+        const rawStart = recurring.startDate || taskData.scheduledDate;
+        const startDate = rawStart
+          ? parseIncomingCalendarDate(rawStart)
+          : (taskPayload.scheduledDate as Date);
+        const rawEnd = recurring.endDate;
+        const endDate = rawEnd
+          ? parseIncomingCalendarDate(rawEnd)
+          : visitMeta.endType === 'end_on_date'
+            ? (taskPayload.recurringPlan as { endDate?: Date })?.endDate
+            : undefined;
+
+        taskPayload.recurring = {
+          enabled: true,
+          frequency:
+            visitMeta.pattern === 'daily'
+              ? 'daily'
+              : visitMeta.pattern === 'weekly' || visitMeta.pattern === 'biweekly'
+                ? 'weekly'
+                : 'custom',
+          startDate,
+          endDate,
+          requireApproval: recurring.requireApproval !== false,
+          minCommitment: recurring.minCommitment || undefined,
+        };
+      } else {
       const frequency = (recurring.frequency || "daily") as
         | "daily"
         | "weekly"
@@ -1002,6 +1101,7 @@ export class TaskService {
       }));
 
       taskPayload.scheduledDate = startDate;
+      }
     }
 
     // Only include location if it was provided
@@ -2295,8 +2395,45 @@ export class TaskService {
     return updatedTask as unknown as ITask;
   }
 
+  /** Collect parent task plus recurring visit child tasks linked in schedule or parentTaskId. */
+  private static async collectTaskTreeIds(root: ITask): Promise<mongoose.Types.ObjectId[]> {
+    const idSet = new Set<string>();
+    idSet.add(String(root._id));
+
+    const schedule = Array.isArray(root.schedule) ? root.schedule : [];
+    for (const row of schedule) {
+      const childTaskId = (row as { childTaskId?: mongoose.Types.ObjectId | string | null })
+        .childTaskId;
+      if (childTaskId) {
+        idSet.add(String(childTaskId));
+      }
+    }
+
+    const linkedChildren = await Task.find({ parentTaskId: root._id }).select("_id").lean();
+    for (const child of linkedChildren) {
+      idSet.add(String(child._id));
+    }
+
+    return [...idSet]
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+  }
+
+  private static async deleteTaskRelatedRecords(
+    taskIds: mongoose.Types.ObjectId[],
+  ): Promise<void> {
+    if (taskIds.length === 0) return;
+
+    await Promise.all([
+      TaskApplication.deleteMany({ taskId: { $in: taskIds } }),
+      TaskQuestion.deleteMany({ taskId: { $in: taskIds } }),
+      TaskFollow.deleteMany({ taskId: { $in: taskIds } }),
+      TaskReport.deleteMany({ taskId: { $in: taskIds } }),
+    ]);
+  }
+
   /**
-   * Delete a task
+   * Delete a task and any recurring visit child tasks tied to it.
    */
   static async deleteTask(taskId: string, profileId: mongoose.Types.ObjectId): Promise<void> {
     const task = await Task.findById(taskId);
@@ -2309,9 +2446,17 @@ export class TaskService {
       throw new ForbiddenError("Not authorized to delete this task");
     }
 
-    await Task.findByIdAndDelete(taskId);
-    TaskService.invalidateTaskCache(taskId);
-    logger.info(`Task deleted: ${taskId} by user ${profileId.toString()}`);
+    const taskIdsToDelete = await TaskService.collectTaskTreeIds(task);
+    await TaskService.deleteTaskRelatedRecords(taskIdsToDelete);
+    await Task.deleteMany({ _id: { $in: taskIdsToDelete } });
+
+    for (const id of taskIdsToDelete) {
+      TaskService.invalidateTaskCache(String(id));
+    }
+
+    logger.info(
+      `Task deleted: ${taskId} by user ${profileId.toString()} (including ${Math.max(0, taskIdsToDelete.length - 1)} visit child task(s))`,
+    );
   }
 
   /**
@@ -2344,6 +2489,62 @@ export class TaskService {
   }
 
   /**
+   * Cancel a recurring plan visit using the same task cancellation flow as normal work
+   * (refund policy, fees, notifications). Delegates to the per-visit child task when present.
+   */
+  static async cancelRecurringVisit(
+    planTaskId: string,
+    visitId: string,
+    profileId: mongoose.Types.ObjectId,
+    options?: { cancellationReason?: string },
+  ): Promise<ITask | void> {
+    const parent = await Task.findById(planTaskId);
+    if (!parent) {
+      throw new NotFoundError("Task not found");
+    }
+    if (!isRecurringVisitPlanTask(parent as unknown as Record<string, unknown>)) {
+      throw new BadRequestError("Not a recurring visit plan");
+    }
+
+    const isCreator = parent.requesterId.equals(profileId);
+    const isPerformer = parent.assigneeId?.equals(profileId) || false;
+    if (!isCreator && !isPerformer) {
+      throw new ForbiddenError("Not authorized to cancel this visit");
+    }
+
+    const rows = (parent.schedule || []) as Array<{ visitId?: string; childTaskId?: mongoose.Types.ObjectId }>;
+    const visit = rows.find((row) => row.visitId === visitId);
+    if (!visit) {
+      throw new NotFoundError("Visit not found");
+    }
+
+    if (visit.childTaskId) {
+      const child = await Task.findById(visit.childTaskId);
+      if (child && !["cancelled", "completed"].includes(String(child.status))) {
+        return TaskService.updateTaskStatus(
+          String(child._id),
+          profileId,
+          "cancelled",
+          options,
+        );
+      }
+    }
+
+    if (!isCreator) {
+      throw new BadRequestError(
+        "This visit is not assigned yet. Only the customer can cancel it.",
+      );
+    }
+
+    await RecurringVisitService.cancelUnpaidVisitOnPlan({
+      taskId: planTaskId,
+      visitId,
+      requesterProfileId: profileId,
+      reason: options?.cancellationReason,
+    });
+  }
+
+  /**
    * Update task status
    */
   static async updateTaskStatus(
@@ -2373,7 +2574,23 @@ export class TaskService {
 
     // ✅ Compare ObjectIds
     const isCreator = task.requesterId.equals(profileId);
-    const isPerformer = task.assigneeId?.equals(profileId) || false; // ✅ Updated from assigneeUid
+    let isPerformer = task.assigneeId?.equals(profileId) || false; // ✅ Updated from assigneeUid
+
+    if (!isCreator && !isPerformer && task.parentTaskId && task.recurringVisitId) {
+      const parent = await Task.findById(task.parentTaskId).select(
+        "assigneeId recurringPlan",
+      );
+      if (parent) {
+        const plan = (parent as unknown as { recurringPlan?: Record<string, unknown> })
+          .recurringPlan;
+        isPerformer =
+          parent.assigneeId?.equals(profileId) ||
+          (plan?.taskerProfileId as mongoose.Types.ObjectId | undefined)?.equals(
+            profileId,
+          ) ||
+          false;
+      }
+    }
 
     if (!isCreator && !isPerformer) {
       throw new ForbiddenError("Not authorized to update this task");
@@ -2397,6 +2614,30 @@ export class TaskService {
           "Only assigned performer can mark task as started or in_progress"
         );
       }
+    }
+
+    if (
+      (status === "started" || status === "in_progress") &&
+      isPerformer &&
+      isRecurringVisitPlanTask(task as unknown as Record<string, unknown>) &&
+      !task.parentTaskId
+    ) {
+      const workChild = await RecurringVisitService.resolveActiveWorkChildTask(task);
+      if (workChild) {
+        return TaskService.updateTaskStatus(String(workChild._id), profileId, status, options);
+      }
+      throw new BadRequestError(
+        "Recurring visit work must be started on the paid visit task, not the plan"
+      );
+    }
+
+    // Recurring per-visit payment must be confirmed before any start transition (OTP path included).
+    if (
+      (status === "started" || status === "in_progress") &&
+      task.status === "assigned" &&
+      isPerformer
+    ) {
+      await RecurringVisitService.ensureVisitPaidBeforeWorkStart(task);
     }
 
     // OTP gate: performer cannot move assigned -> started/in_progress without successful OTP verification.
@@ -2428,13 +2669,24 @@ export class TaskService {
       throw new BadRequestError("Task can only be cancelled before it is started");
     }
 
-    // Performer cannot cancel after payment is held (poster cancel on assigned still refunds).
+    // Performer cannot cancel after payment is held — except recurring per-visit child
+    // tasks, where refund policy runs below (same as poster cancel on assigned visits).
     if (status === "cancelled" && isPerformer && !isCreator) {
-      const escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
-      if (isActiveEscrow(escrowForCancel)) {
-        throw new BadRequestError(
-          "Cannot cancel after payment is held. Contact support if you need help."
-        );
+      const isRecurringChildVisit =
+        Boolean(task.parentTaskId) && Boolean(task.recurringVisitId);
+      if (!isRecurringChildVisit) {
+        let escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
+        if (!escrowForCancel && task.parentTaskId && task.recurringVisitId) {
+          escrowForCancel = await PaymentClient.getEscrowByTaskIdAndVisitId(
+            String(task.parentTaskId),
+            String(task.recurringVisitId),
+          );
+        }
+        if (isActiveEscrow(escrowForCancel)) {
+          throw new BadRequestError(
+            "Cannot cancel after payment is held. Contact support if you need help."
+          );
+        }
       }
     }
 
@@ -2443,7 +2695,13 @@ export class TaskService {
       | null = null;
 
     if (status === "cancelled") {
-      const escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      let escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      if (!escrow && task.parentTaskId && task.recurringVisitId) {
+        escrow = await PaymentClient.getEscrowByTaskIdAndVisitId(
+          String(task.parentTaskId),
+          String(task.recurringVisitId),
+        );
+      }
       if (escrow) {
         const isRequesterCancelled = task.requesterId.equals(profileId);
         const Profile = mongoose.connection.collection("profiles");
@@ -2458,12 +2716,25 @@ export class TaskService {
           task.budget && typeof task.budget === "object" && "amount" in task.budget
             ? Number((task.budget as { amount: number }).amount)
             : undefined;
+        const escrowPublicId =
+          escrow && typeof escrow === "object"
+            ? String((escrow as { escrowId?: unknown }).escrowId ?? "").trim() || undefined
+            : undefined;
+        const cancelTaskId = escrowPublicId
+          ? undefined
+          : task.parentTaskId && task.recurringVisitId
+            ? String(task.parentTaskId)
+            : taskId;
         logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow started', {
           taskId,
           actorProfileId: profileId.toString(),
           actorRole: isRequesterCancelled ? 'poster' : 'performer',
           actorUid: uid,
           hasEscrow: true,
+          escrowPublicId,
+          cancelTaskId,
+          recurringParentTaskId: task.parentTaskId ? String(task.parentTaskId) : undefined,
+          recurringVisitId: task.recurringVisitId,
           taskStartDate: taskStart.toISOString(),
           assignedAt: task.assignedAt ? new Date(task.assignedAt).toISOString() : undefined,
           feeBaseAmount:
@@ -2472,7 +2743,8 @@ export class TaskService {
               : undefined,
         });
         const payResult = await PaymentClient.cancelPaymentForTask({
-          taskId,
+          taskId: cancelTaskId,
+          escrowId: escrowPublicId,
           reason: options?.cancellationReason,
           userId: uid,
           cancelledBy: isRequesterCancelled ? "poster" : "performer",
@@ -2553,6 +2825,87 @@ export class TaskService {
     }
 
     logger.info(`Task ${taskId} status updated to ${status} by ${profileId.toString()}`);
+
+    if (
+      status === 'completed' &&
+      updatedTask.parentTaskId &&
+      updatedTask.recurringVisitId
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.onChildVisitCompleted(updatedTask as unknown as ITask);
+        } catch (err) {
+          logger.error('[TaskService] Failed to advance recurring visit plan after child completion', {
+            taskId,
+            parentTaskId: String(updatedTask.parentTaskId),
+            recurringVisitId: updatedTask.recurringVisitId,
+            error: err,
+          });
+        }
+      });
+    }
+
+    if (
+      status === 'cancelled' &&
+      updatedTask.parentTaskId &&
+      updatedTask.recurringVisitId
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.onChildVisitCancelled(updatedTask as unknown as ITask, {
+            reason: options?.cancellationReason,
+            cancelledByProfileId: profileId,
+          });
+        } catch (err) {
+          logger.error('[TaskService] Failed to advance recurring visit plan after child cancellation', {
+            taskId,
+            parentTaskId: String(updatedTask.parentTaskId),
+            recurringVisitId: updatedTask.recurringVisitId,
+            error: err,
+          });
+        }
+      });
+    }
+
+    const PROGRESS_VISIT_STATUSES = new Set(['started', 'in_progress', 'review']);
+    if (
+      PROGRESS_VISIT_STATUSES.has(status) &&
+      updatedTask.parentTaskId &&
+      updatedTask.recurringVisitId
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.syncParentVisitOnChildProgress(
+            updatedTask as unknown as ITask,
+            status,
+          );
+        } catch (err) {
+          logger.error('[TaskService] Failed to sync recurring visit progress from child task', {
+            taskId,
+            parentTaskId: String(updatedTask.parentTaskId),
+            recurringVisitId: updatedTask.recurringVisitId,
+            error: err,
+          });
+        }
+      });
+    }
+
+    if (
+      PROGRESS_VISIT_STATUSES.has(status) &&
+      !updatedTask.parentTaskId &&
+      RecurringVisitService.isVisitPlanTask(updatedTask as unknown as Record<string, unknown>)
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.reconcilePlanState(taskId);
+        } catch (err) {
+          logger.error('[TaskService] Failed to reconcile recurring parent visit progress', {
+            taskId,
+            error: err,
+          });
+        }
+      });
+    }
 
     // Emit real-time status update
     emitTaskStatusChanged(taskId, updatedTask);
@@ -2968,19 +3321,22 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const effectiveTaskId = String(workTask._id);
+
+    const isPerformer = workTask.assigneeId?.equals(profileId) || false;
     if (!isPerformer) {
       throw new ForbiddenError("Only assigned performer can request start OTP");
     }
 
-    if (task.status !== "assigned") {
+    if (workTask.status !== "assigned") {
       throw new BadRequestError("OTP can only be requested when task is in assigned status");
     }
 
-    // Reverted: no additional-quote pending gate in legacy flow.
+    await RecurringVisitService.ensureVisitPaidBeforeWorkStart(workTask);
 
     const Profile = mongoose.connection.collection("profiles");
-    const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+    const requesterProfile = await Profile.findOne({ _id: workTask.requesterId });
 
     const requesterUid =
       requesterProfile && typeof requesterProfile === "object" && "uid" in requesterProfile
@@ -2996,11 +3352,11 @@ export class TaskService {
     const expiresAt = new Date(now.getTime() + START_OTP_TTL_MS);
 
     const nextResendCount = options?.isResend
-      ? (task.startOtp?.resendCount || 0) + 1
-      : task.startOtp?.resendCount || 0;
+      ? (workTask.startOtp?.resendCount || 0) + 1
+      : workTask.startOtp?.resendCount || 0;
 
-    task.startOtp = {
-      codeHash: hashStartOtp(taskId, otp),
+    workTask.startOtp = {
+      codeHash: hashStartOtp(effectiveTaskId, otp),
       requestedAt: now,
       expiresAt,
       attempts: 0,
@@ -3008,12 +3364,19 @@ export class TaskService {
       requestedById: profileId,
     };
 
-    await task.save();
+    await workTask.save();
 
-    const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
+    const { workTitle: workTitleForOtp, visitNumber } =
+      await RecurringVisitService.resolveStartOtpWorkTitle(workTask);
+
+    const otpBody = `Task start OTP for \"${workTitleForOtp}\": ${otp}. Valid for 10 minutes.`;
     const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Task Start OTP';
     const notificationData = {
-      taskId,
+      taskId: effectiveTaskId,
+      taskTitle: workTitleForOtp,
+      visitNumber,
+      parentTaskId: workTask.parentTaskId ? String(workTask.parentTaskId) : undefined,
+      recurringVisitId: workTask.recurringVisitId ? String(workTask.recurringVisitId) : undefined,
       otp,
       otpType: 'task_start',
       expiresAt: expiresAt.toISOString(),
@@ -3023,15 +3386,18 @@ export class TaskService {
 
     // Send via both email and in-app notifications for redundancy
     let taskerName = "tasker";
-    if (task.assigneeId && typeof task.assigneeId === "object") {
+    if (workTask.assigneeId && typeof workTask.assigneeId === "object") {
       try {
-        const assigneeId = task.assigneeId as mongoose.Types.ObjectId;
+        const assigneeId = workTask.assigneeId as mongoose.Types.ObjectId;
         const assigneeProfile = await Profile.findOne({ _id: assigneeId });
         if (assigneeProfile) {
           taskerName = (assigneeProfile as any).name || (assigneeProfile as any).fullName || "tasker";
         }
       } catch (err) {
-        logger.warn("Failed to fetch assignee profile for task start OTP", { taskId, error: err });
+        logger.warn("Failed to fetch assignee profile for task start OTP", {
+          taskId: effectiveTaskId,
+          error: err,
+        });
       }
     }
     const requesterName = requesterProfile?.name || requesterProfile?.fullName || "requester";
@@ -3046,7 +3412,7 @@ export class TaskService {
         await EmailServiceClient.sendTaskStartOtp(requesterEmail, {
           requesterName,
           taskerName,
-          taskTitle: task.title,
+          taskTitle: workTitleForOtp,
           otp,
           expiresAt: expiresAt.toISOString(),
           userId: requesterUid,
@@ -3109,12 +3475,15 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const effectiveTaskId = String(workTask._id);
+
+    const isPerformer = workTask.assigneeId?.equals(profileId) || false;
     if (!isPerformer) {
       throw new ForbiddenError("Only assigned performer can verify start OTP");
     }
 
-    if (task.status !== "assigned") {
+    if (workTask.status !== "assigned") {
       throw new BadRequestError("Task is not in assigned state");
     }
 
@@ -3126,7 +3495,7 @@ export class TaskService {
     }
 
     const Profile = mongoose.connection.collection("profiles");
-    const posterProfile = await Profile.findOne({ _id: task.requesterId });
+    const posterProfile = await Profile.findOne({ _id: workTask.requesterId });
     const rawPosterUid =
       posterProfile && typeof posterProfile === "object" && "uid" in posterProfile
         ? (posterProfile as { uid?: unknown }).uid
@@ -3135,42 +3504,42 @@ export class TaskService {
 
     if (acceptsPosterDummyStartOtp(posterUid, sanitizedOtp)) {
       logger.warn("start_otp_poster_dummy_accepted", {
-        taskId,
+        taskId: effectiveTaskId,
         posterUid: posterUid ?? null,
       });
-      return TaskService.updateTaskStatus(taskId, profileId, "started", {
+      return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
         skipStartOtpValidation: true,
       });
     }
 
-    if (!task.startOtp?.codeHash || !task.startOtp?.expiresAt) {
+    if (!workTask.startOtp?.codeHash || !workTask.startOtp?.expiresAt) {
       throw new BadRequestError("Start OTP not requested. Please request OTP first");
     }
 
-    if (task.startOtp.expiresAt.getTime() < Date.now()) {
+    if (workTask.startOtp.expiresAt.getTime() < Date.now()) {
       throw new BadRequestError("OTP expired. Please resend OTP");
     }
 
-    if ((task.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
+    if ((workTask.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
       throw new BadRequestError("Too many invalid attempts. Please resend OTP");
     }
 
-    const expectedHash = hashStartOtp(taskId, sanitizedOtp);
-    if (task.startOtp.codeHash !== expectedHash) {
-      task.startOtp.attempts = (task.startOtp.attempts || 0) + 1;
-      await task.save();
+    const expectedHash = hashStartOtp(effectiveTaskId, sanitizedOtp);
+    if (workTask.startOtp.codeHash !== expectedHash) {
+      workTask.startOtp.attempts = (workTask.startOtp.attempts || 0) + 1;
+      await workTask.save();
 
-      if (task.startOtp.attempts >= START_OTP_MAX_ATTEMPTS) {
+      if (workTask.startOtp.attempts >= START_OTP_MAX_ATTEMPTS) {
         throw new BadRequestError("OTP mismatch. Max attempts reached. Please resend OTP");
       }
 
       throw new BadRequestError("OTP mismatch");
     }
 
-    task.startOtp.verifiedAt = new Date();
-    await task.save();
+    workTask.startOtp.verifiedAt = new Date();
+    await workTask.save();
 
-    return TaskService.updateTaskStatus(taskId, profileId, "started", {
+    return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
       skipStartOtpValidation: true,
     });
   }
