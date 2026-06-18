@@ -1863,9 +1863,6 @@ export class RecurringVisitService {
 
     const planForVerify = (task as unknown as { recurringPlan?: { completedVisitCount?: number; budgetPerVisit?: number } })
       .recurringPlan;
-    const completedForVerify = Number(planForVerify?.completedVisitCount || 0);
-    const completedRowCount = rows.filter((visit) => visit.status === 'completed').length;
-    const nextPayableIndex = Math.max(completedForVerify, completedRowCount);
     const sortedForVerify = [...rows].sort(
       (a, b) =>
         (a.visitIndex ?? 0) - (b.visitIndex ?? 0) ||

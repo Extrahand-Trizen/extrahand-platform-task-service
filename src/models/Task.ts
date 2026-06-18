@@ -113,8 +113,12 @@ export interface ITask extends Document {
 
   requesterId: mongoose.Types.ObjectId; // ObjectId reference to Profile
   // ❌ Removed requesterName - API Gateway will enrich with Profile data
+  /** Firebase uid of poster when denormalized on the task document. */
+  requesterUid?: string;
 
   assigneeId?: mongoose.Types.ObjectId | null; // ObjectId reference to Profile
+  /** Firebase uid of assigned helper when denormalized on the task document. */
+  assigneeUid?: string | null;
   assignedAt?: Date;
 
   estimatedDuration?: number;
