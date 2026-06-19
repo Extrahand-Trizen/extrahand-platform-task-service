@@ -87,9 +87,23 @@ export function decodeRecurringMetaFromTask(
   return decodeRecurringMetaFromTags(normalizeTaskTags(task));
 }
 
+function taskHasPerVisitScheduleRows(
+  task: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!task) return false;
+  const schedule = Array.isArray(task.schedule) ? task.schedule : [];
+  return schedule.some(
+    (entry) =>
+      entry &&
+      typeof entry === 'object' &&
+      typeof (entry as { visitId?: string }).visitId === 'string',
+  );
+}
+
 /** v2 recurring visit plan — distinct from legacy schedule-only recurring. */
 export function isRecurringVisitPlanTask(task: Record<string, unknown> | null | undefined): boolean {
   if (!task?.recurring || !(task.recurring as { enabled?: boolean }).enabled) return false;
   const plan = task.recurringPlan as { planVersion?: number } | undefined;
-  return plan?.planVersion === 2;
+  if (plan?.planVersion === 2) return true;
+  return taskHasPerVisitScheduleRows(task);
 }
