@@ -2717,10 +2717,35 @@ export class RecurringVisitService {
     invalidateTaskDetailCache(task._id.toString());
   }
 
-  static async listVisits(taskId: string, requesterProfileId?: mongoose.Types.ObjectId) {
-    await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
-    await RecurringVisitService.rebalancePaymentPendingVisits(taskId);
-    void RecurringVisitService.scheduleReconcilePlanState(taskId);
+  /** Non-blocking escrow sync + rebalance after a fast visits read. */
+  private static schedulePaymentSyncAndRebalance(taskId: string): void {
+    void (async () => {
+      try {
+        await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
+        await RecurringVisitService.rebalancePaymentPendingVisits(taskId);
+        void RecurringVisitService.scheduleReconcilePlanState(taskId);
+      } catch (error) {
+        logger.warn('[RecurringVisitService] Background payment sync failed', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+  }
+
+  static async listVisits(
+    taskId: string,
+    requesterProfileId?: mongoose.Types.ObjectId,
+    options?: { syncPayments?: boolean },
+  ) {
+    const syncPayments = options?.syncPayments === true;
+    if (syncPayments) {
+      await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
+      await RecurringVisitService.rebalancePaymentPendingVisits(taskId);
+      void RecurringVisitService.scheduleReconcilePlanState(taskId);
+    } else {
+      RecurringVisitService.schedulePaymentSyncAndRebalance(taskId);
+    }
 
     const task = await Task.findById(taskId);
     if (!task) throw new NotFoundError('Task not found');

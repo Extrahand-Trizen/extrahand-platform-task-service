@@ -11,9 +11,12 @@ export class RecurringVisitController {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
+    const syncPayments = String(req.query.sync || '').toLowerCase() === 'true';
+
     const data = await RecurringVisitService.listVisits(
       req.params.id,
       req.user!.profileId,
+      { syncPayments },
     );
 
     ApiResponse.success(res, data, 'Recurring visits retrieved');
