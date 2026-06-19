@@ -939,11 +939,13 @@ export function schedulePostCreateNotifications(
   task: ITask,
   ctx: PostCreateNotificationContext,
 ): void {
-  void runPostCreateNotifications(task, ctx).catch((error) => {
-    logger.error('[TaskService.postCreateNotifications] Unhandled error', {
-      taskId: task._id?.toString?.() ?? task._id,
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
+  setImmediate(() => {
+    void runPostCreateNotifications(task, ctx).catch((error) => {
+      logger.error('[TaskService.postCreateNotifications] Unhandled error', {
+        taskId: task._id?.toString?.() ?? task._id,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
     });
   });
 }

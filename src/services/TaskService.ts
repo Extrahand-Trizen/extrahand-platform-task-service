@@ -26,6 +26,7 @@ import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 
@@ -1186,14 +1187,15 @@ export class TaskService {
 
     logger.info(`✅ Task created successfully: ${task._id}`);
 
-    schedulePostCreateNotifications(task, {
+    const taskRecord = task.toObject() as ITask;
+    schedulePostCreateNotifications(taskRecord, {
       uid,
       mappedCategory,
       categorySlug,
       frontendCategory,
     });
 
-    return task.toObject();
+    return buildCreateTaskApiResponse(taskRecord) as ITask;
   }
 
   /**
