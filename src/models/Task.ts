@@ -762,6 +762,10 @@ TaskSchema.index({ status: 1, scheduledDate: 1 });
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 TaskSchema.index({ bookingSource: 1, status: 1 });
 TaskSchema.index({ bookingOrderId: 1 });
+TaskSchema.index(
+  { parentTaskId: 1, status: 1, recurringVisitId: 1 },
+  { name: 'recurring_child_visit_lookup' },
+);
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);

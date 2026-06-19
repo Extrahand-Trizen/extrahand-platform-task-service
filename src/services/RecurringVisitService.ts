@@ -2733,6 +2733,9 @@ export class RecurringVisitService {
     })();
   }
 
+  private static readonly LIST_VISITS_TASK_SELECT =
+    '_id requesterId recurring recurringPlan schedule activeVisitId budget';
+
   static async listVisits(
     taskId: string,
     requesterProfileId?: mongoose.Types.ObjectId,
@@ -2747,8 +2750,12 @@ export class RecurringVisitService {
       RecurringVisitService.schedulePaymentSyncAndRebalance(taskId);
     }
 
-    const task = await Task.findById(taskId);
-    if (!task) throw new NotFoundError('Task not found');
+    const taskLean = await Task.findById(taskId)
+      .select(RecurringVisitService.LIST_VISITS_TASK_SELECT)
+      .lean();
+    if (!taskLean) throw new NotFoundError('Task not found');
+
+    const task = taskLean as unknown as ITask;
 
     if (requesterProfileId && !task.requesterId.equals(requesterProfileId)) {
       const plan = (task as unknown as { recurringPlan?: { taskerProfileId?: mongoose.Types.ObjectId } })
