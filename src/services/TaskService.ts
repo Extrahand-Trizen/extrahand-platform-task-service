@@ -1195,7 +1195,7 @@ export class TaskService {
       frontendCategory,
     });
 
-    return buildCreateTaskApiResponse(taskRecord) as ITask;
+    return buildCreateTaskApiResponse(taskRecord);
   }
 
   /**
