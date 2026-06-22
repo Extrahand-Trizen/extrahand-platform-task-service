@@ -19,6 +19,7 @@ import {
   validateRecurringPlanOccurrences,
   type RecurringScheduleBuildConfig,
 } from '../utils/recurringVisitScheduleBuilder';
+import { selectWorkDetailsPreviewVisits } from '../utils/recurringWorkDetailsPreview';
 import {
   canTaskerStartVisit,
   DEFAULT_CONSECUTIVE_UNPAID_PAUSE_THRESHOLD,
@@ -55,17 +56,6 @@ function invalidateTaskDetailCache(taskId: string): void {
       error: err instanceof Error ? err.message : String(err),
     });
   });
-}
-
-async function invalidateTaskDetailCacheAwait(taskId: string): Promise<void> {
-  try {
-    await getRedisClient()?.del(`task:detail:${taskId}`);
-  } catch (err: unknown) {
-    logger.warn('Task detail cache invalidate error', {
-      taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
 }
 
 function isOptimisticConcurrencyError(error: unknown): boolean {
@@ -217,6 +207,29 @@ async function loadPlanScheduleRows(task: ITask): Promise<ScheduleVisitRow[]> {
 
 function findVisit(task: ITask, visitId: string): ScheduleVisitRow | undefined {
   return getScheduleRows(task).find((v) => v.visitId === visitId);
+}
+
+async function requireHydratedVisit(
+  task: mongoose.Document & ITask,
+  visitId: string,
+): Promise<ScheduleVisitRow> {
+  await hydrateTaskVisitsOntoSchedule(task);
+  const visit = findVisit(task, visitId);
+  if (!visit) throw new NotFoundError('Visit not found');
+  return visit;
+}
+
+function replaceVisitRowInSchedule(
+  task: mongoose.Document & ITask,
+  visit: ScheduleVisitRow,
+): ScheduleVisitRow[] {
+  const rows = getScheduleRows(task);
+  const rowIdx = rows.findIndex((row) => row.visitId === visit.visitId);
+  if (rowIdx >= 0) {
+    rows[rowIdx] = visit;
+  }
+  task.schedule = rows as unknown as ITask['schedule'];
+  return rows;
 }
 
 function sortScheduleRows(rows: ScheduleVisitRow[]): ScheduleVisitRow[] {
@@ -3076,7 +3089,7 @@ export class RecurringVisitService {
   static async listVisits(
     taskId: string,
     requesterProfileId?: mongoose.Types.ObjectId,
-    options?: { syncPayments?: boolean },
+    options?: { syncPayments?: boolean; scope?: 'work_details' | 'full' },
   ) {
     const taskLean = await Task.findById(taskId)
       .select(RecurringVisitService.LIST_VISITS_TASK_SELECT)
@@ -3150,6 +3163,32 @@ export class RecurringVisitService {
       String(taskLean.status || '').toLowerCase() === 'cancelled'
         ? null
         : resolvePendingPaymentVisitRow(visits);
+
+    const activeVisitId =
+      (task as unknown as { activeVisitId?: string }).activeVisitId ?? null;
+
+    if (options?.scope === 'work_details') {
+      const preview = selectWorkDetailsPreviewVisits(visits, activeVisitId);
+      return {
+        planStatus: plan.status,
+        visits: preview.previewVisits,
+        preview: {
+          scope: 'work_details',
+          totalListedVisits: preview.totalListed,
+          hiddenVisitCount: preview.hiddenCount,
+        },
+        pendingPayment: pendingPayment
+          ? {
+              visitId: pendingPayment.visitId,
+              amount: pendingPayment.amount ?? plan.budgetPerVisit,
+              paymentDeadline: pendingPayment.paymentDeadline,
+              visitIndex: pendingPayment.visitIndex,
+              date: pendingPayment.date,
+            }
+          : null,
+        activeVisitId,
+      };
+    }
 
     return {
       planStatus: plan.status,
@@ -4559,8 +4598,7 @@ export class RecurringVisitService {
     const task = await Task.findById(parentTaskId);
     if (!task) throw new NotFoundError('Task not found');
 
-    const visit = findVisit(task, params.visit.visitId);
-    if (!visit) throw new NotFoundError('Visit not found');
+    const visit = await requireHydratedVisit(task, params.visit.visitId);
 
     RecurringVisitService.assertVisitRescheduleDateAvailable(task, visit, params.newDate);
 
@@ -4596,9 +4634,7 @@ export class RecurringVisitService {
     }
 
     task.schedule = rows as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(parentTaskId);
+    await saveRecurringPlanDocument(task, parentTaskId, rows);
 
     if (transferResult.clearedChildTaskId) {
       await RecurringVisitService.deleteRecurringVisitChildTask(transferResult.clearedChildTaskId);
@@ -4607,13 +4643,13 @@ export class RecurringVisitService {
     if (transferResult.transferred && transferResult.toVisitId) {
       const reloaded = await Task.findById(parentTaskId);
       if (reloaded) {
+        await hydrateTaskVisitsOntoSchedule(reloaded);
         const nextVisit = findVisit(reloaded, transferResult.toVisitId);
         if (nextVisit) {
           await RecurringVisitService.ensureChildTaskForVisit(reloaded, nextVisit);
-          reloaded.schedule = getScheduleRows(reloaded) as unknown as ITask['schedule'];
-          reloaded.markModified('schedule');
-          await reloaded.save();
-          invalidateTaskDetailCache(parentTaskId);
+          const reloadedRows = getScheduleRows(reloaded);
+          reloaded.schedule = reloadedRows as unknown as ITask['schedule'];
+          await saveRecurringPlanDocument(reloaded, parentTaskId, reloadedRows);
         }
       }
     } else if (visitRow.childTaskId) {
@@ -4643,6 +4679,7 @@ export class RecurringVisitService {
 
     const refreshed = await Task.findById(parentTaskId);
     if (refreshed) {
+      await hydrateTaskVisitsOntoSchedule(refreshed);
       const planStatus = String(
         (refreshed as unknown as { recurringPlan?: { status?: string } }).recurringPlan?.status ||
           '',
@@ -4727,8 +4764,7 @@ export class RecurringVisitService {
     }
     RecurringVisitService.assertPlanAllowsVisitReschedule(plan);
 
-    const visit = findVisit(task, params.visitId);
-    if (!visit) throw new NotFoundError('Visit not found');
+    const visit = await requireHydratedVisit(task, params.visitId);
 
     let childStatus = '';
     if (visit.childTaskId) {
@@ -4749,6 +4785,8 @@ export class RecurringVisitService {
       });
     }
 
+    RecurringVisitService.assertVisitRescheduleDateAvailable(task, visit, params.newDate);
+
     await RecurringVisitService.applyVisitReschedule({
       task,
       visit,
@@ -4758,6 +4796,9 @@ export class RecurringVisitService {
     });
 
     const refreshedTask = await Task.findById(params.taskId);
+    if (refreshedTask) {
+      await hydrateTaskVisitsOntoSchedule(refreshedTask);
+    }
     const refreshedVisit = refreshedTask
       ? findVisit(refreshedTask, params.visitId)
       : undefined;
@@ -4808,8 +4849,7 @@ export class RecurringVisitService {
     }
     RecurringVisitService.assertPlanAllowsVisitReschedule(plan);
 
-    const visit = findVisit(task, params.visitId);
-    if (!visit) throw new NotFoundError('Visit not found');
+    const visit = await requireHydratedVisit(task, params.visitId);
 
     if (
       visit.rescheduleRequest &&
@@ -4847,10 +4887,8 @@ export class RecurringVisitService {
     };
     visit.updatedAt = new Date();
 
-    task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(params.taskId);
+    const rows = replaceVisitRowInSchedule(task, visit);
+    await saveRecurringPlanDocument(task, params.taskId, rows);
 
     await RecurringVisitService.notifyCustomerRecurringVisitRescheduleRequested(task, visit, {
       newDate: params.newDate,
@@ -4999,8 +5037,7 @@ export class RecurringVisitService {
       throw new ForbiddenError('Not authorized');
     }
 
-    const visit = findVisit(task, params.visitId);
-    if (!visit) throw new NotFoundError('Visit not found');
+    const visit = await requireHydratedVisit(task, params.visitId);
 
     const request = visit.rescheduleRequest;
     if (!request || request.status !== 'pending') {
@@ -5020,6 +5057,7 @@ export class RecurringVisitService {
 
       const savedTask = await Task.findById(params.taskId);
       if (!savedTask) return;
+      await hydrateTaskVisitsOntoSchedule(savedTask);
       const savedVisit = findVisit(savedTask, params.visitId);
       if (!savedVisit) return;
 
@@ -5028,10 +5066,8 @@ export class RecurringVisitService {
         status: 'approved',
         respondedAt: now,
       };
-      savedTask.schedule = getScheduleRows(savedTask) as unknown as ITask['schedule'];
-      savedTask.markModified('schedule');
-      await savedTask.save();
-      invalidateTaskDetailCache(params.taskId);
+      const savedRows = replaceVisitRowInSchedule(savedTask, savedVisit);
+      await saveRecurringPlanDocument(savedTask, params.taskId, savedRows);
 
       await RecurringVisitService.notifyTaskerRecurringVisitRescheduled(savedTask, savedVisit, {
         newDate: approvedDate,
@@ -5043,10 +5079,8 @@ export class RecurringVisitService {
 
     visit.rescheduleRequest = undefined;
     visit.updatedAt = now;
-    task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    await invalidateTaskDetailCacheAwait(params.taskId);
+    const rows = replaceVisitRowInSchedule(task, visit);
+    await saveRecurringPlanDocument(task, params.taskId, rows);
 
     await RecurringVisitService.notifyTaskerRecurringVisitRescheduleRejected(task, visit);
   }

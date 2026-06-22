@@ -187,7 +187,7 @@ export function computeNextVisitDateAfter(
  */
 export function resolveNextMaterializedVisitDate(
   config: RecurringScheduleBuildConfig,
-  cursor: Date | null,
+  _cursor: Date | null,
   totalMaterializedCount: number,
 ): Date | null {
   if (config.endType === 'end_on_date') {
@@ -196,13 +196,25 @@ export function resolveNextMaterializedVisitDate(
     return normalizeDateOnly(planned[totalMaterializedCount]);
   }
 
-  if (totalMaterializedCount === 0) {
-    const first = buildRecurringScheduleDates(config, 1);
-    return first.length > 0 ? normalizeDateOnly(first[0]) : null;
+  const planned = buildRecurringScheduleDates(
+    config,
+    Math.min(Math.max(totalMaterializedCount + 1, 1), MAX_RECURRING_PLAN_OCCURRENCES),
+  );
+  if (totalMaterializedCount < planned.length) {
+    return normalizeDateOnly(planned[totalMaterializedCount]);
   }
 
-  if (!cursor) return null;
-  return computeNextVisitDateAfter(cursor, config);
+  if (totalMaterializedCount === 0) {
+    return planned.length > 0 ? normalizeDateOnly(planned[0]) : null;
+  }
+
+  let anchor = planned[planned.length - 1];
+  for (let index = planned.length; index <= totalMaterializedCount; index += 1) {
+    const next = computeNextVisitDateAfter(anchor, config);
+    if (!next) return null;
+    anchor = next;
+  }
+  return normalizeDateOnly(anchor);
 }
 
 /** Buffer gap capped by remaining valid occurrences for fixed-end plans. */

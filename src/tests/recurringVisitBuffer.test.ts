@@ -268,6 +268,21 @@ function testLongDailyPlanMaterializesOnlyBufferSize(): void {
   assert.strictEqual(dateKey(dates[6]), '2026-06-07');
 }
 
+function testUntilCancelledUsesPlanIndexNotRescheduledCursor(): void {
+  const config: RecurringScheduleBuildConfig = {
+    pattern: 'weekly',
+    selectedWeekdays: [],
+    startDate: JUN_1,
+    endType: 'until_cancelled',
+  };
+
+  const first = resolveNextMaterializedVisitDate(config, normalizeDateOnly(new Date('2026-06-03T00:00:00.000Z')), 0);
+  const second = resolveNextMaterializedVisitDate(config, normalizeDateOnly(new Date('2026-06-03T00:00:00.000Z')), 1);
+
+  assert.strictEqual(dateKey(first!), '2026-06-01');
+  assert.strictEqual(dateKey(second!), '2026-06-08');
+}
+
 const tests = [
   testDefaultBufferSize,
   testBufferCountedStatuses,
@@ -290,6 +305,7 @@ const tests = [
   testValidateRejectsMoreThan366Occurrences,
   testIdempotentNextDateResolution,
   testLongDailyPlanMaterializesOnlyBufferSize,
+  testUntilCancelledUsesPlanIndexNotRescheduledCursor,
 ];
 
 let passed = 0;

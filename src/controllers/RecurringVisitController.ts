@@ -12,11 +12,14 @@ export class RecurringVisitController {
     }
 
     const syncPayments = String(req.query.sync || '').toLowerCase() === 'true';
+    const scopeRaw = String(req.query.scope || '').toLowerCase();
+    const scope =
+      scopeRaw === 'work_details' ? ('work_details' as const) : ('full' as const);
 
     const data = await RecurringVisitService.listVisits(
       req.params.id,
       req.user!.profileId,
-      { syncPayments },
+      { syncPayments, scope },
     );
 
     ApiResponse.success(res, data, 'Recurring visits retrieved');
