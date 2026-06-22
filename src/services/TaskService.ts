@@ -262,6 +262,7 @@ export class TaskService {
    */
   static async getTasks(filters: {
     status?: TaskStatus | TaskStatus[] | string | string[];
+    excludeOverdue?: boolean | string;
     category?: TaskCategory | string | string[];
     city?: string;
     minBudget?: number;
@@ -275,10 +276,11 @@ export class TaskService {
     assigneeId?: string;
     posterUid?: string;
     requesterId?: string;
+    bookingSource?: string;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, limit = 50, page = 1 } = filters;
+    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -297,6 +299,7 @@ export class TaskService {
 
     const isCacheable =
       (status === "open" || (Array.isArray(status) && status.length === 1 && status[0] === "open")) &&
+      !(excludeOverdue === true || excludeOverdue === 'true') &&
       !hasCategory &&
       !city &&
       !hasBudgetFilter &&
@@ -341,17 +344,52 @@ export class TaskService {
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
 
-    // Book Now tasks are not marketplace listings — hide from helper browse/discover.
-    andClauses.push(buildMarketplaceBrowseClause());
+    // When bookingSource is explicitly specified (admin view), skip the marketplace-only
+    // clause so book_now tasks are visible. Otherwise apply it to protect helper browse.
+    if (bookingSource && bookingSource !== 'all') {
+      // Admin requested a specific booking source — filter directly by bookingSource
+      if (bookingSource === 'book_now') {
+        andClauses.push({ bookingSource: 'book_now' });
+      } else if (bookingSource === 'posted_task' || bookingSource === 'marketplace') {
+        // Posted tasks: no bookingSource field, or marketplace
+        andClauses.push({
+          $or: [
+            { bookingSource: { $exists: false } },
+            { bookingSource: 'marketplace' },
+          ],
+        });
+      }
+    } else {
+      // Book Now tasks are not marketplace listings — hide from helper browse/discover.
+      andClauses.push(buildMarketplaceBrowseClause());
+    }
 
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
     if (status) {
-      if (Array.isArray(status) && status.length > 1) {
-        andClauses.push({ status: { $in: status } });
-      } else if (Array.isArray(status) && status.length === 1) {
-        andClauses.push({ status: status[0] });
-      } else if (typeof status === 'string') {
-        andClauses.push({ status });
+      if (status === 'overdue') {
+        const now = new Date();
+        andClauses.push({ status: 'open' });
+        andClauses.push({ scheduledDate: { $lt: now } });
+        andClauses.push({ dateOption: { $ne: 'flexible' } });
+      } else if (status === 'open' && (excludeOverdue === true || excludeOverdue === 'true')) {
+        const now = new Date();
+        andClauses.push({ status: 'open' });
+        andClauses.push({
+          $or: [
+            { scheduledDate: { $exists: false } },
+            { scheduledDate: null },
+            { dateOption: 'flexible' },
+            { scheduledDate: { $gte: now } }
+          ]
+        });
+      } else {
+        if (Array.isArray(status) && status.length > 1) {
+          andClauses.push({ status: { $in: status } });
+        } else if (Array.isArray(status) && status.length === 1) {
+          andClauses.push({ status: status[0] });
+        } else if (typeof status === 'string') {
+          andClauses.push({ status });
+        }
       }
     }
     // Browse tasks should hide deadline-crossed open tasks at query time.

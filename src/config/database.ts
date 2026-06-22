@@ -1,6 +1,11 @@
+import dns from 'node:dns';
 import mongoose from 'mongoose';
 import logger from './logger';
 import { config } from './env';
+
+// Temporary workaround for local DNS issue.
+// Remove once your Windows DNS problem is fixed.
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 
 let isConnected = false;
 
@@ -12,6 +17,7 @@ export class Database {
     }
 
     const uri = config.MONGODB_URI;
+
     if (!uri) {
       logger.warn('⚠️ MONGODB_URI not provided, skipping MongoDB connection');
       return;
@@ -28,10 +34,20 @@ export class Database {
         maxPoolSize: 10,
         minPoolSize: 2,
       };
+
+      logger.info('🔌 Attempting to connect to MongoDB...');
+      logger.info(`📊 Database: ${connectionOptions.dbName}`);
+
       await mongoose.connect(uri, connectionOptions);
 
       isConnected = true;
+
       logger.info('✅ MongoDB connected successfully');
+      logger.info(
+        `📊 Connected to database: ${
+          mongoose.connection.db?.databaseName || connectionOptions.dbName
+        }`
+      );
 
       // Handle connection events
       mongoose.connection.on('error', (err) => {
@@ -67,4 +83,3 @@ export class Database {
     return isConnected && mongoose.connection.readyState === 1;
   }
 }
-
