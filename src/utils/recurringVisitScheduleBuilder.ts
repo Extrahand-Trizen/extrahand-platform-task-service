@@ -146,14 +146,83 @@ export function buildRecurringScheduleDates(
   return dates;
 }
 
+/** Product cap — recurring plans cannot exceed this many occurrences. */
+export const MAX_RECURRING_PLAN_OCCURRENCES = 366;
+
+export function countPlannedRecurringOccurrences(config: RecurringScheduleBuildConfig): number {
+  return buildRecurringScheduleDates(config, MAX_RECURRING_PLAN_OCCURRENCES).length;
+}
+
+/**
+ * Validate fixed-range plans before persisting.
+ * Rejects empty schedules and ranges that exceed MAX_RECURRING_PLAN_OCCURRENCES.
+ */
+export function validateRecurringPlanOccurrences(config: RecurringScheduleBuildConfig): number {
+  const probe = buildRecurringScheduleDates(config, MAX_RECURRING_PLAN_OCCURRENCES + 1);
+  if (probe.length === 0) {
+    throw new Error('Recurring schedule has no dates in the selected range');
+  }
+  if (probe.length > MAX_RECURRING_PLAN_OCCURRENCES) {
+    throw new Error(
+      `Recurring plan exceeds the maximum supported ${MAX_RECURRING_PLAN_OCCURRENCES} visits`,
+    );
+  }
+  return probe.length;
+}
+
 export function computeNextVisitDateAfter(
   afterDate: Date,
   config: RecurringScheduleBuildConfig,
 ): Date | null {
-  const dates = buildRecurringScheduleDates(config, 500);
+  const dates = buildRecurringScheduleDates(config, MAX_RECURRING_PLAN_OCCURRENCES + 1);
   const after = normalizeDateOnly(afterDate).getTime();
   const next = dates.find((d) => normalizeDateOnly(d).getTime() > after);
   return next ? normalizeDateOnly(next) : null;
+}
+
+/**
+ * Next visit date to materialize.
+ * - end_on_date: uses planned occurrence index (inclusive start, never skips first day).
+ * - until_cancelled: first row is start date; later rows use cursor advancement.
+ */
+export function resolveNextMaterializedVisitDate(
+  config: RecurringScheduleBuildConfig,
+  cursor: Date | null,
+  totalMaterializedCount: number,
+): Date | null {
+  if (config.endType === 'end_on_date') {
+    const planned = buildRecurringScheduleDates(config, MAX_RECURRING_PLAN_OCCURRENCES);
+    if (totalMaterializedCount >= planned.length) return null;
+    return normalizeDateOnly(planned[totalMaterializedCount]);
+  }
+
+  if (totalMaterializedCount === 0) {
+    const first = buildRecurringScheduleDates(config, 1);
+    return first.length > 0 ? normalizeDateOnly(first[0]) : null;
+  }
+
+  if (!cursor) return null;
+  return computeNextVisitDateAfter(cursor, config);
+}
+
+/** Buffer gap capped by remaining valid occurrences for fixed-end plans. */
+export function resolveMaterializationMissingCount(params: {
+  bufferSize: number;
+  upcomingVisitCount: number;
+  endType: RecurringEndType;
+  totalPlannedOccurrences?: number;
+  totalMaterializedOccurrences: number;
+}): number {
+  const missingFromBuffer = Math.max(0, params.bufferSize - params.upcomingVisitCount);
+  if (missingFromBuffer <= 0) return 0;
+
+  if (params.endType !== 'end_on_date') {
+    return missingFromBuffer;
+  }
+
+  const totalPlanned = params.totalPlannedOccurrences ?? 0;
+  const remainingValid = Math.max(0, totalPlanned - params.totalMaterializedOccurrences);
+  return Math.min(missingFromBuffer, remainingValid);
 }
 
 export function addMinutesToTimeLabel(timeLabel: string, minutesToAdd: number): string {

@@ -11,10 +11,12 @@ import {
 } from '../utils/recurringVisitMeta';
 import {
   addMinutesToTimeLabel,
-  buildRecurringScheduleDates,
-  computeNextVisitDateAfter,
+  countPlannedRecurringOccurrences,
   normalizeDateOnly,
   parseIncomingCalendarDate,
+  resolveMaterializationMissingCount,
+  resolveNextMaterializedVisitDate,
+  validateRecurringPlanOccurrences,
   type RecurringScheduleBuildConfig,
 } from '../utils/recurringVisitScheduleBuilder';
 import {
@@ -24,9 +26,22 @@ import {
   DEFAULT_PAYMENT_CUTOFF_HOURS_BEFORE_VISIT,
   DEFAULT_SKIP_FREE_HOURS_BEFORE_VISIT,
   VISIT_TERMINAL_STATUSES,
+  type ScheduleVisitRow,
   type VisitPaymentStatus,
   type VisitStatus,
 } from '../types/recurringVisitSchedule';
+import { DEFAULT_RECURRING_VISIT_BUFFER_SIZE, recurringVisitConfig } from '../config/recurringVisitConfig';
+import {
+  getVisitsForPlan,
+  hydrateTaskVisitsOntoSchedule,
+  markPlanCollectionStorage,
+  mapDocToScheduleRow,
+  mapScheduleRowToUpsert,
+  persistVisitsFromTask,
+  shouldWriteCollection,
+  updatePlanSummaryFromVisits,
+} from './RecurringVisitPlanStore';
+import { RecurringVisitRepository } from '../repositories/RecurringVisitRepository';
 import { getRedisClient } from '../config/redis';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { NotificationClient } from './NotificationClient';
@@ -70,8 +85,14 @@ function delay(ms: number): Promise<void> {
 async function saveRecurringPlanDocument(
   task: mongoose.Document & ITask,
   taskId: string,
+  rows?: ScheduleVisitRow[],
 ): Promise<void> {
-  task.markModified('schedule');
+  const visitRows = rows ?? getScheduleRows(task);
+  if (shouldWriteCollection(task)) {
+    await persistVisitsFromTask(task, visitRows);
+  } else {
+    task.markModified('schedule');
+  }
   if (task.isModified('recurringPlan')) {
     task.markModified('recurringPlan');
   }
@@ -100,46 +121,7 @@ function resolvePendingPaymentPayload(
   };
 }
 
-export interface ScheduleVisitRow {
-  visitId: string;
-  visitIndex: number;
-  date: Date;
-  scheduledTimeStart?: string;
-  scheduledTimeEnd?: string;
-  expectedDurationMinutes?: number;
-  status: VisitStatus | string;
-  paymentStatus: VisitPaymentStatus;
-  escrowId?: string;
-  paymentDeadline?: Date;
-  paidAt?: Date;
-  amount?: number;
-  assigneeId?: mongoose.Types.ObjectId | null;
-  assigneeUid?: string | null;
-  childTaskId?: mongoose.Types.ObjectId | null;
-  skippedAt?: Date;
-  skippedBy?: string;
-  skipReason?: string;
-  paymentReminderSentAt?: Date;
-  rescheduleRequest?: {
-    requestedBy: 'customer' | 'tasker';
-    status: 'pending' | 'approved' | 'rejected';
-    newDate: Date;
-    scheduledTimeStart?: string;
-    scheduledTimeEnd?: string;
-    reason?: string;
-    requestedAt: Date;
-    respondedAt?: Date;
-  };
-  cancelRequest?: {
-    requestedBy: 'tasker';
-    status: 'pending' | 'approved' | 'rejected';
-    reason?: string;
-    requestedAt: Date;
-    respondedAt?: Date;
-  };
-  createdAt: Date;
-  updatedAt: Date;
-}
+export type { ScheduleVisitRow } from '../types/recurringVisitSchedule';
 
 function newVisitId(): string {
   return crypto.randomUUID();
@@ -225,6 +207,14 @@ function getScheduleRows(task: ITask): ScheduleVisitRow[] {
   return (task.schedule || []) as unknown as ScheduleVisitRow[];
 }
 
+/** Collection-backed plans store visits outside `task.schedule[]`. */
+async function loadPlanScheduleRows(task: ITask): Promise<ScheduleVisitRow[]> {
+  if (isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
+    return getVisitsForPlan(task);
+  }
+  return getScheduleRows(task);
+}
+
 function findVisit(task: ITask, visitId: string): ScheduleVisitRow | undefined {
   return getScheduleRows(task).find((v) => v.visitId === visitId);
 }
@@ -277,6 +267,35 @@ function findNextPayableVisit(sorted: ScheduleVisitRow[]): ScheduleVisitRow | un
 function isVisitRowDoneForChronology(visit: ScheduleVisitRow): boolean {
   if (visit.status === 'completed') return true;
   return VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus);
+}
+
+function isVisitWorkFinishedByCompletedCount(
+  planTask: ITask,
+  visit: ScheduleVisitRow,
+  sortedRows: ScheduleVisitRow[],
+): boolean {
+  const plan = (planTask as { recurringPlan?: { completedVisitCount?: number } }).recurringPlan;
+  const completedCount = Number(plan?.completedVisitCount || 0);
+  if (completedCount <= 0) return false;
+  const idx = sortedRows.findIndex((row) => row.visitId === visit.visitId);
+  return idx >= 0 && idx < completedCount;
+}
+
+/** Past/completed visits must not receive assignment payment again. */
+async function isVisitWorkFinishedForAssignment(
+  planTask: ITask,
+  visit: ScheduleVisitRow,
+  sortedRows: ScheduleVisitRow[],
+): Promise<boolean> {
+  const status = String(visit.status || '');
+  if (status === 'completed') return true;
+  if (VISIT_TERMINAL_STATUSES.has(status as VisitStatus)) return true;
+  if (isVisitWorkFinishedByCompletedCount(planTask, visit, sortedRows)) return true;
+  if (visit.childTaskId) {
+    const child = await Task.findById(visit.childTaskId).select('status').lean();
+    if (child?.status === 'completed') return true;
+  }
+  return false;
 }
 
 /** Earliest visit by calendar date that still needs work or payment. */
@@ -608,31 +627,26 @@ export class RecurringVisitService {
     const rawEnd = (taskData.recurring as { endDate?: Date })?.endDate;
     const endDate = rawEnd ? parseIncomingCalendarDate(rawEnd) : undefined;
 
-    const config = buildScheduleConfigFromMeta(meta, startDate, endDate);
-    const allPlannedDates = buildRecurringScheduleDates(config, 366);
-    const bufferSize =
-      meta.endType === 'until_cancelled'
-        ? DEFAULT_MATERIALIZED_BUFFER_SIZE
-        : allPlannedDates.length;
-
-    const dates =
-      meta.endType === 'until_cancelled'
-        ? buildRecurringScheduleDates(config, bufferSize)
-        : allPlannedDates;
-    if (dates.length === 0) {
-      throw new BadRequestError('Recurring schedule has no dates');
-    }
-
     const budgetAmount =
       typeof (taskData.budget as { amount?: number })?.amount === 'number'
         ? (taskData.budget as { amount: number }).amount
         : 0;
 
-    const schedule = dates.map((date, index) =>
-      createVisitRow(date, index + 1, meta, 'scheduled'),
-    );
+    const bufferSize = DEFAULT_RECURRING_VISIT_BUFFER_SIZE;
 
-    taskPayload.recurringPlan = {
+    const scheduleConfig = buildScheduleConfigFromMeta(meta, startDate, endDate);
+    let totalPlanned: number | undefined;
+    if (meta.endType === 'end_on_date') {
+      try {
+        totalPlanned = validateRecurringPlanOccurrences(scheduleConfig);
+      } catch (error) {
+        throw new BadRequestError(
+          error instanceof Error ? error.message : 'Invalid recurring schedule',
+        );
+      }
+    }
+
+    const recurringPlan: Record<string, unknown> = {
       planVersion: 2,
       status: 'draft',
       pattern: meta.pattern,
@@ -642,15 +656,16 @@ export class RecurringVisitService {
       visitTime: meta.visitTime,
       expectedDurationMinutes: meta.expectedDurationMinutes,
       budgetPerVisit: budgetAmount,
-      lastMaterializedDate: dates[dates.length - 1],
-      materializedBufferSize:
-        meta.endType === 'until_cancelled' ? DEFAULT_MATERIALIZED_BUFFER_SIZE : dates.length,
-      totalPlanned: meta.endType === 'end_on_date' ? dates.length : undefined,
+      materializedBufferSize: bufferSize,
+      totalPlanned,
       completedVisitCount: 0,
       consecutiveUnpaidCount: 0,
+      nextVisitIndex: 1,
     };
+    markPlanCollectionStorage(recurringPlan);
 
-    taskPayload.schedule = schedule;
+    taskPayload.recurringPlan = recurringPlan;
+    taskPayload.schedule = [];
     taskPayload.scheduledDate = startDate;
     if (meta.visitTime) {
       taskPayload.scheduledTimeStart = meta.visitTime;
@@ -660,6 +675,26 @@ export class RecurringVisitService {
       );
     }
     taskPayload.estimatedDuration = meta.expectedDurationMinutes;
+
+    (taskPayload as { _pendingVisitMeta?: RecurringMetaPayload })._pendingVisitMeta = meta;
+    (taskPayload as { _pendingVisitStartDate?: Date })._pendingVisitStartDate = startDate;
+    (taskPayload as { _pendingVisitEndDate?: Date | undefined })._pendingVisitEndDate = endDate;
+  }
+
+  /** Materialize initial visit buffer into RecurringVisit collection after parent Task is created. */
+  static async materializeInitialVisitBuffer(
+    task: ITask,
+    meta: RecurringMetaPayload,
+    startDate: Date,
+    endDate?: Date,
+  ): Promise<void> {
+    if (!shouldWriteCollection(task)) return;
+    await RecurringVisitService.ensureMaterializedBuffer(String(task._id), {
+      allowPaused: true,
+      initialMeta: meta,
+      initialStartDate: startDate,
+      initialEndDate: endDate,
+    });
   }
 
   static isVisitPlanTask(task: Record<string, unknown> | ITask | null | undefined): boolean {
@@ -674,6 +709,8 @@ export class RecurringVisitService {
     acceptedAmount: number;
     /** Visit the poster paid for before accept (assignment payment = Visit 1). */
     preferredVisitId?: string;
+    /** Escrow captured during accept-and-pay (assignment payment = Visit 1). */
+    assignmentEscrowId?: string;
   }): Promise<{
     visitId: string;
     amount: number;
@@ -688,12 +725,14 @@ export class RecurringVisitService {
       applicantUid,
       acceptedAmount,
       preferredVisitId,
+      assignmentEscrowId,
     } = params;
 
     if (!isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
       throw new BadRequestError('Task is not a recurring visit plan');
     }
 
+    await hydrateTaskVisitsOntoSchedule(task);
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
     if (plan.status !== 'draft' && plan.status !== 'active') {
       throw new BadRequestError('Recurring plan is not available for assignment');
@@ -701,12 +740,24 @@ export class RecurringVisitService {
 
     const rows = getScheduleRows(task);
     const now = new Date();
-    const today = normalizeDateOnly(now);
     const taskId = task._id.toString();
 
     let firstVisit: ScheduleVisitRow | undefined;
     let paidEscrowForVisit: { escrowId: string; escrow: Record<string, unknown> } | null =
       null;
+
+    const assignmentEscrowIdTrimmed = String(assignmentEscrowId || '').trim();
+    if (assignmentEscrowIdTrimmed) {
+      const byAssignmentEscrow = (await PaymentClient.getEscrowByEscrowId(
+        assignmentEscrowIdTrimmed,
+      )) as Record<string, unknown> | null;
+      if (isEscrowPaid(byAssignmentEscrow)) {
+        paidEscrowForVisit = {
+          escrowId: assignmentEscrowIdTrimmed,
+          escrow: byAssignmentEscrow as Record<string, unknown>,
+        };
+      }
+    }
 
     const preferredVisit = preferredVisitId
       ? rows.find((visit) => visit.visitId === preferredVisitId)
@@ -715,16 +766,41 @@ export class RecurringVisitService {
       preferredVisit &&
       !VISIT_TERMINAL_STATUSES.has(preferredVisit.status as VisitStatus)
     ) {
-      const paidEscrow = await resolvePaidEscrowForVisit(taskId, preferredVisit.visitId);
-      if (paidEscrow) {
-        firstVisit = preferredVisit;
-        paidEscrowForVisit = paidEscrow;
+      firstVisit = preferredVisit;
+      if (paidEscrowForVisit) {
+        const metaVisitId = readEscrowMetadataVisitId(paidEscrowForVisit.escrow);
+        if (metaVisitId && metaVisitId !== preferredVisit.visitId) {
+          await alignEscrowVisitMetadataIfNeeded({
+            taskId,
+            visitId: preferredVisit.visitId,
+            escrowId: paidEscrowForVisit.escrowId,
+            escrow: paidEscrowForVisit.escrow,
+          });
+        } else if (!metaVisitId) {
+          await alignEscrowVisitMetadataIfNeeded({
+            taskId,
+            visitId: preferredVisit.visitId,
+            escrowId: paidEscrowForVisit.escrowId,
+            escrow: paidEscrowForVisit.escrow,
+          });
+        }
+      } else {
+        const paidEscrow = await resolvePaidEscrowForVisit(taskId, preferredVisit.visitId, {
+          alignMissingVisitMetadata: true,
+        });
+        if (paidEscrow) {
+          paidEscrowForVisit = paidEscrow;
+        }
       }
     }
 
     if (!firstVisit) {
-      for (const visit of rows) {
+      const sortedRows = sortScheduleRowsByDate(rows);
+      for (const visit of sortedRows) {
         if (VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) continue;
+        if (await isVisitWorkFinishedForAssignment(task, visit, sortedRows)) continue;
+        if (isVisitDeferredByEarlierChronologicalVisit(visit, rows)) continue;
+        if (!visitRowHasHeldPayment(visit)) continue;
         const paidEscrow = await resolvePaidEscrowForVisit(taskId, visit.visitId);
         if (paidEscrow) {
           firstVisit = visit;
@@ -735,18 +811,31 @@ export class RecurringVisitService {
     }
 
     if (!firstVisit && preferredVisit) {
-      firstVisit = preferredVisit;
+      const sortedRows = sortScheduleRowsByDate(rows);
+      const workFinished = await isVisitWorkFinishedForAssignment(
+        task,
+        preferredVisit,
+        sortedRows,
+      );
+      if (
+        !workFinished &&
+        !VISIT_TERMINAL_STATUSES.has(preferredVisit.status as VisitStatus)
+      ) {
+        firstVisit = preferredVisit;
+      }
     }
 
     if (!firstVisit) {
-      firstVisit = rows.find(
-        (v) =>
-          !VISIT_TERMINAL_STATUSES.has(v.status as VisitStatus) &&
-          normalizeDateOnly(new Date(v.date)).getTime() >= today.getTime(),
-      );
+      firstVisit = findNextChronologicalPayableVisit(rows);
     }
     if (!firstVisit) {
-      firstVisit = rows.find((v) => !VISIT_TERMINAL_STATUSES.has(v.status as VisitStatus));
+      const sortedRows = sortScheduleRowsByDate(rows);
+      for (const visit of sortedRows) {
+        if (VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) continue;
+        if (await isVisitWorkFinishedForAssignment(task, visit, sortedRows)) continue;
+        firstVisit = visit;
+        break;
+      }
     }
     if (!firstVisit) {
       throw new BadRequestError('No upcoming visits available in the recurring plan');
@@ -801,7 +890,6 @@ export class RecurringVisitService {
     plan.acceptedApplicationId = new mongoose.Types.ObjectId(applicationId);
     plan.budgetPerVisit = acceptedAmount;
 
-    task.schedule = rows as unknown as ITask['schedule'];
     (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan = plan;
     task.assigneeId = applicantProfileId;
     (task as unknown as { assigneeUid?: string }).assigneeUid = applicantUid;
@@ -811,11 +899,9 @@ export class RecurringVisitService {
 
     await RecurringVisitService.ensureChildTaskForVisit(task, firstVisit);
     (task as unknown as { activeVisitId?: string }).activeVisitId = firstVisit.visitId;
-    task.schedule = rows as unknown as ITask['schedule'];
-    task.markModified('schedule');
 
-    await task.save();
-    invalidateTaskDetailCache(task._id.toString());
+    await saveRecurringPlanDocument(task, task._id.toString(), rows);
+    await RecurringVisitService.ensureMaterializedBuffer(task._id.toString());
 
     await TaskApplication.updateMany(
       {
@@ -852,6 +938,8 @@ export class RecurringVisitService {
   }): Promise<{ childTaskId: string }> {
     const task = await Task.findById(params.parentTaskId);
     if (!task) throw new NotFoundError('Task not found');
+
+    await hydrateTaskVisitsOntoSchedule(task);
 
     if (!task.requesterId.equals(params.requesterProfileId)) {
       throw new ForbiddenError('Not authorized to confirm this visit payment');
@@ -908,18 +996,22 @@ export class RecurringVisitService {
       throw new BadRequestError('Valid escrow payment is required for this visit');
     }
 
+    const hasMatchingPaidEscrow = Boolean(
+      paidEscrow && paidEscrow.escrowId === resolvedEscrowId,
+    );
+
     const alreadyConfirmed =
-      visitRowHasHeldPayment(visit) &&
-      String(visit.escrowId || '') === resolvedEscrowId &&
-      ['confirmed', 'in_progress'].includes(String(visit.status));
+      (visitRowHasHeldPayment(visit) || hasMatchingPaidEscrow) &&
+      ['confirmed', 'in_progress'].includes(String(visit.status)) &&
+      (!resolvedEscrowId ||
+        !String(visit.escrowId || '').trim() ||
+        String(visit.escrowId || '') === resolvedEscrowId ||
+        hasMatchingPaidEscrow);
     if (alreadyConfirmed) {
       invalidateTaskDetailCache(params.parentTaskId);
       return { childTaskId: visit.childTaskId?.toString() || '' };
     }
 
-    const hasMatchingPaidEscrow = Boolean(
-      paidEscrow && paidEscrow.escrowId === resolvedEscrowId,
-    );
     const staleHeldDifferentEscrow =
       visitRowHasHeldPayment(visit) &&
       String(visit.escrowId || '').trim() !== resolvedEscrowId;
@@ -947,10 +1039,10 @@ export class RecurringVisitService {
 
     visit.childTaskId = child._id;
     (task as unknown as { activeVisitId?: string }).activeVisitId = visit.visitId;
-    task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(params.parentTaskId);
+    const rows = getScheduleRows(task);
+    const rowIdx = rows.findIndex((r) => r.visitId === visit.visitId);
+    if (rowIdx >= 0) rows[rowIdx] = visit;
+    await saveRecurringPlanDocument(task, params.parentTaskId, rows);
 
     await RecurringVisitService.notifyTaskerRecurringVisitPaymentConfirmed(
       task,
@@ -1115,8 +1207,15 @@ export class RecurringVisitService {
     visit: ScheduleVisitRow,
     params?: { reason?: string },
   ): Promise<void> {
-    const customerUid = String(task.requesterUid || '').trim();
-    if (!customerUid) return;
+    const customerUid = await RecurringVisitService.resolveTaskRequesterUid(task);
+    if (!customerUid) {
+      logger.warn('Skipping recurring visit cancel request notification — customer uid missing', {
+        parentTaskId: task._id.toString(),
+        visitId: visit.visitId,
+        requesterId: String(task.requesterId || ''),
+      });
+      return;
+    }
 
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
     const parentTaskId = task._id.toString();
@@ -1127,15 +1226,21 @@ export class RecurringVisitService {
       visit.scheduledTimeStart,
     );
     const title = 'Cancel visit request';
-    const body = `Your helper requested to cancel ${visitLabel} (${visitDateLabel}). Open the task to cancel the visit or keep it scheduled.`;
+    const reasonSnippet = String(params?.reason || '').trim();
+    const reasonSuffix = reasonSnippet
+      ? ` Reason: ${reasonSnippet.length > 140 ? `${reasonSnippet.slice(0, 140)}…` : reasonSnippet}`
+      : '';
+    const body = `Your helper requested to cancel ${visitLabel} (${visitDateLabel}).${reasonSuffix} Open the task to cancel the visit or keep it scheduled.`;
     const notificationData = {
       taskId: parentTaskId,
       parentTaskId,
       visitId: visit.visitId,
       visitNumber: String(visitNumber),
+      entityType: 'task',
+      eventKey: 'TASK_UPDATED',
       type: 'recurring_visit_cancel_request',
       status: 'pending',
-      reason: params?.reason,
+      reason: reasonSnippet || undefined,
     };
 
     try {
@@ -1148,6 +1253,11 @@ export class RecurringVisitService {
         title,
         body,
         data: notificationData,
+      });
+      logger.info('Sent recurring visit cancel request push notification to customer', {
+        parentTaskId,
+        visitId: visit.visitId,
+        customerUid,
       });
     } catch (error) {
       logger.warn('Failed to send recurring visit cancel request push notification', {
@@ -1166,6 +1276,11 @@ export class RecurringVisitService {
         type: 'info',
         category: 'taskUpdates',
         data: notificationData,
+      });
+      logger.info('Sent recurring visit cancel request in-app notification to customer', {
+        parentTaskId,
+        visitId: visit.visitId,
+        customerUid,
       });
     } catch (error) {
       logger.warn('Failed to send recurring visit cancel request in-app notification', {
@@ -1427,6 +1542,75 @@ export class RecurringVisitService {
     }
   }
 
+  /** Notify customer when the assigned helper leaves the recurring plan. */
+  private static async notifyCustomerRecurringPlanTaskerLeft(
+    task: ITask,
+    params?: { reason?: string },
+  ): Promise<void> {
+    const customerUid = await RecurringVisitService.resolveTaskRequesterUid(task);
+    if (!customerUid) {
+      logger.warn('Skipping recurring plan tasker-left notification — customer uid missing', {
+        parentTaskId: task._id.toString(),
+        requesterId: String(task.requesterId || ''),
+      });
+      return;
+    }
+
+    const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
+    const parentTaskId = task._id.toString();
+    const title = 'Helper left recurring plan';
+    const reasonSnippet = String(params?.reason || '').trim();
+    const reasonSuffix = reasonSnippet
+      ? ` Reason: ${reasonSnippet.length > 140 ? `${reasonSnippet.slice(0, 140)}…` : reasonSnippet}`
+      : '';
+    const body = `Your helper left this recurring plan.${reasonSuffix} Open Work Details to review your visit schedule and assign a new helper.`;
+    const notificationData = {
+      taskId: parentTaskId,
+      parentTaskId,
+      entityType: 'task',
+      eventKey: 'TASK_UPDATED',
+      type: 'recurring_tasker_left_plan',
+      status: 'open',
+      reason: reasonSnippet || undefined,
+    };
+
+    try {
+      await NotificationClient.send({
+        eventKey: 'TASK_UPDATED',
+        category: 'taskUpdates',
+        actorId: String(plan?.taskerUid || task.assigneeUid || ''),
+        recipients: [customerUid],
+        entity: { type: 'task', id: parentTaskId },
+        title,
+        body,
+        data: notificationData,
+      });
+    } catch (error) {
+      logger.warn('Failed to send recurring plan tasker-left push notification', {
+        parentTaskId,
+        customerUid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
+      await InAppNotificationClient.send({
+        userId: customerUid,
+        title,
+        body,
+        type: 'info',
+        category: 'taskUpdates',
+        data: notificationData,
+      });
+    } catch (error) {
+      logger.warn('Failed to send recurring plan tasker-left in-app notification', {
+        parentTaskId,
+        customerUid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /** Notify assigned helper when the customer ends the entire recurring plan. */
   private static async notifyTaskerRecurringPlanEndedByCustomer(
     task: ITask,
@@ -1593,6 +1777,9 @@ export class RecurringVisitService {
     const child = await RecurringVisitService.createChildTaskForVisit(parent, visit);
     visit.childTaskId = child._id;
     visit.updatedAt = new Date();
+    if (shouldWriteCollection(parent)) {
+      await RecurringVisitRepository.linkChildTask(parent._id, visit.visitId, child._id);
+    }
     return child;
   }
 
@@ -1662,30 +1849,50 @@ export class RecurringVisitService {
       return false;
     }
 
-    let changed = false;
-    const rows = getScheduleRows(task);
-    for (const visit of rows) {
-      if (visit.status !== 'payment_pending') continue;
+    await hydrateTaskVisitsOntoSchedule(task);
 
-      const paidEscrow = await resolvePaidEscrowForVisit(taskId, visit.visitId);
-      if (!paidEscrow) continue;
-
-      try {
-        await RecurringVisitService.confirmVisitPayment({
-          parentTaskId: taskId,
-          visitId: visit.visitId,
-          escrowId: paidEscrow.escrowId,
-          requesterProfileId: task.requesterId,
-        });
-        changed = true;
-      } catch (error) {
-        logger.warn('[RecurringVisitService] Failed to sync paid visit from escrow', {
-          taskId,
-          visitId: visit.visitId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+    let pendingRows: ScheduleVisitRow[];
+    if (shouldWriteCollection(task)) {
+      const fromDb = await RecurringVisitRepository.listPaymentPending(task._id);
+      pendingRows = fromDb.map((doc) => mapDocToScheduleRow(doc));
+    } else {
+      pendingRows = getScheduleRows(task).filter((v) => v.status === 'payment_pending');
     }
+
+    if (pendingRows.length === 0) return false;
+
+    let changed = false;
+    const concurrency = recurringVisitConfig.paymentSyncConcurrency;
+    let index = 0;
+
+    const worker = async (): Promise<void> => {
+      while (index < pendingRows.length) {
+        const current = index;
+        index += 1;
+        const visit = pendingRows[current];
+        const paidEscrow = await resolvePaidEscrowForVisit(taskId, visit.visitId);
+        if (!paidEscrow) continue;
+        try {
+          await RecurringVisitService.confirmVisitPayment({
+            parentTaskId: taskId,
+            visitId: visit.visitId,
+            escrowId: paidEscrow.escrowId,
+            requesterProfileId: task.requesterId,
+          });
+          changed = true;
+        } catch (error) {
+          logger.warn('[RecurringVisitService] Failed to sync paid visit from escrow', {
+            taskId,
+            visitId: visit.visitId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, pendingRows.length) }, () => worker()),
+    );
 
     return changed;
   }
@@ -1696,10 +1903,30 @@ export class RecurringVisitService {
       return;
     }
 
+    await hydrateTaskVisitsOntoSchedule(task);
+
     let changed = false;
     let rows = getScheduleRows(task);
     const planForRepair = (task as unknown as { recurringPlan?: Record<string, unknown> })
       .recurringPlan;
+
+    if (planForRepair && String(planForRepair.status || '').toLowerCase() === 'ended') {
+      const rowsForEndedCheck = rows.length > 0 ? rows : await loadPlanScheduleRows(task);
+      if (!RecurringVisitService.recurringPlanVisitsExhausted(task, rowsForEndedCheck)) {
+        planForRepair.status = 'active';
+        planForRepair.endedAt = undefined;
+        planForRepair.pausedReason = undefined;
+        if (String(task.status || '').toLowerCase() === 'completed') {
+          task.status = 'assigned';
+          task.completedAt = undefined;
+        }
+        changed = true;
+        rows = rowsForEndedCheck;
+        logger.info('[RecurringVisitService] Reopened prematurely ended recurring plan', {
+          taskId,
+        });
+      }
+    }
 
     if (await RecurringVisitService.sanitizeOrphanedScheduleChildReferences(task, { persist: false })) {
       changed = true;
@@ -2304,6 +2531,11 @@ export class RecurringVisitService {
     let refreshed = await Task.findById(parentTaskId);
     if (!refreshed) return;
 
+    // `findVisit()` searches embedded `task.schedule[]`. For collection-backed plans,
+    // the authoritative visit rows live in `RecurringVisit`, so we must hydrate
+    // `schedule` before attempting to resolve by `visitId`.
+    await hydrateTaskVisitsOntoSchedule(refreshed);
+
     let visit = findVisit(refreshed, String(visitId));
     if (!visit) {
       throw new BadRequestError('Visit not found for this task');
@@ -2413,6 +2645,7 @@ export class RecurringVisitService {
       return;
     }
 
+    await hydrateTaskVisitsOntoSchedule(parent);
     const visit = findVisit(parent, childTask.recurringVisitId);
     if (!visit) return;
 
@@ -2619,24 +2852,34 @@ export class RecurringVisitService {
     }
 
     task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
     task.markModified('recurringPlan');
-    await task.save();
-    invalidateTaskDetailCache(taskId);
+    await saveRecurringPlanDocument(task, taskId, getScheduleRows(task));
 
     await RecurringVisitService.ensureMaterializedBuffer(taskId);
   }
 
-  static async ensureMaterializedBuffer(taskId: string): Promise<void> {
-    const task = await Task.findById(taskId);
-    if (!task) return;
+  static async ensureMaterializedBuffer(
+    taskId: string,
+    options?: {
+      allowPaused?: boolean;
+      initialMeta?: RecurringMetaPayload;
+      initialStartDate?: Date;
+      initialEndDate?: Date;
+    },
+  ): Promise<void> {
+    const task = await Task.findById(taskId).select(
+      'recurring recurringPlan scheduledDate activeVisitId schedule',
+    );
+    if (!task || !task.recurring?.enabled) return;
 
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
-    if (!plan || plan.planVersion !== 2 || plan.status === 'ended' || plan.status === 'paused') {
-      return;
-    }
+    if (!plan) return;
+    if (plan.status === 'ended') return;
+    if (plan.status === 'paused' && !options?.allowPaused) return;
 
-    const meta: RecurringMetaPayload = {
+    const collectionMode = shouldWriteCollection(task);
+
+    const meta: RecurringMetaPayload = options?.initialMeta ?? {
       pattern: plan.pattern as RecurringMetaPayload['pattern'],
       selectedWeekdays: (plan.selectedWeekdays as number[]) || [],
       endType: plan.endType as RecurringMetaPayload['endType'],
@@ -2644,77 +2887,171 @@ export class RecurringVisitService {
       visitTime: String(plan.visitTime || ''),
     };
 
-    const startRaw = task.recurring?.startDate || task.scheduledDate;
+    const startRaw =
+      options?.initialStartDate ?? task.recurring?.startDate ?? task.scheduledDate;
     if (!startRaw) return;
+
+    const endDate =
+      options?.initialEndDate ??
+      (plan.endDate ? new Date(String(plan.endDate)) : undefined);
 
     const config = buildScheduleConfigFromMeta(
       meta,
       new Date(String(startRaw)),
-      plan.endDate ? new Date(String(plan.endDate)) : undefined,
+      endDate,
     );
 
+    const bufferSize =
+      Number(plan.materializedBufferSize) ||
+      (collectionMode ? DEFAULT_RECURRING_VISIT_BUFFER_SIZE : DEFAULT_MATERIALIZED_BUFFER_SIZE);
+
+    if (collectionMode) {
+      const upcomingCount = await RecurringVisitRepository.countUpcoming(task._id);
+      const totalMaterialized = await RecurringVisitRepository.countByParent(task._id);
+      const totalPlanned =
+        plan.endType === 'end_on_date'
+          ? Number(plan.totalPlanned) || countPlannedRecurringOccurrences(config)
+          : undefined;
+
+      let missingCount = resolveMaterializationMissingCount({
+        bufferSize,
+        upcomingVisitCount: upcomingCount,
+        endType: plan.endType as RecurringMetaPayload['endType'],
+        totalPlannedOccurrences: totalPlanned,
+        totalMaterializedOccurrences: totalMaterialized,
+      });
+
+      if (missingCount <= 0) {
+        await updatePlanSummaryFromVisits(task);
+        task.markModified('recurringPlan');
+        await task.save();
+        return;
+      }
+
+      const lastDoc = await RecurringVisitRepository.getLastMaterializedVisit(task._id);
+      let visitIndex =
+        (lastDoc?.visitIndex ?? (await RecurringVisitRepository.getMaximumVisitIndex(task._id))) ||
+        0;
+      let advanceCursor = lastDoc ? new Date(lastDoc.date) : null;
+      let materializedCount = totalMaterialized;
+
+      const toUpsert: ReturnType<typeof mapScheduleRowToUpsert>[] = [];
+
+      while (missingCount > 0) {
+        const nextDate = resolveNextMaterializedVisitDate(
+          config,
+          advanceCursor,
+          materializedCount,
+        );
+        if (!nextDate) break;
+        if (
+          plan.endType === 'end_on_date' &&
+          plan.endDate &&
+          normalizeDateOnly(nextDate).getTime() >
+            normalizeDateOnly(new Date(String(plan.endDate))).getTime()
+        ) {
+          break;
+        }
+        visitIndex += 1;
+        const row = createVisitRow(nextDate, visitIndex, meta, 'scheduled');
+        toUpsert.push(mapScheduleRowToUpsert(task._id, row));
+        plan.lastMaterializedDate = nextDate;
+        advanceCursor = nextDate;
+        materializedCount += 1;
+        missingCount -= 1;
+      }
+
+      if (toUpsert.length > 0) {
+        try {
+          await RecurringVisitRepository.upsertVisits(toUpsert);
+        } catch (error) {
+          logger.warn('[ensureMaterializedBuffer] bulk upsert race — re-querying', {
+            taskId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      const allVisits = await getVisitsForPlan(task);
+      await updatePlanSummaryFromVisits(task, allVisits);
+      (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan = plan;
+      task.markModified('recurringPlan');
+      await task.save();
+      invalidateTaskDetailCache(taskId);
+      return;
+    }
+
+    // Legacy embedded path (unmigrated plans)
+    if (plan.planVersion !== 2) return;
+
+    await hydrateTaskVisitsOntoSchedule(task);
     const rows = getScheduleRows(task);
 
     if (plan.endType === 'end_on_date') {
       const totalPlanned =
-        Number(plan.totalPlanned) ||
-        buildRecurringScheduleDates(config, 366).length;
+        Number(plan.totalPlanned) || countPlannedRecurringOccurrences(config);
       let visitIndex = rows.reduce((max, r) => Math.max(max, r.visitIndex || 0), 0);
-      let cursor = plan.lastMaterializedDate
-        ? new Date(String(plan.lastMaterializedDate))
-        : rows.length > 0
-          ? new Date(rows[rows.length - 1].date)
-          : new Date(String(startRaw));
+      let materializedCount = rows.length;
 
-      while (rows.length < totalPlanned) {
-        const nextDate = computeNextVisitDateAfter(cursor, config);
+      while (materializedCount < totalPlanned) {
+        const nextDate = resolveNextMaterializedVisitDate(
+          config,
+          materializedCount > 0 ? new Date(rows[rows.length - 1].date) : null,
+          materializedCount,
+        );
         if (!nextDate) break;
+        if (
+          plan.endDate &&
+          normalizeDateOnly(nextDate).getTime() >
+            normalizeDateOnly(new Date(String(plan.endDate))).getTime()
+        ) {
+          break;
+        }
         visitIndex += 1;
         rows.push(createVisitRow(nextDate, visitIndex, meta, 'scheduled'));
-        cursor = nextDate;
         plan.lastMaterializedDate = nextDate;
+        materializedCount += 1;
       }
 
-      task.schedule = rows as unknown as ITask['schedule'];
-      (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan = plan;
-      task.markModified('schedule');
-      task.markModified('recurringPlan');
-      await task.save();
-      invalidateTaskDetailCache(task._id.toString());
+      await saveRecurringPlanDocument(task, taskId, rows);
       return;
     }
 
-    const futureActive = rows.filter(
-      (v) => !VISIT_TERMINAL_STATUSES.has(v.status as VisitStatus),
-    );
-    const bufferSize = Number(plan.materializedBufferSize) || DEFAULT_MATERIALIZED_BUFFER_SIZE;
-    let needed = bufferSize - futureActive.length;
+    const upcomingCount = rows.filter((v) =>
+      ['open', 'reserved', 'assigned', 'scheduled', 'payment_pending', 'confirmed'].includes(
+        String(v.status),
+      ),
+    ).length;
+    let needed = resolveMaterializationMissingCount({
+      bufferSize,
+      upcomingVisitCount: upcomingCount,
+      endType: 'until_cancelled',
+      totalMaterializedOccurrences: rows.length,
+    });
     if (needed <= 0) return;
 
-    let cursor = plan.lastMaterializedDate
-      ? new Date(String(plan.lastMaterializedDate))
-      : rows.length > 0
-        ? new Date(rows[rows.length - 1].date)
-        : new Date(String(startRaw));
+    let materializedCount = rows.length;
+    let advanceCursor =
+      rows.length > 0 ? new Date(rows[rows.length - 1].date) : null;
 
     let visitIndex = rows.reduce((max, r) => Math.max(max, r.visitIndex || 0), 0);
 
     while (needed > 0) {
-      const nextDate = computeNextVisitDateAfter(cursor, config);
+      const nextDate = resolveNextMaterializedVisitDate(
+        config,
+        advanceCursor,
+        materializedCount,
+      );
       if (!nextDate) break;
       visitIndex += 1;
       rows.push(createVisitRow(nextDate, visitIndex, meta, 'scheduled'));
-      cursor = nextDate;
       plan.lastMaterializedDate = nextDate;
+      advanceCursor = nextDate;
+      materializedCount += 1;
       needed -= 1;
     }
 
-    task.schedule = rows as unknown as ITask['schedule'];
-    (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan = plan;
-    task.markModified('schedule');
-    task.markModified('recurringPlan');
-    await task.save();
-    invalidateTaskDetailCache(task._id.toString());
+    await saveRecurringPlanDocument(task, taskId, rows);
   }
 
   /** Non-blocking escrow sync + rebalance after a fast visits read. */
@@ -2734,22 +3071,13 @@ export class RecurringVisitService {
   }
 
   private static readonly LIST_VISITS_TASK_SELECT =
-    '_id requesterId recurring recurringPlan schedule activeVisitId budget';
+    '_id requesterId status recurring recurringPlan activeVisitId budget';
 
   static async listVisits(
     taskId: string,
     requesterProfileId?: mongoose.Types.ObjectId,
     options?: { syncPayments?: boolean },
   ) {
-    const syncPayments = options?.syncPayments === true;
-    if (syncPayments) {
-      await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
-      await RecurringVisitService.rebalancePaymentPendingVisits(taskId);
-      void RecurringVisitService.scheduleReconcilePlanState(taskId);
-    } else {
-      RecurringVisitService.schedulePaymentSyncAndRebalance(taskId);
-    }
-
     const taskLean = await Task.findById(taskId)
       .select(RecurringVisitService.LIST_VISITS_TASK_SELECT)
       .lean();
@@ -2770,7 +3098,28 @@ export class RecurringVisitService {
     }
 
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
-    const visits = getScheduleRows(task);
+    const syncPayments = options?.syncPayments === true;
+
+    if (syncPayments) {
+      await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
+      await RecurringVisitService.rebalancePaymentPendingVisits(taskId);
+      void RecurringVisitService.scheduleReconcilePlanState(taskId);
+      plan.lastPaymentSyncAt = new Date();
+      await Task.updateOne({ _id: taskId }, { $set: { 'recurringPlan.lastPaymentSyncAt': plan.lastPaymentSyncAt } });
+    } else {
+      const lastSync = plan.lastPaymentSyncAt
+        ? new Date(String(plan.lastPaymentSyncAt)).getTime()
+        : 0;
+      const cooldown = recurringVisitConfig.paymentSyncCooldownMs;
+      const pendingExists = shouldWriteCollection(task)
+        ? (await RecurringVisitRepository.listPaymentPending(task._id)).length > 0
+        : false;
+      if (pendingExists && Date.now() - lastSync > cooldown) {
+        RecurringVisitService.schedulePaymentSyncAndRebalance(taskId);
+      }
+    }
+
+    const visits = await getVisitsForPlan(task);
 
     const completedChildren = await Task.find({
       parentTaskId: task._id,
@@ -2796,7 +3145,11 @@ export class RecurringVisitService {
       }
     }
 
-    const pendingPayment = resolvePendingPaymentVisitRow(visits);
+    const pendingPayment =
+      String(plan.status || '').toLowerCase() === 'ended' ||
+      String(taskLean.status || '').toLowerCase() === 'cancelled'
+        ? null
+        : resolvePendingPaymentVisitRow(visits);
 
     return {
       planStatus: plan.status,
@@ -2864,6 +3217,7 @@ export class RecurringVisitService {
     const refreshed = await Task.findById(params.taskId);
     if (!refreshed) return;
 
+    await hydrateTaskVisitsOntoSchedule(refreshed);
     let rows = getScheduleRows(refreshed);
     for (const visit of rows) {
       if (VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) continue;
@@ -2901,7 +3255,7 @@ export class RecurringVisitService {
     if (refreshed.isModified('activeVisitId')) {
       refreshed.markModified('activeVisitId');
     }
-    await refreshed.save();
+    await saveRecurringPlanDocument(refreshed, params.taskId, rows);
     invalidateTaskDetailCache(params.taskId);
 
     await RecurringVisitService.notifyTaskerRecurringPlanEndedByCustomer(refreshed, {
@@ -3154,14 +3508,17 @@ export class RecurringVisitService {
     );
     if (hasActionable) return false;
 
+    if (sorted.length === 0) return false;
+
     if (plan.endType === 'end_on_date') {
-      const totalPlanned = Number(plan.totalPlanned) || sorted.length;
+      const totalPlanned = Number(plan.totalPlanned) || 0;
+      if (totalPlanned <= 0) return false;
       if (sorted.length < totalPlanned) return false;
       const closedCount = sorted.filter((visit) => isVisitPassed(visit)).length;
       return closedCount >= totalPlanned;
     }
 
-    return sorted.length > 0 && sorted.every((visit) => isVisitPassed(visit));
+    return sorted.every((visit) => isVisitPassed(visit));
   }
 
   static async markRecurringPlanParentCompleted(parentId: string): Promise<void> {
@@ -3171,7 +3528,14 @@ export class RecurringVisitService {
     }
 
     const plan = (parent as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
-    const rows = getScheduleRows(parent);
+    if (String(plan?.status || '').toLowerCase() === 'active') {
+      const rows = await loadPlanScheduleRows(parent);
+      if (!RecurringVisitService.recurringPlanVisitsExhausted(parent, rows)) {
+        return;
+      }
+    }
+
+    const rows = await loadPlanScheduleRows(parent);
     const terminalRows = rows.filter((visit) => isVisitPassed(visit));
     const completedRowCount = terminalRows.filter(
       (visit) => String(visit.status) === 'completed',
@@ -3253,7 +3617,7 @@ export class RecurringVisitService {
     if (plan.status === 'ended') return true;
     if (plan.status === 'paused') return false;
 
-    const rows = getScheduleRows(parent);
+    const rows = await loadPlanScheduleRows(parent);
     if (!RecurringVisitService.recurringPlanVisitsExhausted(parent, rows)) {
       return false;
     }
@@ -3277,6 +3641,7 @@ export class RecurringVisitService {
     const plan = (parent as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
     if (plan.status === 'ended') return;
 
+    await hydrateTaskVisitsOntoSchedule(parent);
     const visit = findVisit(parent, childTask.recurringVisitId);
     if (!visit || VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) {
       return;
@@ -3318,13 +3683,13 @@ export class RecurringVisitService {
 
     parent.status = 'assigned';
     parent.startedAt = undefined;
-    parent.schedule = getScheduleRows(parent) as unknown as ITask['schedule'];
-    parent.markModified('schedule');
-    if (parent.isModified('activeVisitId')) {
-      parent.markModified('activeVisitId');
+    const rows = getScheduleRows(parent);
+    const rowIdx = rows.findIndex((row) => row.visitId === visit.visitId);
+    if (rowIdx >= 0) {
+      rows[rowIdx] = visit;
     }
-    await parent.save();
-    invalidateTaskDetailCache(parentId);
+    parent.schedule = rows as unknown as ITask['schedule'];
+    await saveRecurringPlanDocument(parent, parentId, rows);
 
     if (
       options?.cancelledByProfileId &&
@@ -3367,6 +3732,7 @@ export class RecurringVisitService {
       throw new BadRequestError('Recurring plan has already ended');
     }
 
+    await hydrateTaskVisitsOntoSchedule(task);
     const visit = findVisit(task, params.visitId);
     if (!visit) throw new NotFoundError('Visit not found');
     if (VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) {
@@ -3409,13 +3775,13 @@ export class RecurringVisitService {
       (task as unknown as { activeVisitId?: string }).activeVisitId = undefined;
     }
 
-    task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    if (task.isModified('activeVisitId')) {
-      task.markModified('activeVisitId');
+    const rows = getScheduleRows(task);
+    const rowIdx = rows.findIndex((row) => row.visitId === visit.visitId);
+    if (rowIdx >= 0) {
+      rows[rowIdx] = visit;
     }
-    await task.save();
-    invalidateTaskDetailCache(params.taskId);
+    task.schedule = rows as unknown as ITask['schedule'];
+    await saveRecurringPlanDocument(task, params.taskId, rows);
 
     await RecurringVisitService.notifyTaskerRecurringVisitCancelled(task, visit);
 
@@ -3436,6 +3802,7 @@ export class RecurringVisitService {
       return;
     }
 
+    await hydrateTaskVisitsOntoSchedule(parent);
     const visit = findVisit(parent, childTask.recurringVisitId);
     if (!visit || visit.status === 'completed') return;
 
@@ -3450,12 +3817,11 @@ export class RecurringVisitService {
     parent.status = 'assigned';
     parent.startedAt = undefined;
     parent.completedAt = undefined;
-    parent.schedule = getScheduleRows(parent) as unknown as ITask['schedule'];
     (parent as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan = plan;
-    parent.markModified('schedule');
-    parent.markModified('recurringPlan');
-    await parent.save();
-    invalidateTaskDetailCache(parent._id.toString());
+    const rows = getScheduleRows(parent);
+    const rowIdx = rows.findIndex((r) => r.visitId === visit.visitId);
+    if (rowIdx >= 0) rows[rowIdx] = visit;
+    await saveRecurringPlanDocument(parent, parent._id.toString(), rows);
 
     await RecurringVisitService.ensureMaterializedBuffer(parent._id.toString());
     const opened = await RecurringVisitService.openNextVisitForPayment(parent._id.toString(), {
@@ -3476,7 +3842,7 @@ export class RecurringVisitService {
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
     if (String(plan?.status || '').toLowerCase() !== 'active') return false;
 
-    const rows = getScheduleRows(task);
+    const rows = await loadPlanScheduleRows(task);
     const chronoTarget = findNextChronologicalPayableVisit(rows);
     let changed = false;
 
@@ -3506,13 +3872,7 @@ export class RecurringVisitService {
     }
 
     if (changed) {
-      task.schedule = rows as unknown as ITask['schedule'];
-      task.markModified('schedule');
-      if (task.isModified('activeVisitId')) {
-        task.markModified('activeVisitId');
-      }
-      await task.save();
-      invalidateTaskDetailCache(taskId);
+      await saveRecurringPlanDocument(task, taskId, rows);
     }
 
     return changed;
@@ -3533,7 +3893,7 @@ export class RecurringVisitService {
     task = await Task.findById(taskId);
     if (!task) return null;
 
-    let rows = getScheduleRows(task);
+    let rows = await loadPlanScheduleRows(task);
     let existingPending = resolvePendingPaymentVisitRow(rows);
     if (existingPending) {
       return resolvePendingPaymentPayload(existingPending, plan);
@@ -3550,7 +3910,7 @@ export class RecurringVisitService {
       task = await Task.findById(taskId);
       if (!task) return null;
 
-      rows = getScheduleRows(task);
+      rows = await loadPlanScheduleRows(task);
       existingPending = resolvePendingPaymentVisitRow(rows);
       if (existingPending) {
         return resolvePendingPaymentPayload(existingPending, plan);
@@ -3610,10 +3970,7 @@ export class RecurringVisitService {
     }
     (task as unknown as { activeVisitId?: string }).activeVisitId = nextVisit.visitId;
 
-    task.schedule = rows as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(taskId);
+    await saveRecurringPlanDocument(task, taskId, rows);
 
     return {
       visitId: nextVisit.visitId,
@@ -3698,6 +4055,12 @@ export class RecurringVisitService {
     }
     const uid = (profile as { uid?: unknown }).uid;
     return typeof uid === 'string' && uid.trim() ? uid.trim() : undefined;
+  }
+
+  private static async resolveTaskRequesterUid(task: ITask): Promise<string | undefined> {
+    const direct = String(task.requesterUid || '').trim();
+    if (direct) return direct;
+    return RecurringVisitService.resolveProfileUid(task.requesterId);
   }
 
   /**
@@ -4526,6 +4889,7 @@ export class RecurringVisitService {
     }
     RecurringVisitService.assertPlanAllowsVisitCancelRequest(plan);
 
+    await hydrateTaskVisitsOntoSchedule(task);
     const visit = findVisit(task, params.visitId);
     if (!visit) throw new NotFoundError('Visit not found');
 
@@ -4565,10 +4929,13 @@ export class RecurringVisitService {
     };
     visit.updatedAt = new Date();
 
-    task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(params.taskId);
+    const rows = getScheduleRows(task);
+    const rowIdx = rows.findIndex((row) => row.visitId === visit.visitId);
+    if (rowIdx >= 0) {
+      rows[rowIdx] = visit;
+    }
+    task.schedule = rows as unknown as ITask['schedule'];
+    await saveRecurringPlanDocument(task, params.taskId, rows);
 
     await RecurringVisitService.notifyCustomerRecurringVisitCancelRequested(task, visit, {
       reason: trimmedReason,
@@ -4588,6 +4955,7 @@ export class RecurringVisitService {
       throw new ForbiddenError('Not authorized');
     }
 
+    await hydrateTaskVisitsOntoSchedule(task);
     const visit = findVisit(task, params.visitId);
     if (!visit) throw new NotFoundError('Visit not found');
 
@@ -4609,10 +4977,13 @@ export class RecurringVisitService {
     };
     visit.updatedAt = new Date();
 
-    task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(params.taskId);
+    const rows = getScheduleRows(task);
+    const rowIdx = rows.findIndex((row) => row.visitId === visit.visitId);
+    if (rowIdx >= 0) {
+      rows[rowIdx] = visit;
+    }
+    task.schedule = rows as unknown as ITask['schedule'];
+    await saveRecurringPlanDocument(task, params.taskId, rows);
   }
 
   /** Customer: approve or reject a tasker reschedule request. */
@@ -4872,6 +5243,7 @@ export class RecurringVisitService {
     const cancelReason = params.reason || 'Tasker left recurring plan';
     const now = new Date();
     const planObjectId = new mongoose.Types.ObjectId(params.taskId);
+    const requesterUid = await RecurringVisitService.resolveTaskRequesterUid(task);
 
     if (String(plan.status || '').toLowerCase() === 'ended') {
       await RecurringVisitService.withdrawTaskerAcceptedApplication({
@@ -4890,6 +5262,7 @@ export class RecurringVisitService {
 
     await RecurringVisitService.assertPlanCanBeEnded(task);
 
+    await hydrateTaskVisitsOntoSchedule(task);
     const rows = getScheduleRows(task);
     const activeChildIds = await Task.find({
       parentTaskId: planObjectId,
@@ -4941,14 +5314,27 @@ export class RecurringVisitService {
       }
       (visit as { childTaskId: mongoose.Types.ObjectId | null }).childTaskId = null;
 
-      if (visitRowHasHeldPayment(visit)) {
-        visit.status = 'scheduled';
-      } else {
-        visit.status = 'scheduled';
-        visit.paymentStatus = 'pending';
-        (visit as { escrowId: string | null }).escrowId = null;
-        (visit as { paidAt: Date | null }).paidAt = null;
+      const hadHeldPayment = visitRowHasHeldPayment(visit);
+      if (hadHeldPayment) {
+        const refundResult = await RecurringVisitService.refundVisitPaymentOnCancel({
+          planTask: task,
+          visit,
+          cancelledBy: 'performer',
+          requesterUid,
+          reason: cancelReason,
+        });
+        if (refundResult.error) {
+          throw new BadRequestError(
+            refundResult.error ||
+              'Could not refund payment for a visit. Please try again or contact support.',
+          );
+        }
       }
+
+      visit.status = 'scheduled';
+      visit.paymentStatus = 'pending';
+      (visit as { escrowId: string | null }).escrowId = null;
+      (visit as { paidAt: Date | null }).paidAt = null;
 
       if (visit.cancelRequest?.status === 'pending') {
         delete visit.cancelRequest;
@@ -4979,10 +5365,11 @@ export class RecurringVisitService {
     (task as unknown as { assigneeUid?: string }).assigneeUid = undefined;
     (task as unknown as { activeVisitId?: string }).activeVisitId = undefined;
     task.updatedAt = now;
-    task.markModified('recurringPlan');
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(params.taskId);
+    await saveRecurringPlanDocument(task, params.taskId, rows);
+
+    await RecurringVisitService.notifyCustomerRecurringPlanTaskerLeft(task, {
+      reason: cancelReason,
+    });
   }
 
   private static async withdrawTaskerAcceptedApplication(params: {

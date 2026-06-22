@@ -191,3 +191,46 @@ export function isVisitTerminal(status: VisitStatus): boolean {
 export function canTaskerStartVisit(status: VisitStatus, paymentStatus: VisitPaymentStatus): boolean {
   return VISIT_TASKER_ASSIGNED_STATUSES.has(status) && paymentStatus === 'held';
 }
+
+/** Runtime visit row used by RecurringVisitService and collection migration layer. */
+export interface ScheduleVisitRow {
+  visitId: string;
+  visitIndex: number;
+  date: Date;
+  scheduledTimeStart?: string;
+  scheduledTimeEnd?: string;
+  expectedDurationMinutes?: number;
+  status: VisitStatus | string;
+  paymentStatus: VisitPaymentStatus;
+  escrowId?: string;
+  paymentDeadline?: Date;
+  paidAt?: Date;
+  amount?: number;
+  assigneeId?: mongoose.Types.ObjectId | null;
+  assigneeUid?: string | null;
+  childTaskId?: mongoose.Types.ObjectId | null;
+  skippedAt?: Date;
+  skippedBy?: string;
+  skipReason?: string;
+  paymentReminderSentAt?: Date;
+  cancellationChargeAmount?: number;
+  rescheduleRequest?: {
+    requestedBy: 'customer' | 'tasker';
+    status: 'pending' | 'approved' | 'rejected';
+    newDate: Date;
+    scheduledTimeStart?: string;
+    scheduledTimeEnd?: string;
+    reason?: string;
+    requestedAt: Date;
+    respondedAt?: Date;
+  };
+  cancelRequest?: {
+    requestedBy: 'tasker';
+    status: 'pending' | 'approved' | 'rejected';
+    reason?: string;
+    requestedAt: Date;
+    respondedAt?: Date;
+  };
+  createdAt: Date;
+  updatedAt: Date;
+}

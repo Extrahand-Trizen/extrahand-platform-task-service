@@ -680,9 +680,11 @@ export class ApplicationService {
       message?: string;
       /** Recurring plan: visit paid before accept (assignment payment). */
       recurringVisitId?: string;
+      /** Escrow captured when poster pays during accept (Visit 1 assignment payment). */
+      assignmentEscrowId?: string;
     }
   ): Promise<ITaskApplication> {
-    const { status, message, recurringVisitId } = updateData;
+    const { status, message, recurringVisitId, assignmentEscrowId } = updateData;
 
     const application = await TaskApplication.findById(applicationId).populate(
       "taskId",
@@ -769,6 +771,7 @@ export class ApplicationService {
           applicantUid: applicantProfile?.uid || "",
           acceptedAmount: effectiveAcceptedAmount,
           preferredVisitId: recurringVisitId,
+          assignmentEscrowId,
         });
 
         logger.info(

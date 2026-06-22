@@ -1,4 +1,4 @@
-﻿import mongoose from "mongoose";
+import mongoose from "mongoose";
 import crypto from "crypto";
 import Task, { ITask } from "../models/Task";
 import {
@@ -25,6 +25,7 @@ import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
+import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
@@ -219,7 +220,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId schedule tags';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags';
 
 /** Post & Choose only â€” Book Now tasks are assigned via ops, not helper browse. */
 function buildMarketplaceBrowseClause(): Record<string, unknown> {
@@ -792,16 +793,25 @@ export class TaskService {
     }
 
     if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
-      await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
-      task = (await Task.findById(taskId).lean()) as unknown as ITask;
-      if (!task) {
-        throw new NotFoundError("Task not found");
-      }
       const planDoc = await Task.findById(taskId);
       if (planDoc) {
-        await RecurringVisitService.sanitizeOrphanedScheduleChildReferences(planDoc);
+        void RecurringVisitService.sanitizeOrphanedScheduleChildReferences(planDoc);
       }
       void RecurringVisitService.scheduleReconcilePlanState(taskId);
+
+      const embeddedSchedule = Array.isArray(task.schedule) ? task.schedule : [];
+      const hasEmbeddedVisitRows = embeddedSchedule.some(
+        (entry) =>
+          entry &&
+          typeof entry === 'object' &&
+          typeof (entry as { visitId?: string }).visitId === 'string',
+      );
+      if (!hasEmbeddedVisitRows) {
+        const visits = await getVisitsForPlan(task);
+        if (visits.length > 0) {
+          (task as unknown as Record<string, unknown>).schedule = visits;
+        }
+      }
     }
 
     const result = task as unknown as ITask;
@@ -991,12 +1001,17 @@ export class TaskService {
     });
 
     const recurring = taskData.recurring;
+    let createdVisitMeta: ReturnType<typeof RecurringVisitService.tryDecodeMetaFromTaskData> = null;
+    let createdVisitStartDate: Date | undefined;
+    let createdVisitEndDate: Date | undefined;
+
     if (recurring?.enabled) {
       const visitMeta = RecurringVisitService.tryDecodeMetaFromTaskData(
         taskData as Record<string, unknown>,
       );
 
       if (visitMeta) {
+        createdVisitMeta = visitMeta;
         RecurringVisitService.applyPlanOnCreate(
           taskPayload as Record<string, unknown>,
           taskData as Record<string, unknown>,
@@ -1027,6 +1042,8 @@ export class TaskService {
           requireApproval: recurring.requireApproval !== false,
           minCommitment: recurring.minCommitment || undefined,
         };
+        createdVisitStartDate = startDate;
+        createdVisitEndDate = endDate;
       } else {
       const frequency = (recurring.frequency || "daily") as
         | "daily"
@@ -1186,6 +1203,15 @@ export class TaskService {
     const task = await Task.create(taskPayload);
 
     logger.info(`✅ Task created successfully: ${task._id}`);
+
+    if (createdVisitMeta && createdVisitStartDate) {
+      await RecurringVisitService.materializeInitialVisitBuffer(
+        task as unknown as ITask,
+        createdVisitMeta,
+        createdVisitStartDate,
+        createdVisitEndDate,
+      );
+    }
 
     const taskRecord = task.toObject() as ITask;
     schedulePostCreateNotifications(taskRecord, {
@@ -1493,10 +1519,16 @@ export class TaskService {
     return updatedTask as unknown as ITask;
   }
 
-  /** Collect parent task plus recurring visit child tasks linked in schedule or parentTaskId. */
+  /** Collect parent task plus recurring visit child tasks linked in schedule or RecurringVisit collection. */
   private static async collectTaskTreeIds(root: ITask): Promise<mongoose.Types.ObjectId[]> {
     const idSet = new Set<string>();
     idSet.add(String(root._id));
+
+    const { RecurringVisitRepository } = await import('../repositories/RecurringVisitRepository');
+    const collectionChildIds = await RecurringVisitRepository.listChildTaskIds(root._id);
+    for (const childId of collectionChildIds) {
+      idSet.add(childId);
+    }
 
     const schedule = Array.isArray(root.schedule) ? root.schedule : [];
     for (const row of schedule) {
@@ -1610,8 +1642,7 @@ export class TaskService {
       throw new ForbiddenError("Not authorized to cancel this visit");
     }
 
-    const rows = (parent.schedule || []) as Array<{ visitId?: string; childTaskId?: mongoose.Types.ObjectId }>;
-    const visit = rows.find((row) => row.visitId === visitId);
+    const visit = await findVisitForPlan(parent, visitId);
     if (!visit) {
       throw new NotFoundError("Visit not found");
     }

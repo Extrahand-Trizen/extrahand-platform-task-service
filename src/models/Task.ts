@@ -157,11 +157,17 @@ export interface ITask extends Document {
     budgetPerVisit?: number;
     lastMaterializedDate?: Date;
     materializedBufferSize?: number;
+    nextVisitIndex?: number;
     completedVisitCount?: number;
     consecutiveUnpaidCount?: number;
+    nextVisitDate?: Date;
+    pendingPaymentVisitId?: string;
+    /** embedded = legacy schedule[]; collection = RecurringVisit documents */
+    visitStorage?: 'embedded' | 'collection';
     pausedAt?: Date;
     pausedReason?: string;
     endedAt?: Date;
+    lastPaymentSyncAt?: Date;
   };
 
   activeVisitId?: string;
@@ -521,11 +527,16 @@ const TaskSchema = new Schema<ITask>(
       budgetPerVisit: Number,
       lastMaterializedDate: Date,
       materializedBufferSize: { type: Number, default: 2 },
+      nextVisitIndex: Number,
       completedVisitCount: { type: Number, default: 0 },
       consecutiveUnpaidCount: { type: Number, default: 0 },
+      nextVisitDate: Date,
+      pendingPaymentVisitId: String,
+      visitStorage: { type: String, enum: ['embedded', 'collection'] },
       pausedAt: Date,
       pausedReason: String,
       endedAt: Date,
+      lastPaymentSyncAt: Date,
     },
 
     activeVisitId: String,
@@ -533,6 +544,11 @@ const TaskSchema = new Schema<ITask>(
     recurringVisitId: String,
     recurringParentPlan: { type: Boolean, default: false },
 
+    /**
+     * @deprecated Visit instance data migrates to RecurringVisit collection.
+     * Retained for rollback until: backfill complete, validation clean, collection reads/writes
+     * enabled in production, schedulers/payments no longer depend on schedule[], mobile hydrated.
+     */
     schedule: {
       type: [
         {

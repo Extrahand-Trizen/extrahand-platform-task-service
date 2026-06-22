@@ -103,7 +103,8 @@ function taskHasPerVisitScheduleRows(
 /** v2 recurring visit plan — distinct from legacy schedule-only recurring. */
 export function isRecurringVisitPlanTask(task: Record<string, unknown> | null | undefined): boolean {
   if (!task?.recurring || !(task.recurring as { enabled?: boolean }).enabled) return false;
-  const plan = task.recurringPlan as { planVersion?: number } | undefined;
+  const plan = task.recurringPlan as { planVersion?: number; visitStorage?: string } | undefined;
+  if (plan?.visitStorage === 'collection') return true;
   if (plan?.planVersion === 2) return true;
   return taskHasPerVisitScheduleRows(task);
 }
