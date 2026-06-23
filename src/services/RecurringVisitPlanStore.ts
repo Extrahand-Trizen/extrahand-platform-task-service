@@ -2,7 +2,7 @@
  * Unified read/write layer for recurring visit data (collection vs embedded schedule[]).
  */
 import mongoose from 'mongoose';
-import { Task, type ITask } from '../models/Task';
+import Task, { type ITask } from '../models/Task';
 import type { IRecurringVisit } from '../models/RecurringVisit';
 import {
   recurringVisitConfig,
