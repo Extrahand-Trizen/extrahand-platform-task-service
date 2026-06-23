@@ -102,9 +102,19 @@ function taskHasPerVisitScheduleRows(
 
 /** v2 recurring visit plan — distinct from legacy schedule-only recurring. */
 export function isRecurringVisitPlanTask(task: Record<string, unknown> | null | undefined): boolean {
-  if (!task?.recurring || !(task.recurring as { enabled?: boolean }).enabled) return false;
+  if (!task) return false;
   const plan = task.recurringPlan as { planVersion?: number; visitStorage?: string } | undefined;
   if (plan?.visitStorage === 'collection') return true;
   if (plan?.planVersion === 2) return true;
+  if (!task.recurring || !(task.recurring as { enabled?: boolean }).enabled) return false;
   return taskHasPerVisitScheduleRows(task);
+}
+
+/** Visits live in RecurringVisit collection — not on parent task.schedule. */
+export function isRecurringCollectionVisitPlan(
+  task: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!task) return false;
+  const plan = task.recurringPlan as { visitStorage?: string } | undefined;
+  return plan?.visitStorage === 'collection';
 }

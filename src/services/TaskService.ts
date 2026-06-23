@@ -243,6 +243,35 @@ function buildMarketplaceBrowseClause(): Record<string, unknown> {
   };
 }
 
+/** Browse lists show parent plans only — not per-visit child tasks. */
+function buildMarketplaceParentOnlyClause(): Record<string, unknown> {
+  return {
+    $or: [{ parentTaskId: { $exists: false } }, { parentTaskId: null }],
+  };
+}
+
+/** Geospatial filter for nearby browse ($geoWithin works with createdAt sort; $near does not). */
+function buildNearbyLocationClause(
+  lng: number,
+  lat: number,
+  radiusKm: number,
+): Record<string, unknown> {
+  const radiusRadians = radiusKm / 6378.1;
+  return {
+    $or: [
+      {
+        'location.coordinates': {
+          $geoWithin: {
+            $centerSphere: [[lng, lat], radiusRadians],
+          },
+        },
+      },
+      { 'location.coordinates.0': { $exists: false } },
+      { location: { $exists: false } },
+    ],
+  };
+}
+
 const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
 
@@ -348,6 +377,7 @@ export class TaskService {
 
     // Book Now tasks are not marketplace listings â€” hide from helper browse/discover.
     andClauses.push(buildMarketplaceBrowseClause());
+    andClauses.push(buildMarketplaceParentOnlyClause());
 
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
     if (status) {
@@ -537,33 +567,15 @@ export class TaskService {
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
-    const radiusMeters = radiusKm * 1000;
 
     const andClauses: any[] = [];
 
     // Book Now tasks are ops-assigned â€” exclude from helper browse/nearby.
     andClauses.push(buildMarketplaceBrowseClause());
+    andClauses.push(buildMarketplaceParentOnlyClause());
 
     // Include nearby tasks (with coordinates) OR remote/packers-movers tasks (without coordinates)
-    // This ensures tasks like packers-movers that don't have a fixed location are always shown
-    andClauses.push({
-      $or: [
-        {
-          "location.coordinates": {
-            $near: {
-              $geometry: {
-                type: "Point",
-                coordinates: [lng, lat],
-              },
-              $maxDistance: radiusMeters,
-            },
-          },
-        },
-        // Tasks without coordinates (remote tasks, packers-movers, etc.)
-        { "location.coordinates.0": { $exists: false } },
-        { location: { $exists: false } },
-      ],
-    });
+    andClauses.push(buildNearbyLocationClause(lng, lat, radiusKm));
 
     // Status filter: support single value or array
     if (status) {
@@ -657,21 +669,7 @@ export class TaskService {
       .sort(sortObj)
       .lean();
 
-    // NOTE: countDocuments with $near can fail on some MongoDB versions/tiers.
-    // Use $geoWithin + $centerSphere for count instead.
-    const countAndClauses = andClauses.map((clause) => {
-      if (!clause["location.coordinates"]?.$near) return clause;
-      return {
-        "location.coordinates": {
-          $geoWithin: {
-            $centerSphere: [[lng, lat], radiusKm / 6378.1], // Earth radius in km
-          },
-        },
-      };
-    });
-    const total = await Task.countDocuments({
-      $and: countAndClauses,
-    });
+    const total = await Task.countDocuments(query);
 
     return {
       tasks: tasks as unknown as ITask[],
@@ -799,6 +797,7 @@ export class TaskService {
       }
       void RecurringVisitService.scheduleReconcilePlanState(taskId);
 
+      const taskRecord = task as unknown as Record<string, unknown>;
       const embeddedSchedule = Array.isArray(task.schedule) ? task.schedule : [];
       const hasEmbeddedVisitRows = embeddedSchedule.some(
         (entry) =>
@@ -809,7 +808,7 @@ export class TaskService {
       if (!hasEmbeddedVisitRows) {
         const visits = await getVisitsForPlan(task);
         if (visits.length > 0) {
-          (task as unknown as Record<string, unknown>).schedule = visits;
+          taskRecord.schedule = visits;
         }
       }
     }
@@ -850,6 +849,18 @@ export class TaskService {
     const cacheKey = `task:detail:${taskId}`;
     getRedisClient()?.del(cacheKey).catch((err: any) => {
       logger.warn("Task detail cache invalidate error", { taskId, error: err instanceof Error ? err.message : String(err) });
+    });
+  }
+
+  /** Invalidate cached open-marketplace list pages so new posts appear in browse immediately. */
+  static invalidateTaskListCache(): void {
+    const redis = getRedisClient();
+    if (!redis) return;
+    const keys = [1, 2, 3].map((page) => `tasks:list:open:marketplace:v2:p${page}:20`);
+    Promise.all(keys.map((key) => redis.del(key))).catch((err: unknown) => {
+      logger.warn("Task list cache invalidate error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
   }
 
@@ -1201,6 +1212,8 @@ export class TaskService {
     }
 
     const task = await Task.create(taskPayload);
+
+    TaskService.invalidateTaskListCache();
 
     logger.info(`✅ Task created successfully: ${task._id}`);
 

@@ -2,7 +2,7 @@
  * Unified read/write layer for recurring visit data (collection vs embedded schedule[]).
  */
 import mongoose from 'mongoose';
-import type { ITask } from '../models/Task';
+import { Task, type ITask } from '../models/Task';
 import type { IRecurringVisit } from '../models/RecurringVisit';
 import {
   recurringVisitConfig,
@@ -153,6 +153,14 @@ function mapEmbeddedScheduleToRows(task: ITask): ScheduleVisitRow[] {
   });
 }
 
+async function loadEmbeddedScheduleFromDb(
+  parentId: mongoose.Types.ObjectId,
+): Promise<ScheduleVisitRow[]> {
+  const full = await Task.findById(parentId).select('schedule').lean();
+  if (!full) return [];
+  return mapEmbeddedScheduleToRows(full as unknown as ITask);
+}
+
 /**
  * Load visits for a plan — collection first, legacy embedded fallback.
  */
@@ -182,6 +190,8 @@ export async function getVisitsForPlan(
   if (recurringVisitConfig.legacyFallback) {
     const embedded = mapEmbeddedScheduleToRows(task);
     if (embedded.length > 0) return embedded;
+    const fromDb = await loadEmbeddedScheduleFromDb(parentId);
+    if (fromDb.length > 0) return fromDb;
   }
 
   if (options?.forceReload && storage === 'collection') {
