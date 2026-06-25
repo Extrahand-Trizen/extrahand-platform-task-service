@@ -68,6 +68,17 @@ export class BookingController {
     });
   }
 
+  static async getSlotAvailability(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const date = String(req.query.date || '').trim();
+    const city = String(req.query.city || '').trim();
+    if (!date || !city) {
+      throw new BadRequestError('date and city are required');
+    }
+
+    const data = await BookingService.getSlotAvailability(date, city);
+    res.json({ success: true, data });
+  }
+
   static async getOrderIdForTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     const user = req.user;
     if (!user?.uid) {
@@ -115,6 +126,27 @@ export class BookingController {
       user.uid,
       req.body?.reason
     );
+    res.json({ success: true, data });
+  }
+
+  static async confirmPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+
+    const result = await BookingService.confirmPaymentForCustomer(req.params.orderId, user.uid);
+    res.json({ success: true, data: result });
+  }
+
+  static async abandonUnpaidBooking(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+    const data = await BookingService.abandonUnpaidBooking(req.params.orderId, user.uid);
     res.json({ success: true, data });
   }
 

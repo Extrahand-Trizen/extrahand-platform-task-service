@@ -39,6 +39,9 @@ export interface IBookingOrder extends Document {
   paidAt?: Date;
   cancelledAt?: Date;
   cancellationReason?: string;
+  /** Serialized cart lines — tasks are created only after payment succeeds. */
+  pendingLines?: Record<string, unknown>[];
+  bookingNotes?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -77,6 +80,8 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     paidAt: Date,
     cancelledAt: Date,
     cancellationReason: String,
+    pendingLines: { type: [Schema.Types.Mixed], default: undefined },
+    bookingNotes: String,
   },
   { timestamps: true }
 );
