@@ -117,11 +117,7 @@ export interface ITask extends Document {
   requesterUid?: string;
 
   assigneeId?: mongoose.Types.ObjectId | null; // ObjectId reference to Profile
-<<<<<<< HEAD
   /** Firebase UID of the assigned helper — required for tasker My Work lookup */
-=======
-  /** Firebase uid of assigned helper when denormalized on the task document. */
->>>>>>> 7b89ea68f78ba75a6a1e3fc556ec2d68bde42c1b
   assigneeUid?: string | null;
   assignedAt?: Date;
   /** _id of the synthetic accepted TaskApplication created by ops assignment */
