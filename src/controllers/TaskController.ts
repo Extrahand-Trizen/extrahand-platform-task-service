@@ -1,6 +1,8 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
+import Task from '../models/Task';
 import { ApplicationService } from '../services/ApplicationService';
 import { BadRequestError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -505,6 +507,20 @@ export class TaskController {
       req.user!.profileId
     );
     ApiResponse.success(res, task, 'Additional payment request withdrawn');
+  }
+
+  static async getTasksBatch(req: Request, res: Response): Promise<void> {
+    const { taskIds } = req.body || {};
+    if (!taskIds || !Array.isArray(taskIds)) {
+      throw new BadRequestError('taskIds array is required');
+    }
+
+    const validObjectIds = taskIds.filter((id: string) => mongoose.Types.ObjectId.isValid(id));
+    const tasks = await Task.find({
+      _id: { $in: validObjectIds }
+    }).lean();
+
+    res.json({ success: true, tasks });
   }
 }
 

@@ -20,6 +20,13 @@ router.post(
   asyncHandler(TaskController.createTask)
 );
 
+// POST /api/v1/tasks/batch - Get tasks in batch (must come before /:id route)
+router.post(
+  "/batch",
+  serviceAuthMiddleware,
+  asyncHandler(TaskController.getTasksBatch)
+);
+
 // GET /api/v1/tasks/nearby - Get nearby tasks (requires user location from profile)
 router.get(
   "/nearby",
