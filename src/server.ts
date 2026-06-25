@@ -11,6 +11,7 @@ import { Fast2SMSClient } from './clients/Fast2SMSClient';
 import { ReminderScheduler } from './schedulers/ReminderScheduler';
 import { WorkStartSoonScheduler } from './schedulers/WorkStartSoonScheduler';
 import { ApplicationFollowUpScheduler } from './schedulers/ApplicationFollowUpScheduler';
+import { RecurringVisitScheduler } from './schedulers/RecurringVisitScheduler';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
 import { initRedis, disconnectRedis } from './config/redis';
@@ -35,6 +36,7 @@ async function startServer() {
     await ReminderScheduler.initialize('task-service');
     await WorkStartSoonScheduler.initialize('task-service');
     await ApplicationFollowUpScheduler.initialize('task-service');
+    await RecurringVisitScheduler.initialize('task-service');
 
     // Initialize Redis (optional, best-effort)
     await initRedis();

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { TaskController } from "../controllers/TaskController";
 import { BudgetRevisionController } from "../controllers/BudgetRevisionController";
+import { RecurringVisitController } from "../controllers/RecurringVisitController";
 import { authMiddleware, optionalAuthMiddleware } from "../middleware/auth";
 import { serviceAuthMiddleware } from "../middleware/serviceAuth";
 import { asyncHandler } from "../middleware/errorHandler";
@@ -165,6 +166,104 @@ router.post(
   serviceAuthMiddleware,
   authMiddleware,
   asyncHandler(TaskController.withdrawAdditionalQuoteRequest)
+);
+
+router.get(
+  "/:id/recurring/visits",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.listVisits)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/confirm-payment",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.confirmVisitPayment)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/skip",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.skipVisit)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/cancel",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.cancelVisit)
+);
+
+router.post(
+  "/:id/recurring/plan/end",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.endPlan)
+);
+
+router.post(
+  "/:id/recurring/plan/resume",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.resumePlan)
+);
+
+router.post(
+  "/:id/recurring/plan/open-next-payment",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.openNextVisitPayment)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/reschedule",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.rescheduleVisit)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/reschedule/request",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.requestVisitReschedule)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/reschedule/respond",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.respondVisitReschedule)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/cancel/request",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.requestVisitCancel)
+);
+
+router.post(
+  "/:id/recurring/visits/:visitId/cancel/respond",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.respondVisitCancel)
+);
+
+router.post(
+  "/:id/recurring/plan/pause",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.pausePlan)
+);
+
+router.post(
+  "/:id/recurring/plan/leave",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(RecurringVisitController.leavePlan)
 );
 
 // ── Global Budget Revision ───────────────────────────────────────────────────

@@ -30,18 +30,18 @@ async function compressImageIfSupported(
   }
 
   try {
-    let pipeline = sharp(fileBuffer, { failOn: 'none' }).rotate();
+    let pipeline = sharp(fileBuffer, { failOn: 'none' })
+      .rotate()
+      .resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true });
 
     if (normalizedType === 'image/png') {
       // Lossless PNG optimization (no quality/color reduction)
       pipeline = pipeline.png({ compressionLevel: 9, palette: false, adaptiveFiltering: true });
     } else if (normalizedType === 'image/webp') {
       // Lossless WebP optimization
-      pipeline = pipeline.webp({ lossless: true, effort: 6 });
+      pipeline = pipeline.webp({ lossless: true, effort: 4 });
     } else {
-      // JPEG cannot be strictly losslessly recompressed with sharp while preserving size optimally.
-      // Use max-quality settings and entropy optimization to keep visual quality intact.
-      pipeline = pipeline.jpeg({ quality: 100, mozjpeg: true, chromaSubsampling: '4:4:4' });
+      pipeline = pipeline.jpeg({ quality: 85, mozjpeg: true, chromaSubsampling: '4:2:0' });
     }
 
     const compressed = await pipeline.toBuffer();

@@ -12,9 +12,58 @@ import logger from "../config/logger";
  * the profiles collection belongs to the user-service, not this service.
  * We access it directly via the shared MongoDB connection only for reads.
  */
+export interface ApplicantProfileSnapshot {
+  name?: string;
+  photoURL?: string;
+  rating?: number;
+  totalReviews?: number;
+  skills?: { list: string[] };
+}
+
 export class ProfileUtils {
   private static get collection() {
     return mongoose.connection.collection("profiles");
+  }
+
+  static isPlaceholderProfileName(name: unknown): boolean {
+    const normalized = String(name ?? "").trim().toLowerCase();
+    return (
+      !normalized ||
+      normalized === "user" ||
+      normalized === "anonymous" ||
+      normalized === "anonymous applicant" ||
+      normalized === "user not found" ||
+      normalized === "verified user" ||
+      normalized === "there" ||
+      normalized === "helper" ||
+      normalized === "applicant"
+    );
+  }
+
+  /** Best display name from a raw profile document. */
+  static resolveProfileDisplayName(profile: any): string | undefined {
+    if (!profile) return undefined;
+
+    const first = String(profile.firstName || "").trim();
+    const last = String(profile.lastName || "").trim();
+    const combined = `${first} ${last}`.trim();
+
+    const candidates = [
+      profile.name,
+      profile.fullName,
+      profile.displayName,
+      combined,
+      profile.profession,
+    ];
+
+    for (const candidate of candidates) {
+      const value = String(candidate || "").trim();
+      if (value && !ProfileUtils.isPlaceholderProfileName(value)) {
+        return value;
+      }
+    }
+
+    return undefined;
   }
 
   /**
@@ -126,17 +175,66 @@ export class ProfileUtils {
   }
 
   /**
+   * Normalize profile skills into TaskApplication snapshot shape: { list: string[] }.
+   * Handles object skills, stringified JSON arrays, and legacy string entries.
+   */
+  static normalizeApplicantProfileSkills(
+    rawSkills: unknown,
+  ): { list: string[] } | undefined {
+    if (rawSkills == null) return undefined;
+
+    let listRaw: unknown = rawSkills;
+    if (typeof rawSkills === "object" && !Array.isArray(rawSkills) && "list" in rawSkills) {
+      listRaw = (rawSkills as { list?: unknown }).list;
+    }
+
+    if (typeof listRaw === "string") {
+      const trimmed = listRaw.trim();
+      if (!trimmed) return undefined;
+      if (trimmed.startsWith("[")) {
+        try {
+          listRaw = JSON.parse(trimmed);
+        } catch {
+          return { list: [trimmed] };
+        }
+      } else {
+        return { list: [trimmed] };
+      }
+    }
+
+    if (!Array.isArray(listRaw)) return undefined;
+
+    const names: string[] = [];
+    for (const item of listRaw) {
+      if (typeof item === "string" && item.trim()) {
+        names.push(item.trim());
+        continue;
+      }
+      if (item && typeof item === "object") {
+        const name = String((item as { name?: string }).name || "").trim();
+        if (name) names.push(name);
+      }
+    }
+
+    return names.length > 0 ? { list: [...new Set(names)] } : undefined;
+  }
+
+  /**
    * Build a normalized applicant profile snapshot from a raw profile document.
    * Used when creating or refreshing the applicantProfile snapshot on an application.
    */
-  static buildSnapshot(profile: any): object | undefined {
+  static buildSnapshot(profile: any): ApplicantProfileSnapshot | undefined {
     if (!profile) return undefined;
-    return {
-      name: profile.name || profile.fullName,
+    const skills = ProfileUtils.normalizeApplicantProfileSkills(profile.skills);
+    const snapshot: ApplicantProfileSnapshot = {
+      name: ProfileUtils.resolveProfileDisplayName(profile),
       photoURL: profile.photoURL,
       rating: profile.rating,
       totalReviews: profile.totalReviews,
-      skills: profile.skills,
     };
+    if (skills) {
+      snapshot.skills = skills;
+    }
+    return snapshot;
   }
 }

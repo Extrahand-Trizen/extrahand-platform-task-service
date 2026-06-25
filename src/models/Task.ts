@@ -113,9 +113,15 @@ export interface ITask extends Document {
 
   requesterId: mongoose.Types.ObjectId; // ObjectId reference to Profile
   // ❌ Removed requesterName - API Gateway will enrich with Profile data
+  /** Firebase uid of poster when denormalized on the task document. */
+  requesterUid?: string;
 
   assigneeId?: mongoose.Types.ObjectId | null; // ObjectId reference to Profile
+<<<<<<< HEAD
   /** Firebase UID of the assigned helper — required for tasker My Work lookup */
+=======
+  /** Firebase uid of assigned helper when denormalized on the task document. */
+>>>>>>> 7b89ea68f78ba75a6a1e3fc556ec2d68bde42c1b
   assigneeUid?: string | null;
   assignedAt?: Date;
   /** _id of the synthetic accepted TaskApplication created by ops assignment */
@@ -141,11 +147,62 @@ export interface ITask extends Document {
     minCommitment?: number;
   };
 
+  /** v2 recurring visit plan (Post & Choose recurring with __recur_meta tag). */
+  recurringPlan?: {
+    planVersion?: number;
+    status?: "draft" | "active" | "paused" | "ended";
+    taskerProfileId?: mongoose.Types.ObjectId;
+    taskerUid?: string;
+    acceptedApplicationId?: mongoose.Types.ObjectId;
+    pattern?: string;
+    selectedWeekdays?: number[];
+    endType?: "until_cancelled" | "end_on_date";
+    endDate?: Date;
+    visitTime?: string;
+    expectedDurationMinutes?: number;
+    budgetPerVisit?: number;
+    lastMaterializedDate?: Date;
+    materializedBufferSize?: number;
+    nextVisitIndex?: number;
+    completedVisitCount?: number;
+    consecutiveUnpaidCount?: number;
+    nextVisitDate?: Date;
+    pendingPaymentVisitId?: string;
+    /** embedded = legacy schedule[]; collection = RecurringVisit documents */
+    visitStorage?: 'embedded' | 'collection';
+    pausedAt?: Date;
+    pausedReason?: string;
+    endedAt?: Date;
+    lastPaymentSyncAt?: Date;
+  };
+
+  activeVisitId?: string;
+  parentTaskId?: mongoose.Types.ObjectId;
+  recurringVisitId?: string;
+  recurringParentPlan?: boolean;
+
   schedule?: Array<{
+    visitId?: string;
+    visitIndex?: number;
     date: Date;
-    status: "open" | "reserved" | "assigned" | "completed" | "cancelled";
+    scheduledTimeStart?: string;
+    scheduledTimeEnd?: string;
+    expectedDurationMinutes?: number;
+    status: string;
+    paymentStatus?: string;
+    escrowId?: string;
+    paymentDeadline?: Date;
+    paidAt?: Date;
+    amount?: number;
     assigneeId?: mongoose.Types.ObjectId | null;
     assigneeUid?: string | null;
+    childTaskId?: mongoose.Types.ObjectId | null;
+    skippedAt?: Date;
+    skippedBy?: string;
+    skipReason?: string;
+    paymentReminderSentAt?: Date;
+    createdAt?: Date;
+    updatedAt?: Date;
   }>;
 
   requirements?: string[];
@@ -464,21 +521,117 @@ const TaskSchema = new Schema<ITask>(
       minCommitment: Number,
     },
 
+    recurringPlan: {
+      planVersion: Number,
+      status: {
+        type: String,
+        enum: ["draft", "active", "paused", "ended"],
+      },
+      taskerProfileId: { type: Schema.Types.ObjectId, ref: "Profile", default: null },
+      taskerUid: String,
+      acceptedApplicationId: { type: Schema.Types.ObjectId, ref: "TaskApplication", default: null },
+      pattern: String,
+      selectedWeekdays: [Number],
+      endType: { type: String, enum: ["until_cancelled", "end_on_date"] },
+      endDate: Date,
+      visitTime: String,
+      expectedDurationMinutes: Number,
+      budgetPerVisit: Number,
+      lastMaterializedDate: Date,
+      materializedBufferSize: { type: Number, default: 2 },
+      nextVisitIndex: Number,
+      completedVisitCount: { type: Number, default: 0 },
+      consecutiveUnpaidCount: { type: Number, default: 0 },
+      nextVisitDate: Date,
+      pendingPaymentVisitId: String,
+      visitStorage: { type: String, enum: ['embedded', 'collection'] },
+      pausedAt: Date,
+      pausedReason: String,
+      endedAt: Date,
+      lastPaymentSyncAt: Date,
+    },
+
+    activeVisitId: String,
+    parentTaskId: { type: Schema.Types.ObjectId, ref: "Task", default: null, index: true },
+    recurringVisitId: String,
+    recurringParentPlan: { type: Boolean, default: false },
+
+    /**
+     * @deprecated Visit instance data migrates to RecurringVisit collection.
+     * Retained for rollback until: backfill complete, validation clean, collection reads/writes
+     * enabled in production, schedulers/payments no longer depend on schedule[], mobile hydrated.
+     */
     schedule: {
       type: [
         {
+          visitId: String,
+          visitIndex: Number,
           date: { type: Date, required: true },
+          scheduledTimeStart: String,
+          scheduledTimeEnd: String,
+          expectedDurationMinutes: Number,
           status: {
             type: String,
-            enum: ["open", "reserved", "assigned", "completed", "cancelled"],
+            enum: [
+              "open",
+              "reserved",
+              "assigned",
+              "completed",
+              "cancelled",
+              "scheduled",
+              "payment_pending",
+              "confirmed",
+              "in_progress",
+              "skipped",
+              "skipped_unpaid",
+              "cancelled_late",
+            ],
             default: "open",
           },
+          paymentStatus: {
+            type: String,
+            enum: ["not_required", "pending", "held", "released", "refunded", "failed"],
+            default: "not_required",
+          },
+          escrowId: String,
+          paymentDeadline: Date,
+          paidAt: Date,
+          amount: Number,
           assigneeId: {
             type: Schema.Types.ObjectId,
             ref: "Profile",
             default: null,
           },
           assigneeUid: { type: String, default: null },
+          childTaskId: {
+            type: Schema.Types.ObjectId,
+            ref: "Task",
+            default: null,
+          },
+          skippedAt: Date,
+          skippedBy: String,
+          skipReason: String,
+          paymentReminderSentAt: Date,
+          cancellationChargeAmount: Number,
+          rescheduleRequest: {
+            requestedBy: { type: String, enum: ['customer', 'tasker'] },
+            status: { type: String, enum: ['pending', 'approved', 'rejected'] },
+            newDate: Date,
+            scheduledTimeStart: String,
+            scheduledTimeEnd: String,
+            reason: String,
+            requestedAt: Date,
+            respondedAt: Date,
+          },
+          cancelRequest: {
+            requestedBy: { type: String, enum: ['tasker'] },
+            status: { type: String, enum: ['pending', 'approved', 'rejected'] },
+            reason: String,
+            requestedAt: Date,
+            respondedAt: Date,
+          },
+          createdAt: Date,
+          updatedAt: Date,
         },
       ],
       default: [],
@@ -637,6 +790,10 @@ TaskSchema.index({ status: 1, scheduledDate: 1 });
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 TaskSchema.index({ bookingSource: 1, status: 1 });
 TaskSchema.index({ bookingOrderId: 1 });
+TaskSchema.index(
+  { parentTaskId: 1, status: 1, recurringVisitId: 1 },
+  { name: 'recurring_child_visit_lookup' },
+);
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);

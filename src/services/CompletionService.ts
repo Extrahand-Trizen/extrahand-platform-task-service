@@ -12,6 +12,8 @@ import { UserServiceClient } from '../clients/UserServiceClient';
 import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
 import { TaskService } from './TaskService';
+import { RecurringVisitService } from './RecurringVisitService';
+import { ITask } from '../models/Task';
 
 export class CompletionService {
   /**
@@ -203,6 +205,22 @@ export class CompletionService {
     ).lean();
 
     logger.info(`Task ${taskId} completion approved by poster ${taskOwnerProfileId}`);
+
+    if (updatedTask?.parentTaskId && updatedTask?.recurringVisitId) {
+      try {
+        await RecurringVisitService.onChildVisitCompleted(updatedTask as unknown as ITask);
+      } catch (err) {
+        logger.error(
+          '[CompletionService] Failed to advance recurring visit plan after child completion',
+          {
+            taskId,
+            parentTaskId: String(updatedTask.parentTaskId),
+            recurringVisitId: updatedTask.recurringVisitId,
+            error: err,
+          },
+        );
+      }
+    }
 
     // EMIT: TASK_COMPLETED and REVIEW_REQUEST notifications
     try {

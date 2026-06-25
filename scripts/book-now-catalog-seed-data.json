@@ -325,90 +325,90 @@
     {
       "catalogId": "appliance-repair",
       "packageId": "wm-checkup",
-      "name": "WM Checkup / Diagnosis",
+      "name": "Washing Machine Check-Up",
       "basePrice": 199,
       "durationMinutes": 45,
-      "description": "Technician visit + diagnosis."
+      "description": "Top load · Front load · Semi-auto — ₹199 each"
     },
     {
       "catalogId": "appliance-repair",
       "packageId": "wm-installation",
-      "name": "WM Installation",
+      "name": "Washing Machine Installation",
       "basePrice": 349,
       "durationMinutes": 60,
-      "description": "Labour only."
+      "description": "Top load · Front load · Semi-auto — ₹349 each"
     },
     {
       "catalogId": "appliance-repair",
-      "packageId": "wm-drum-deep-cleaning",
-      "name": "WM Drum Deep Cleaning",
-      "basePrice": 399,
+      "packageId": "wm-uninstallation",
+      "name": "Washing Machine Uninstallation",
+      "basePrice": 349,
       "durationMinutes": 60,
-      "description": "Descaling + sanitise + deodorise."
+      "description": "Top load · Front load · Semi-auto — ₹349 each"
     },
     {
       "catalogId": "appliance-repair",
       "packageId": "fridge-checkup",
-      "name": "Fridge Checkup",
-      "basePrice": 179,
+      "name": "Refrigerator Check-Up",
+      "basePrice": 199,
       "durationMinutes": 45,
-      "description": "Technician visit + diagnosis."
-    },
-    {
-      "catalogId": "appliance-repair",
-      "packageId": "fridge-deep-cleaning",
-      "name": "Fridge Deep Cleaning",
-      "basePrice": 399,
-      "durationMinutes": 90,
-      "description": "Coil + interior sanitise + deodorise."
-    },
-    {
-      "catalogId": "appliance-repair",
-      "packageId": "fridge-gas-refill",
-      "name": "Fridge Gas Refill",
-      "basePrice": 1499,
-      "durationMinutes": 120,
-      "description": "Refrigerant top-up."
+      "description": "Single · Double · Side-by-side — ₹199 each"
     },
     {
       "catalogId": "appliance-repair",
       "packageId": "purifier-checkup",
-      "name": "Purifier Checkup",
-      "basePrice": 199,
-      "durationMinutes": 30,
-      "description": "Technician visit + inspection."
-    },
-    {
-      "catalogId": "appliance-repair",
-      "packageId": "purifier-service",
-      "name": "Purifier Service",
-      "basePrice": 549,
-      "durationMinutes": 60,
-      "description": "6-month full service."
-    },
-    {
-      "catalogId": "appliance-repair",
-      "packageId": "filter-replacement",
-      "name": "Filter Replacement",
+      "name": "Water Purifier Check-Up",
       "basePrice": 249,
+      "durationMinutes": 30,
+      "description": "Complete inspection & diagnosis — ₹249"
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "purifier-filter-checkup",
+      "name": "Water Purifier Filter Check-Up",
+      "basePrice": 249,
+      "durationMinutes": 30,
+      "description": "Filter & membrane inspection — ₹249"
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "purifier-regular-service",
+      "name": "Water Purifier Regular Service",
+      "basePrice": 999,
+      "durationMinutes": 90,
+      "description": "Full service with cleaning & performance testing"
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "purifier-installation",
+      "name": "Water Purifier Installation",
+      "basePrice": 399,
+      "durationMinutes": 60,
+      "description": "Unit installation with pipe & power connection"
+    },
+    {
+      "catalogId": "appliance-repair",
+      "packageId": "purifier-uninstallation",
+      "name": "Water Purifier Uninstallation",
+      "basePrice": 299,
       "durationMinutes": 45,
-      "description": "Labour only."
+      "description": "Safe removal with pipe & power disconnection"
     },
     {
       "catalogId": "appliance-repair",
       "packageId": "geyser-checkup",
-      "name": "Geyser Checkup",
+      "name": "Geyser Check-Up",
       "basePrice": 199,
       "durationMinutes": 30,
-      "description": "Technician visit + diagnosis."
+      "description": "Complete inspection & diagnosis — ₹199"
     },
     {
       "catalogId": "appliance-repair",
       "packageId": "geyser-servicing",
-      "name": "Geyser Servicing",
-      "basePrice": 299,
-      "durationMinutes": 60,
-      "description": "Scale removal + flush + safety check."
+      "name": "Geyser Service",
+      "basePrice": 499,
+      "durationMinutes": 90,
+      "description": "Up to 10L · 10–25L · Above 25L — from ₹499"
     },
     {
       "catalogId": "appliance-repair",
@@ -416,39 +416,15 @@
       "name": "Geyser Installation",
       "basePrice": 399,
       "durationMinutes": 60,
-      "description": "Labour only."
+      "description": "Installation with mounting & connections"
     },
     {
       "catalogId": "appliance-repair",
-      "packageId": "microwave-checkup",
-      "name": "Microwave Checkup",
-      "basePrice": 179,
-      "durationMinutes": 30,
-      "description": "Technician visit + diagnosis."
-    },
-    {
-      "catalogId": "appliance-repair",
-      "packageId": "microwave-deep-clean",
-      "name": "Microwave Deep Clean",
-      "basePrice": 249,
+      "packageId": "geyser-uninstallation",
+      "name": "Geyser Uninstallation",
+      "basePrice": 299,
       "durationMinutes": 45,
-      "description": "Degrease + sanitise interior."
-    },
-    {
-      "catalogId": "appliance-repair",
-      "packageId": "tv-checkup",
-      "name": "TV Checkup",
-      "basePrice": 199,
-      "durationMinutes": 45,
-      "description": "Technician visit + diagnosis."
-    },
-    {
-      "catalogId": "appliance-repair",
-      "packageId": "tv-wall-mounting",
-      "name": "TV Wall Mounting",
-      "basePrice": 449,
-      "durationMinutes": 60,
-      "description": "Labour only. Up to 65 inch."
+      "description": "Safe removal with pipe & power disconnection"
     }
   ]
 }

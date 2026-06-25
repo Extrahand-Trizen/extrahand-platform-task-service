@@ -160,12 +160,12 @@ export class ApplicationController {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    const { status, message } = req.body;
+    const { status, message, recurringVisitId, assignmentEscrowId } = req.body;
     const application = await ApplicationService.updateApplication(
       req.params.id,
       req.user!.profileId,
       req.user!.uid,
-      { status, message }
+      { status, message, recurringVisitId, assignmentEscrowId }
     );
 
     ApiResponse.success(res, application, 'Application updated successfully');

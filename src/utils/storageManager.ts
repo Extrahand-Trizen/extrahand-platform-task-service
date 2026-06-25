@@ -33,6 +33,37 @@ function getStorageTypeInternal(): string {
 
 // Initialize storage provider based on configuration
 let storageInstance: StorageInterface | null = null;
+let devLocalFallbackActive = false;
+
+function isRemoteStorageNetworkError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const err = error as { code?: string; message?: string };
+  const code = String(err.code || '').toUpperCase();
+  const message = String(err.message || '').toLowerCase();
+  return (
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'TIMEOUTERROR' ||
+    message.includes('timed out') ||
+    message.includes('econnrefused') ||
+    message.includes('enotfound') ||
+    message.includes('network')
+  );
+}
+
+function activateDevLocalStorageFallback(reason: string): StorageInterface {
+  devLocalFallbackActive = true;
+  storageInstance = new LocalFileStorage();
+  logger.warn(
+    `⚠️ Remote storage unavailable (${reason}). Using local disk for uploads in development.`,
+    {
+      hint:
+        'Set STORAGE_PROVIDER=local in .env, or fix MinIO/S3 connectivity. For physical devices, set LOCAL_STORAGE_URL to your LAN IP (e.g. http://192.168.x.x:4002/uploads).',
+    },
+  );
+  return storageInstance;
+}
 
 /**
  * Get or create storage instance
@@ -71,12 +102,28 @@ function getStorage(): StorageInterface {
     .then(isHealthy => {
       if (isHealthy) {
         logger.info(`✅ Storage provider (${storageType}) is healthy`);
+      } else if (
+        env.NODE_ENV === 'development' &&
+        storageType !== STORAGE_TYPES.LOCAL &&
+        !devLocalFallbackActive
+      ) {
+        activateDevLocalStorageFallback('health check failed');
       } else {
         logger.warn(`⚠️ Storage provider (${storageType}) health check failed`);
       }
     })
     .catch(error => {
-      logger.error(`❌ Storage provider (${storageType}) health check error:`, error);
+      if (
+        env.NODE_ENV === 'development' &&
+        storageType !== STORAGE_TYPES.LOCAL &&
+        !devLocalFallbackActive
+      ) {
+        activateDevLocalStorageFallback(
+          error instanceof Error ? error.message : 'health check error',
+        );
+      } else {
+        logger.error(`❌ Storage provider (${storageType}) health check error:`, error);
+      }
     });
 
   return storageInstance;
@@ -87,6 +134,7 @@ function getStorage(): StorageInterface {
  */
 function resetStorage(): void {
   storageInstance = null;
+  devLocalFallbackActive = false;
   logger.info('🔄 Storage instance reset');
 }
 
@@ -100,8 +148,31 @@ export async function uploadFile(
   folder: string = 'uploads',
   metadata: any = {}
 ): Promise<{ url: string; key: string; bucket?: string }> {
+  const storageType = getStorageTypeInternal();
   const storage = getStorage();
-  return await storage.uploadFile(fileBuffer, fileName, contentType, folder, metadata);
+
+  try {
+    return await storage.uploadFile(fileBuffer, fileName, contentType, folder, metadata);
+  } catch (error) {
+    if (
+      env.NODE_ENV === 'development' &&
+      storageType !== STORAGE_TYPES.LOCAL &&
+      !devLocalFallbackActive &&
+      isRemoteStorageNetworkError(error)
+    ) {
+      const localStorage = activateDevLocalStorageFallback(
+        error instanceof Error ? error.message : 'upload failed',
+      );
+      return await localStorage.uploadFile(
+        fileBuffer,
+        fileName,
+        contentType,
+        folder,
+        metadata,
+      );
+    }
+    throw error;
+  }
 }
 
 /**

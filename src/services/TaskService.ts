@@ -9,16 +9,14 @@ import {
 import logger from "../config/logger";
 import { TaskCategory, TaskStatus } from "../types";
 import { NotificationClient } from "./NotificationClient";
-import { UserMatchingService } from "./UserMatchingService";
-import { UserServiceClient } from "../clients/UserServiceClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
-import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import { buildScheduleVersion } from "../utils/workSchedule";
 import TaskApplication from "../models/TaskApplication";
-import { MainAdminNotificationClient } from "../clients/MainAdminNotificationClient";
-import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
+import TaskQuestion from "../models/TaskQuestion";
+import TaskFollow from "../models/TaskFollow";
+import TaskReport from "../models/TaskReport";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -26,11 +24,12 @@ import { getRedisClient, REDIS_TTLS } from '../config/redis';
 import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
-import {
-  excludeTaskPoster,
-  resolvePosterUid,
-  withHelperAlertData,
-} from '../utils/helperNotificationRecipients';
+import { RecurringVisitService } from './RecurringVisitService';
+import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
+import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
+import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
+import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -85,6 +84,12 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "appliance-repair": "repair",
     "pest-control": "repair",
     "car-washing": "cleaning",
+    "roadside-assistance": "repair",
+    maid: "cleaning",
+    "personal-assistance": "other",
+    "Roadside Assistance": "repair",
+    Maid: "cleaning",
+    "Personal Assistance": "other",
     handyperson: "repair",
     "furniture-assembly": "assembly",
     "security-patrol": "other",
@@ -156,7 +161,7 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
 
   // Default fallback
   logger.warn(
-    `⚠️ Unknown category: "${frontendCategory}", defaulting to "other"`
+    `âš ï¸ Unknown category: "${frontendCategory}", defaulting to "other"`
   );
   return "other";
 }
@@ -215,9 +220,9 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId estimatedDuration scheduledTimeStart scheduledTimeEnd';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags';
 
-/** Post & Choose only — Book Now tasks are assigned via ops, not helper browse. */
+/** Post & Choose only â€” Book Now tasks are assigned via ops, not helper browse. */
 function buildMarketplaceBrowseClause(): Record<string, unknown> {
   return {
     $and: [
@@ -234,6 +239,35 @@ function buildMarketplaceBrowseClause(): Record<string, unknown> {
           { bookingOrderId: '' },
         ],
       },
+    ],
+  };
+}
+
+/** Browse lists show parent plans only — not per-visit child tasks. */
+function buildMarketplaceParentOnlyClause(): Record<string, unknown> {
+  return {
+    $or: [{ parentTaskId: { $exists: false } }, { parentTaskId: null }],
+  };
+}
+
+/** Geospatial filter for nearby browse ($geoWithin works with createdAt sort; $near does not). */
+function buildNearbyLocationClause(
+  lng: number,
+  lat: number,
+  radiusKm: number,
+): Record<string, unknown> {
+  const radiusRadians = radiusKm / 6378.1;
+  return {
+    $or: [
+      {
+        'location.coordinates': {
+          $geoWithin: {
+            $centerSphere: [[lng, lat], radiusRadians],
+          },
+        },
+      },
+      { 'location.coordinates.0': { $exists: false } },
+      { location: { $exists: false } },
     ],
   };
 }
@@ -362,6 +396,7 @@ export class TaskService {
     } else {
       // Book Now tasks are not marketplace listings — hide from helper browse/discover.
       andClauses.push(buildMarketplaceBrowseClause());
+      andClauses.push(buildMarketplaceParentOnlyClause());
     }
 
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
@@ -449,7 +484,7 @@ export class TaskService {
         // Remote tasks: tasks without coordinates/address
         andClauses.push({ $or: [{ location: { $exists: false } }, { 'location.coordinates.0': { $exists: false } }, { 'location.address': { $exists: false } }] });
       }
-      // remotely === false: in-person filter — don't strictly exclude tasks without coordinates
+      // remotely === false: in-person filter â€” don't strictly exclude tasks without coordinates
       // to avoid hiding packers-movers and similar category-specific tasks
     }
 
@@ -570,33 +605,15 @@ export class TaskService {
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
-    const radiusMeters = radiusKm * 1000;
 
     const andClauses: any[] = [];
 
-    // Book Now tasks are ops-assigned — exclude from helper browse/nearby.
+    // Book Now tasks are ops-assigned â€” exclude from helper browse/nearby.
     andClauses.push(buildMarketplaceBrowseClause());
+    andClauses.push(buildMarketplaceParentOnlyClause());
 
     // Include nearby tasks (with coordinates) OR remote/packers-movers tasks (without coordinates)
-    // This ensures tasks like packers-movers that don't have a fixed location are always shown
-    andClauses.push({
-      $or: [
-        {
-          "location.coordinates": {
-            $near: {
-              $geometry: {
-                type: "Point",
-                coordinates: [lng, lat],
-              },
-              $maxDistance: radiusMeters,
-            },
-          },
-        },
-        // Tasks without coordinates (remote tasks, packers-movers, etc.)
-        { "location.coordinates.0": { $exists: false } },
-        { location: { $exists: false } },
-      ],
-    });
+    andClauses.push(buildNearbyLocationClause(lng, lat, radiusKm));
 
     // Status filter: support single value or array
     if (status) {
@@ -662,7 +679,7 @@ export class TaskService {
           ],
         });
       }
-      // remotely === false: in-person filter — but still include packers-movers (no coordinates)
+      // remotely === false: in-person filter â€” but still include packers-movers (no coordinates)
       // We don't add a strict coordinates-required filter to avoid hiding packers-movers
     }
 
@@ -690,21 +707,7 @@ export class TaskService {
       .sort(sortObj)
       .lean();
 
-    // NOTE: countDocuments with $near can fail on some MongoDB versions/tiers.
-    // Use $geoWithin + $centerSphere for count instead.
-    const countAndClauses = andClauses.map((clause) => {
-      if (!clause["location.coordinates"]?.$near) return clause;
-      return {
-        "location.coordinates": {
-          $geoWithin: {
-            $centerSphere: [[lng, lat], radiusKm / 6378.1], // Earth radius in km
-          },
-        },
-      };
-    });
-    const total = await Task.countDocuments({
-      $and: countAndClauses,
-    });
+    const total = await Task.countDocuments(query);
 
     return {
       tasks: tasks as unknown as ITask[],
@@ -738,7 +741,10 @@ export class TaskService {
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
 
-    const query: any = { requesterId: profileId }; // ✅ ObjectId reference
+    const query: any = {
+      requesterId: profileId,
+      $or: [{ parentTaskId: { $exists: false } }, { parentTaskId: null }],
+    };
     if (status) query.status = status;
 
     const tasks = await Task.find(query)
@@ -781,31 +787,91 @@ export class TaskService {
    */
   static async getTaskById(taskId: string): Promise<ITask> {
     const cacheKey = `task:detail:${taskId}`;
+    let cachedTask: ITask | null = null;
+
     try {
       const redis = getRedisClient();
       if (redis) {
         const cached = await redis.get(cacheKey);
         if (cached) {
-          const parsed = JSON.parse(cached) as ITask;
+          cachedTask = JSON.parse(cached) as ITask;
           logger.debug("Task detail cache HIT", { taskId });
-          return parsed;
         }
       }
     } catch (err) {
       logger.warn("Task detail cache read error", { taskId, error: err instanceof Error ? err.message : String(err) });
     }
 
-    const task = await Task.findById(taskId).lean();
+    if (cachedTask) {
+      const stillExists = await Task.findById(taskId).select('_id').lean();
+      if (!stillExists) {
+        TaskService.invalidateTaskCache(taskId);
+        cachedTask = null;
+      }
+    }
+
+    let task =
+      cachedTask ??
+      ((await Task.findById(taskId).lean()) as unknown as ITask | null);
+
+    if (!task) {
+      const recovered = await RecurringVisitService.resolveDeletedRecurringChildTaskAccess(
+        taskId,
+      );
+      if (recovered) {
+        TaskService.invalidateTaskCache(taskId);
+        task = recovered as unknown as ITask;
+      }
+    }
+
     if (!task) {
       throw new NotFoundError("Task not found");
     }
+
+    if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
+      const planDoc = await Task.findById(taskId);
+      if (planDoc) {
+        void RecurringVisitService.sanitizeOrphanedScheduleChildReferences(planDoc);
+      }
+      void RecurringVisitService.scheduleReconcilePlanState(taskId);
+
+      const taskRecord = task as unknown as Record<string, unknown>;
+      const embeddedSchedule = Array.isArray(task.schedule) ? task.schedule : [];
+      const hasEmbeddedVisitRows = embeddedSchedule.some(
+        (entry) =>
+          entry &&
+          typeof entry === 'object' &&
+          typeof (entry as { visitId?: string }).visitId === 'string',
+      );
+      if (!hasEmbeddedVisitRows) {
+        const visits = await getVisitsForPlan(task);
+        if (visits.length > 0) {
+          taskRecord.schedule = visits;
+        }
+      }
+    }
+
     const result = task as unknown as ITask;
+    const resolvedTaskId = String((result as unknown as { _id?: unknown })._id ?? taskId);
 
     try {
       const redis = getRedisClient();
       if (redis) {
-        await redis.setex(cacheKey, REDIS_TTLS.TASK_DETAIL_SECONDS, JSON.stringify(result));
-        logger.debug("Task detail cache SET", { taskId });
+        const payload = JSON.stringify(result);
+        if (resolvedTaskId === taskId) {
+          await redis.setex(cacheKey, REDIS_TTLS.TASK_DETAIL_SECONDS, payload);
+          logger.debug("Task detail cache SET", { taskId });
+        } else {
+          await redis.setex(
+            `task:detail:${resolvedTaskId}`,
+            REDIS_TTLS.TASK_DETAIL_SECONDS,
+            payload,
+          );
+          logger.debug("Task detail cache SET for resolved recurring child", {
+            requestedTaskId: taskId,
+            resolvedTaskId,
+          });
+        }
       }
     } catch (err) {
       logger.warn("Task detail cache write error", { taskId, error: err instanceof Error ? err.message : String(err) });
@@ -824,6 +890,18 @@ export class TaskService {
     });
   }
 
+  /** Invalidate cached open-marketplace list pages so new posts appear in browse immediately. */
+  static invalidateTaskListCache(): void {
+    const redis = getRedisClient();
+    if (!redis) return;
+    const keys = [1, 2, 3].map((page) => `tasks:list:open:marketplace:v2:p${page}:20`);
+    Promise.all(keys.map((key) => redis.del(key))).catch((err: unknown) => {
+      logger.warn("Task list cache invalidate error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
   /**
    * Create a new task
    */
@@ -832,7 +910,7 @@ export class TaskService {
     taskData: any,
     uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
-    // Delivery/pickup tasks have system-generated titles and descriptions — skip meaningful-text checks
+    // Delivery/pickup tasks have system-generated titles and descriptions â€” skip meaningful-text checks
     const isDeliveryPickup = [taskData.category, taskData.categorySlug].some((c: string) =>
       String(c || '').toLowerCase().includes('delivery') ||
       String(c || '').toLowerCase().includes('pickup') ||
@@ -882,10 +960,10 @@ export class TaskService {
     const categoryLabel = taskData.categoryLabel;
 
     logger.debug(
-      `🔍 Category mapping: "${frontendCategory}" → "${mappedCategory}"`
+      `ðŸ” Category mapping: "${frontendCategory}" â†’ "${mappedCategory}"`
     );
 
-    // ❌ Removed requesterName handling - will be populated from Profile when needed
+    // âŒ Removed requesterName handling - will be populated from Profile when needed
 
     // Handle budget - ensure it's an object matching the schema
     const budget = {
@@ -930,13 +1008,11 @@ export class TaskService {
       isNegotiable: taskData.isNegotiable || false,
       urgency: taskData.urgency || "medium",
       priority: taskData.priority || "normal",
-      requesterId: profileId, // ✅ ObjectId reference
-      // ❌ Removed requesterName - API Gateway will enrich with Profile data
+      requesterId: profileId, // âœ… ObjectId reference
+      // âŒ Removed requesterName - API Gateway will enrich with Profile data
       estimatedDuration: taskData.estimatedDuration || taskData.duration,
       scheduledDate: taskData.scheduledDate
-        ? typeof taskData.scheduledDate === "string"
-          ? new Date(taskData.scheduledDate)
-          : taskData.scheduledDate
+        ? parseIncomingCalendarDate(taskData.scheduledDate)
         : undefined,
       scheduledTimeStart: taskData.scheduledTimeStart,
       scheduledTimeEnd: taskData.scheduledTimeEnd,
@@ -974,7 +1050,50 @@ export class TaskService {
     });
 
     const recurring = taskData.recurring;
+    let createdVisitMeta: ReturnType<typeof RecurringVisitService.tryDecodeMetaFromTaskData> = null;
+    let createdVisitStartDate: Date | undefined;
+    let createdVisitEndDate: Date | undefined;
+
     if (recurring?.enabled) {
+      const visitMeta = RecurringVisitService.tryDecodeMetaFromTaskData(
+        taskData as Record<string, unknown>,
+      );
+
+      if (visitMeta) {
+        createdVisitMeta = visitMeta;
+        RecurringVisitService.applyPlanOnCreate(
+          taskPayload as Record<string, unknown>,
+          taskData as Record<string, unknown>,
+          visitMeta,
+        );
+
+        const rawStart = recurring.startDate || taskData.scheduledDate;
+        const startDate = rawStart
+          ? parseIncomingCalendarDate(rawStart)
+          : (taskPayload.scheduledDate as Date);
+        const rawEnd = recurring.endDate;
+        const endDate = rawEnd
+          ? parseIncomingCalendarDate(rawEnd)
+          : visitMeta.endType === 'end_on_date'
+            ? (taskPayload.recurringPlan as { endDate?: Date })?.endDate
+            : undefined;
+
+        taskPayload.recurring = {
+          enabled: true,
+          frequency:
+            visitMeta.pattern === 'daily'
+              ? 'daily'
+              : visitMeta.pattern === 'weekly' || visitMeta.pattern === 'biweekly'
+                ? 'weekly'
+                : 'custom',
+          startDate,
+          endDate,
+          requireApproval: recurring.requireApproval !== false,
+          minCommitment: recurring.minCommitment || undefined,
+        };
+        createdVisitStartDate = startDate;
+        createdVisitEndDate = endDate;
+      } else {
       const frequency = (recurring.frequency || "daily") as
         | "daily"
         | "weekly"
@@ -1040,6 +1159,7 @@ export class TaskService {
       }));
 
       taskPayload.scheduledDate = startDate;
+      }
     }
 
     // Only include location if it was provided
@@ -1047,8 +1167,8 @@ export class TaskService {
       taskPayload.location = location;
     }
 
-    // ── Packers & Movers specific fields ──────────────────────────────────────
-    // Only store when category is packers-movers — no impact on other categories
+    // â”€â”€ Packers & Movers specific fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Only store when category is packers-movers â€” no impact on other categories
     if (mappedCategory === 'packers-movers' && taskData.packersMoversDetails) {
       const pm = taskData.packersMoversDetails;
       taskPayload.packersMoversDetails = {
@@ -1073,7 +1193,7 @@ export class TaskService {
       };
     }
 
-    // ── Delivery / Pickup specific fields ──────────────────────────────────────
+    // â”€â”€ Delivery / Pickup specific fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (mappedCategory === 'delivery' && taskData.subcategory) {
       const sub = String(taskData.subcategory).toLowerCase();
 
@@ -1131,911 +1251,28 @@ export class TaskService {
 
     const task = await Task.create(taskPayload);
 
+    TaskService.invalidateTaskListCache();
+
     logger.info(`✅ Task created successfully: ${task._id}`);
 
-    // Verify the created task has the correct requesterId
-    logger.info(`[TaskService.createTask] Task created with requesterId`, {
-      taskId: task._id,
-      requesterId: task.requesterId,
-      requesterIdType: typeof task.requesterId,
-      isObjectId: task.requesterId instanceof mongoose.Types.ObjectId
+    if (createdVisitMeta && createdVisitStartDate) {
+      await RecurringVisitService.materializeInitialVisitBuffer(
+        task as unknown as ITask,
+        createdVisitMeta,
+        createdVisitStartDate,
+        createdVisitEndDate,
+      );
+    }
+
+    const taskRecord = task.toObject() as ITask;
+    schedulePostCreateNotifications(taskRecord, {
+      uid,
+      mappedCategory,
+      categorySlug,
+      frontendCategory,
     });
 
-    // Check if the requester profile actually exists
-    try {
-      const ProfilesCol = mongoose.connection.collection("profiles");
-      const requesterProfile = await ProfilesCol.findOne({ _id: task.requesterId });
-
-      logger.info(`[TaskService.createTask] Requester profile lookup`, {
-        taskId: task._id,
-        requesterId: task.requesterId.toString(),
-        profileExists: !!requesterProfile,
-        profileName: requesterProfile?.name || requesterProfile?.fullName || 'NOT FOUND'
-      });
-    } catch (error) {
-      logger.warn(`[TaskService.createTask] Could not verify requester profile`, {
-        taskId: task._id,
-        requesterId: task.requesterId.toString(),
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-
-    let requesterProfile: Record<string, any> | null = null;
-    try {
-      const Profile = mongoose.connection.collection("profiles");
-      const requesterId = task.requesterId instanceof mongoose.Types.ObjectId
-        ? task.requesterId
-        : new mongoose.Types.ObjectId(task.requesterId);
-      requesterProfile = await Profile.findOne({ _id: requesterId });
-    } catch (profileLookupError) {
-      logger.warn("[TaskService.createTask] Requester profile lookup failed", {
-        taskId: task._id,
-        requesterId: task.requesterId?.toString?.() ?? task.requesterId,
-        error:
-          profileLookupError instanceof Error
-            ? profileLookupError.message
-            : String(profileLookupError),
-      });
-    }
-
-    try {
-      logger.info("[TaskPostedInAppNotification][task-service] Task created — triggering ops in-app notification", {
-        service: "extrahand-platform-task-service",
-        taskId: String(task._id),
-        taskTitle: task.title,
-        budget: task.budget?.amount,
-      });
-
-      await MainAdminNotificationClient.send({
-        type: "task_posted",
-        taskId: String(task._id),
-        taskTitle: task.title,
-        userId: requesterProfile?.uid,
-        userName: requesterProfile?.name || requesterProfile?.fullName,
-        userEmail: requesterProfile?.email,
-        userPhone: requesterProfile?.phone,
-        occurredAt: new Date().toISOString(),
-      });
-
-      logger.info("[TaskPostedInAppNotification][task-service] Ops in-app notification flow completed for task", {
-        service: "extrahand-platform-task-service",
-        taskId: String(task._id),
-        taskTitle: task.title,
-      });
-    } catch (adminNotifyError) {
-      logger.error("[TaskPostedInAppNotification][task-service] Ops in-app notification flow failed for task", {
-        service: "extrahand-platform-task-service",
-        taskId: String(task._id),
-        taskTitle: task.title,
-        error:
-          adminNotifyError instanceof Error
-            ? adminNotifyError.message
-            : String(adminNotifyError),
-      });
-    }
-
-    // Email: task posted confirmation → requester
-    try {
-      if (requesterProfile?.email) {
-        logger.debug(`[TaskService.createTask] Sending task_posted_confirmation email to ${requesterProfile.email}`);
-        const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-        const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-          requesterProfile.uid,
-          'taskUpdates'
-        );
-
-        if (emailEnabled) {
-          await EmailServiceClient.sendTaskPostedConfirmation(requesterProfile.email, {
-            requesterName: requesterProfile.name || requesterProfile.fullName || 'There',
-            taskTitle: task.title,
-            taskUrl,
-            budget: task.budget?.amount,
-            category: mappedCategory,
-            location: task.location?.city || task.location?.address,
-            userId: requesterProfile.uid,
-          });
-          logger.info(`[TaskService.createTask] task_posted_confirmation email sent successfully`, {
-            taskId: task._id,
-            to: requesterProfile.email,
-            userId: requesterProfile.uid
-          });
-        } else {
-          logger.info(`[TaskService.createTask] task_posted_confirmation email skipped - preferences disabled`, {
-            taskId: task._id,
-            userId: requesterProfile.uid,
-            category: 'taskUpdates'
-          });
-        }
-
-        // 📬 In-App Notification: task posted confirmation → requester
-        try {
-          await InAppNotificationClient.send({
-            userId: requesterProfile.uid,
-            title: '✅ Task Posted Successfully',
-            body: `Your task "${task.title}" is now visible to taskers`,
-            category: 'taskUpdates',
-            type: 'success',
-            data: {
-              taskId: task._id.toString(),
-              taskUrl,
-              budget: task.budget?.amount
-            }
-          });
-          logger.info(`[TaskService.createTask] In-app notification sent to requester`, {
-            taskId: task._id,
-            userId: requesterProfile.uid
-          });
-        } catch (inAppError) {
-          logger.warn('Failed to send in-app notification to requester', {
-            taskId: task._id,
-            userId: requesterProfile.uid,
-            error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
-          });
-        }
-      } else {
-        logger.debug(`[TaskService.createTask] No email found for requester profile`, {
-          requesterId: task.requesterId
-        });
-      }
-    } catch (error) {
-      logger.error("Error sending task_posted_confirmation email", {
-        taskId: task._id,
-        error: error instanceof Error ? error.message : "Unknown error",
-        stack: error instanceof Error ? error.stack : undefined,
-      });
-    }
-
-    const posterUid = resolvePosterUid(uid, requesterProfile);
-
-    const skillMatchCategories = Array.from(
-      new Set(
-        [
-          task.subcategory,
-          task.categorySlug,
-          categorySlug,
-          task.categoryLabel,
-          task.category,
-          frontendCategory,
-          mappedCategory,
-        ].filter(
-          (value): value is string => typeof value === 'string' && value.trim().length > 0,
-        ),
-      ),
-    );
-
-    const skillMatchCategory = skillMatchCategories[0];
-
-    let skillMatchedTaskers: string[] = [];
-    let nearbyTaskers: string[] = [];
-
-    if (posterUid) {
-      try {
-        if (skillMatchCategories.length > 0) {
-          const skillMatchedUsersRaw = await UserServiceClient.matchSkillCategories(
-            skillMatchCategories,
-          );
-          skillMatchedTaskers = excludeTaskPoster(skillMatchedUsersRaw, posterUid);
-        }
-
-        const coords: [number, number] | undefined = task?.location?.coordinates;
-        const hasValidCoords =
-          Array.isArray(coords) &&
-          coords.length === 2 &&
-          typeof coords[0] === 'number' &&
-          typeof coords[1] === 'number';
-
-        if (hasValidCoords) {
-          nearbyTaskers = await UserServiceClient.matchNearbyTaskers({
-            longitude: coords[0],
-            latitude: coords[1],
-            excludeUids: [posterUid],
-          });
-
-          // Fallback to direct DB geo match if user-service is unreachable.
-          if (nearbyTaskers.length === 0) {
-            nearbyTaskers = await UserMatchingService.findNearbyTaskers(
-              task,
-              undefined,
-              [posterUid],
-            );
-          }
-        } else {
-          logger.warn('[TaskService.createTask] Task missing coordinates for nearby alerts', {
-            taskId: task._id,
-            coordinates: coords,
-          });
-        }
-
-        logger.info('[TaskService.createTask] Helper discovery recipient lookup', {
-          taskId: task._id,
-          skillMatchCategories,
-          skillMatchedCount: skillMatchedTaskers.length,
-          nearbyCount: nearbyTaskers.length,
-          hasCoordinates: hasValidCoords,
-        });
-      } catch (matchErr) {
-        logger.warn('[TaskService.createTask] Helper alert recipient lookup failed', {
-          taskId: task._id,
-          error: matchErr instanceof Error ? matchErr.message : 'Unknown error',
-        });
-      }
-    }
-
-    const nearbyTaskerSet = new Set(nearbyTaskers);
-    const skillMatchedSet = new Set(skillMatchedTaskers);
-
-    // STEP 1: Emit TASK_CREATED_RECOMMENDED notification
-    // Skill-matched helpers who are NOT nearby (nearby helpers get TASK_NEARBY instead).
-    if (posterUid) {
-      try {
-        const recommendedTaskers = skillMatchedTaskers.filter(
-          (matchedUid) => !nearbyTaskerSet.has(matchedUid),
-        );
-
-        logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Matched users by category only', {
-          taskId: task._id,
-          skillMatchCategory,
-          category: mappedCategory,
-          matchedCount: recommendedTaskers.length,
-          matchedUsers: recommendedTaskers,
-          excludedRequesterUid: posterUid,
-        });
-
-        if (recommendedTaskers.length > 0) {
-          const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-          const taskRoute = `/tasks/${task._id}`;
-
-          const recommendedLocationLabel =
-            task.location?.city ||
-            task.location?.address ||
-            'your area';
-
-          await NotificationClient.sendBatch(
-            {
-              eventKey: 'TASK_CREATED_RECOMMENDED',
-              category: 'recommendedTaskAlerts',
-              actorId: posterUid,
-              entity: { type: 'task', id: task._id.toString() },
-              title: `New skill matched nearby: ${task.title}`,
-              body: `A ${skillMatchCategory} task has been posted near ${recommendedLocationLabel} and matches your skills.`,
-              data: withHelperAlertData({
-                eventKey: 'TASK_CREATED_RECOMMENDED',
-                entityType: 'task',
-                skillMatch: true,
-                taskId: task._id.toString(),
-                category: mappedCategory,
-                skillMatchCategory,
-                budget: task.budget.amount,
-                locationLabel: recommendedLocationLabel,
-                taskUrl,
-                route: taskRoute,
-                actionUrl: taskRoute,
-              }, posterUid),
-            },
-            recommendedTaskers
-          );
-
-          // In-app notification must be delivered directly to all matched UIDs.
-          for (const matchedUid of recommendedTaskers) {
-            try {
-              await InAppNotificationClient.send({
-                userId: matchedUid,
-                title: '🎯 New Skill Matched Nearby',
-                body: `A new "${skillMatchCategory}" task "${task.title}" has been posted near ${recommendedLocationLabel}`,
-                category: 'recommendedTaskAlerts',
-                type: 'info',
-                data: {
-                  taskId: task._id.toString(),
-                  taskUrl,
-                  route: taskRoute,
-                  actionUrl: taskRoute,
-                  category: mappedCategory,
-                  skillMatchCategory,
-                  budget: task.budget?.amount,
-                  locationLabel: recommendedLocationLabel,
-                }
-              });
-              logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - In-app sent (uid-level)', {
-                taskId: task._id,
-                userId: matchedUid,
-                category: mappedCategory,
-                route: taskRoute,
-              });
-            } catch (inAppError) {
-              logger.warn('[TaskService.createTask] CATEGORY_SKILL_ALERTS - In-app failed (uid-level)', {
-                taskId: task._id,
-                userId: matchedUid,
-                error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
-              });
-            }
-          }
-
-          // Email: task_created_recommended → matched taskers
-          try {
-            const Profile = mongoose.connection.collection('profiles');
-
-            // ✅ FIX: query profiles by uid (string), not _id (ObjectId)
-            const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
-            const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
-
-            logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Profile lookup for email', {
-              taskId: task._id,
-              matchedUidCount: recommendedTaskers.length,
-              profileCount: recommendedProfiles.length,
-            });
-
-            for (const p of recommendedProfiles) {
-              if (!p?.uid || p.uid === posterUid) {
-                logger.debug('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Skipping invalid/owner recipient', {
-                  taskId: task._id,
-                  uid: p?.uid,
-                });
-                continue;
-              }
-
-              // Email for category-matched recipient (if email exists and preference enabled).
-              if (p.email) {
-                try {
-                  logger.debug(`[TaskService.createTask] Sending task_created_recommended email to ${p.email}`);
-                  const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                    p.uid,
-                    'recommendedTaskAlerts'
-                  );
-
-                  if (emailEnabled) {
-                    await EmailServiceClient.sendTaskCreatedRecommended(p.email, {
-                      taskerName: p.name || p.fullName || 'There',
-                      taskTitle: task.title,
-                      skillCategory: mappedCategory,
-                      taskDescription: task.description?.substring(0, 200),
-                      budget: task.budget?.amount,
-                      location: task.location?.city || task.location?.address,
-                      scheduledDate: scheduledDateStr,
-                      category: mappedCategory,
-                      taskUrl,
-                      userId: p.uid,
-                    });
-                    logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Email sent', {
-                      taskId: task._id,
-                      to: p.email,
-                      userId: p.uid,
-                      category: mappedCategory,
-                    });
-                  } else {
-                    logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Email skipped by preferences', {
-                      taskId: task._id,
-                      userId: p.uid,
-                      category: 'recommendedTaskAlerts',
-                    });
-                  }
-                } catch (err) {
-                  logger.error('Error sending task_created_recommended email to user', {
-                    taskId: task._id,
-                    email: p.email,
-                    userId: p.uid,
-                    error: err instanceof Error ? err.message : 'Unknown error',
-                    stack: err instanceof Error ? err.stack : undefined
-                  });
-                }
-              } else {
-                logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Email skipped (missing email)', {
-                  taskId: task._id,
-                  userId: p.uid,
-                });
-              }
-            }
-          } catch (emailErr) {
-            logger.error('Error sending task_created_recommended emails', {
-              taskId: task._id,
-              error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
-              stack: emailErr instanceof Error ? emailErr.stack : undefined
-            });
-          }
-        }
-      } catch (error) {
-        logger.error('Error sending TASK_CREATED_RECOMMENDED notification', {
-          taskId: task._id,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-      }
-
-      // STEP 2: Emit TASK_CREATED_KEYWORD notification
-      // Find users who have saved keywords matching this task (ONLY matching category, not title/description)
-      try {
-        // Extract search keywords from category plus the user-facing title/label.
-        // This lets keyword alerts fire even when the skill category does not match.
-        const taskKeywords: string[] = [
-          task.category?.toLowerCase(),
-          task.subcategory?.toLowerCase(),
-          task.categoryLabel?.toLowerCase(),
-          task.title?.toLowerCase(),
-        ]
-          .filter((word): word is string => typeof word === 'string' && word.length > 0)
-          .flatMap((word) => [
-            word,
-            word.replace(/\//g, ' '),
-            word.replace(/\s+/g, ' ').trim(),
-          ])
-          .map((word) => word.toLowerCase().trim())
-          .filter((word, index, arr) => word.length > 0 && arr.indexOf(word) === index);
-
-        logger.info(`[TaskService.createTask] KEYWORD ALERTS - Extracted keywords`, {
-          taskId: task._id,
-          keywords: taskKeywords,
-          keywordCount: taskKeywords.length,
-          taskTitle: task.title.substring(0, 50),
-          category: task.category,
-          categoryLabel: task.categoryLabel
-        });
-
-        if (taskKeywords.length > 0) {
-          logger.info(`[TaskService.createTask] KEYWORD ALERTS - Querying for matched users`, {
-            taskId: task._id,
-            keywords: taskKeywords
-          });
-
-          const keywordMatchedUsersRaw = await UserServiceClient.matchUsers('keywords', {
-            keywords: taskKeywords,
-          });
-          const keywordMatchedUsers = excludeTaskPoster(keywordMatchedUsersRaw, posterUid);
-
-          logger.info('[TaskService.createTask] KEYWORD ALERTS - Matched users by keyword only', {
-            taskId: task._id,
-            keywords: taskKeywords,
-            matchedCount: keywordMatchedUsers.length,
-            matchedUsers: keywordMatchedUsers,
-            excludedRequesterUid: posterUid,
-          });
-
-          logger.info(`[TaskService.createTask] KEYWORD ALERTS - User matching result`, {
-            taskId: task._id,
-            matchedUserCount: keywordMatchedUsers.length,
-            matchedUsers: keywordMatchedUsers,
-            keywords: taskKeywords
-          });
-
-          if (keywordMatchedUsers.length > 0) {
-            await NotificationClient.sendBatch(
-              {
-                eventKey: 'TASK_CREATED_KEYWORD',
-                category: 'keywordTaskAlerts',
-                actorId: posterUid,
-                entity: { type: 'task', id: task._id.toString() },
-                title: `Alert: Task matches your saved keywords`,
-                body: `A new task has been posted with keywords you're interested in: ${taskKeywords.slice(0, 2).join(', ')}`,
-                data: {
-                  taskId: task._id.toString(),
-                  matchedKeywords: taskKeywords.slice(0, 5),
-                  posterUid,
-                  actorId: posterUid,
-                },
-              },
-              keywordMatchedUsers
-            );
-            // Email: task_created_keyword → keyword-matched users
-            try {
-              const Profile = mongoose.connection.collection('profiles');
-              const keywordProfiles = await Profile.find({ uid: { $in: keywordMatchedUsers } }).toArray();
-
-              logger.info(`[TaskService.createTask] KEYWORD ALERTS - Fetched profiles`, {
-                taskId: task._id,
-                fetchedProfileCount: keywordProfiles.length,
-                profilesWithEmail: keywordProfiles.filter(p => p.email).length
-              });
-
-              const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-              const taskRoute = `/tasks/${task._id}`;
-              const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
-              const matchedKeywordStr = taskKeywords.slice(0, 2).join(', ');
-
-              for (const p of keywordProfiles) {
-                // Skip the task creator - they should not receive alerts for their own tasks
-                if (p.uid === posterUid) {
-                  logger.info(`[TaskService.createTask] KEYWORD ALERTS - Skipping task creator`, {
-                    taskId: task._id,
-                    creatorId: posterUid
-                  });
-                  continue;
-                }
-
-                logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Processing profile`, {
-                  taskId: task._id,
-                  uid: p.uid,
-                  name: p.name,
-                  hasEmail: !!p.email,
-                  email: p.email?.substring(0, 10) + '***' // Mask email for logs
-                });
-
-                if (p.email) {
-                  try {
-                    logger.debug(`[TaskService.createTask] KEYWORD ALERTS - Checking email preference`);
-                    // Check if user has enabled keyword alert emails
-                    const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                      p.uid,
-                      'keywordTaskAlerts'
-                    );
-
-                    logger.info(`[TaskService.createTask] KEYWORD ALERTS - Email preference check result`, {
-                      taskId: task._id,
-                      userId: p.uid,
-                      emailEnabled,
-                      email: p.email?.substring(0, 10) + '***'
-                    });
-
-                    if (emailEnabled) {
-                      logger.info(`[TaskService.createTask] KEYWORD ALERTS - Sending email`);
-                      await EmailServiceClient.sendTaskCreatedKeyword(p.email, {
-                        userName: p.name || p.fullName || 'There',
-                        taskTitle: task.title,
-                        matchedKeyword: matchedKeywordStr,
-                        taskDescription: task.description?.substring(0, 200),
-                        budget: task.budget?.amount,
-                        location: task.location?.city || task.location?.address,
-                        scheduledDate: scheduledDateStr,
-                        taskUrl,
-                        userId: p.uid,
-                      });
-                      logger.info(`[TaskService.createTask] KEYWORD ALERTS - Email sent successfully`, {
-                        taskId: task._id,
-                        to: p.email?.substring(0, 10) + '***',
-                        userId: p.uid,
-                        keywords: taskKeywords.slice(0, 3)
-                      });
-
-                      // 📬 In-App Notification: keyword alert → user
-                      try {
-                        await InAppNotificationClient.send({
-                          userId: p.uid,
-                          title: '🔔 Task Found: ' + matchedKeywordStr,
-                          body: `A new task "${task.title}" matches your keywords`,
-                          category: 'keywordTaskAlerts',
-                          type: 'info',
-                          data: {
-                            taskId: task._id.toString(),
-                            taskUrl,
-                            route: taskRoute,
-                            actionUrl: taskRoute,
-                            keywords: taskKeywords,
-                            matchedKeyword: matchedKeywordStr,
-                            budget: task.budget?.amount
-                          }
-                        });
-                        logger.info(`[TaskService.createTask] KEYWORD ALERTS - In-app notification sent`, {
-                          taskId: task._id,
-                          userId: p.uid,
-                          keywords: taskKeywords.slice(0, 3)
-                        });
-                      } catch (inAppError) {
-                        logger.warn('Failed to send in-app notification for keyword alert', {
-                          taskId: task._id,
-                          userId: p.uid,
-                          error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
-                        });
-                      }
-                    } else {
-                      logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Email notifications disabled for user`, {
-                        taskId: task._id,
-                        userId: p.uid,
-                        category: 'keywordTaskAlerts'
-                      });
-                    }
-                  } catch (err) {
-                    logger.error('Error sending task_created_keyword email to user', {
-                      taskId: task._id,
-                      email: p.email?.substring(0, 10) + '***',
-                      userId: p.uid,
-                      error: err instanceof Error ? err.message : 'Unknown error',
-                      stack: err instanceof Error ? err.stack : undefined
-                    });
-                  }
-                } else {
-                  logger.warn(`[TaskService.createTask] KEYWORD ALERTS - Profile has no email`, {
-                    taskId: task._id,
-                    userId: p.uid,
-                    name: p.name
-                  });
-                }
-              }
-            } catch (emailErr) {
-              logger.error('Error sending task_created_keyword emails', {
-                taskId: task._id,
-                error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
-                stack: emailErr instanceof Error ? emailErr.stack : undefined
-              });
-            }
-          } else {
-            logger.warn(`[TaskService.createTask] KEYWORD ALERTS - No matched users found`, {
-              taskId: task._id,
-              keywords: taskKeywords
-            });
-          }
-        } else {
-          logger.warn(`[TaskService.createTask] KEYWORD ALERTS - No keywords extracted`, {
-            taskId: task._id,
-            taskTitle: task.title
-          });
-        }
-      } catch (error) {
-        logger.error('Error sending TASK_CREATED_KEYWORD notification', {
-          taskId: task._id,
-          error: error instanceof Error ? error.message : 'Unknown error',
-          stack: error instanceof Error ? error.stack : undefined
-        });
-      }
-
-      // STEP 3: Emit TASK_CREATED_CATEGORY notification
-      // Find users who have saved category matching this task
-      try {
-        // Create category slugs based on task category
-        // Map simple backend categories to content-admin style slugs
-        const categorySlugs = [
-          task.categorySlug,
-          task.category,
-          task.subcategory,
-        ]
-          .map((slug) => (slug ? slug.toString().toLowerCase().trim() : ""))
-          .filter((slug) => slug.length > 0);
-
-        if (categorySlugs.length > 0) {
-          const categoryMatchedUsers: string[] = [];
-
-          logger.info('[TaskService.createTask] CATEGORY_SKILL_ALERTS - Category-slug pipeline remains disabled', {
-            taskId: task._id,
-            categorySlugs,
-          });
-
-          if (categoryMatchedUsers.length > 0) {
-            await NotificationClient.sendBatch(
-              {
-                eventKey: 'TASK_CREATED_CATEGORY',
-                category: 'keywordTaskAlerts', // Using same category preference
-                actorId: posterUid,
-                entity: { type: 'task', id: task._id.toString() },
-                title: `New ${task.categoryLabel || task.category} task posted!`,
-                body: `A new ${task.categoryLabel || task.category} task has been posted: ${task.title.substring(0, 50)}${task.title.length > 50 ? '...' : ''}`,
-                data: withHelperAlertData({
-                  taskId: task._id.toString(),
-                  category: task.categoryLabel || task.category,
-                }, posterUid),
-              },
-              categoryMatchedUsers
-            );
-
-            // Email: task_created_category → category-matched users
-            try {
-              const Profile = mongoose.connection.collection('profiles');
-              const categoryProfiles = await Profile.find({ uid: { $in: categoryMatchedUsers } }).toArray();
-              const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-              const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
-              const categoryLabel = task.categoryLabel || task.subcategory || task.category;
-
-              for (const p of categoryProfiles) {
-                if (p.email) {
-                  try {
-                    logger.debug(`[TaskService.createTask] Sending task_created_category email to ${p.email}`);
-                    // Check if user has enabled keyword alert emails
-                    const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                      p.uid,
-                      'keywordTaskAlerts'
-                    );
-
-                    if (emailEnabled) {
-                      await EmailServiceClient.sendTaskCreatedKeyword(p.email, {
-                        userName: p.name || p.fullName || 'There',
-                        taskTitle: task.title,
-                        matchedKeyword: categoryLabel,
-                        taskDescription: task.description?.substring(0, 200),
-                        budget: task.budget?.amount,
-                        location: task.location?.city || task.location?.address,
-                        scheduledDate: scheduledDateStr,
-                        taskUrl,
-                        userId: p.uid,
-                      });
-                      logger.info(`[TaskService.createTask] task_created_category email sent successfully`, {
-                        taskId: task._id,
-                        to: p.email,
-                        userId: p.uid,
-                        category: categoryLabel
-                      });
-                    } else {
-                      logger.info(`[TaskService.createTask] Email notifications disabled for keyword alerts`, {
-                        userId: p.uid
-                      });
-                    }
-                  } catch (err) {
-                    logger.error('Error sending task_created_category email to user', {
-                      taskId: task._id,
-                      email: p.email,
-                      userId: p.uid,
-                      error: err instanceof Error ? err.message : 'Unknown error',
-                      stack: err instanceof Error ? err.stack : undefined
-                    });
-                  }
-                }
-              }
-            } catch (emailErr) {
-              logger.error('Error sending task_created_category emails', {
-                taskId: task._id,
-                error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
-                stack: emailErr instanceof Error ? emailErr.stack : undefined
-              });
-            }
-          }
-        }
-      } catch (error) {
-        logger.error('Error sending TASK_CREATED_CATEGORY notification', {
-          taskId: task._id,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
-      }
-    } else {
-      logger.warn('Skipping helper discovery notifications - poster uid not resolved', {
-        taskId: task._id,
-        profileId: profileId.toString()
-      });
-    }
-
-    // STEP 4: Emit TASK_NEARBY notification
-    // One alert per nearby helper (skill wording when applicable).
-    try {
-      if (nearbyTaskers.length > 0) {
-        const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-        const taskRoute = `/tasks/${task._id}`;
-        const locationLabel =
-          task.location?.city ||
-          task.location?.address ||
-          'your area';
-
-        const nearbyAndSkill = excludeTaskPoster(
-          nearbyTaskers.filter((u) => skillMatchedSet.has(u)),
-          posterUid,
-        );
-        const nearbyOnly = excludeTaskPoster(
-          nearbyTaskers.filter((u) => !skillMatchedSet.has(u)),
-          posterUid,
-        );
-
-        if (nearbyAndSkill.length > 0) {
-          await NotificationClient.sendBatch(
-            {
-              eventKey: 'TASK_NEARBY',
-              category: 'recommendedTaskAlerts',
-              actorId: posterUid,
-              entity: { type: 'task', id: task._id.toString() },
-              title: `Matched your skills nearby: ${task.title}`,
-              body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel} and matches your skills.`,
-              data: withHelperAlertData({
-                eventKey: 'TASK_NEARBY',
-                entityType: 'task',
-                skillMatch: true,
-                taskId: task._id.toString(),
-                category: task.category,
-                categoryLabel: task.categoryLabel || task.category,
-                budget: task.budget?.amount,
-                locationLabel,
-                skillMatchCategory: skillMatchCategory || task.categoryLabel || task.category,
-                taskUrl,
-                route: taskRoute,
-                actionUrl: taskRoute,
-              }, posterUid),
-            },
-            nearbyAndSkill,
-          );
-        }
-
-        if (nearbyOnly.length > 0) {
-          await NotificationClient.sendBatch(
-            {
-              eventKey: 'TASK_NEARBY',
-              category: 'recommendedTaskAlerts',
-              actorId: posterUid,
-              entity: { type: 'task', id: task._id.toString() },
-              title: `New task nearby: ${task.title}`,
-              body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel}.`,
-              data: withHelperAlertData({
-                eventKey: 'TASK_NEARBY',
-                entityType: 'task',
-                skillMatch: false,
-                taskId: task._id.toString(),
-                category: task.category,
-                categoryLabel: task.categoryLabel || task.category,
-                budget: task.budget?.amount,
-                locationLabel,
-                taskUrl,
-                route: taskRoute,
-                actionUrl: taskRoute,
-              }, posterUid),
-            },
-            nearbyOnly,
-          );
-        }
-
-        // In-app + WhatsApp for skill-matched nearby helpers
-        for (const nearbyUid of excludeTaskPoster(nearbyTaskers, posterUid)) {
-          try {
-            const isNearbyAndSkill = skillMatchedSet.has(nearbyUid);
-            if (isNearbyAndSkill) {
-              // Governance: one WA per work+helper; skip if already applied.
-              const alreadyApplied = await TaskApplication.exists({
-                taskId: task._id,
-                applicantUid: nearbyUid,
-                status: { $in: ['pending', 'accepted'] },
-              });
-              if (alreadyApplied) continue;
-
-              const categoryLabel =
-                skillMatchCategory || task.categoryLabel || task.category || 'work';
-              fireWhatsAppNotify({
-                uid: nearbyUid,
-                templateKey: 'wa_nearby_work_skill_match',
-                category: 'recommendedTaskAlerts',
-                templateBody: {
-                  var_1: task.title || 'New work',
-                  var_2: String(categoryLabel),
-                  var_3: String(locationLabel),
-                },
-                templateButtons: taskOpenAppButton(task._id.toString()),
-                idempotencyKey: `wa_nearby_work_skill_match:${task._id.toString()}:${nearbyUid}`,
-                metadata: {
-                  workId: task._id.toString(),
-                  triggerType: 'skill_nearby',
-                  recipientRole: 'helper',
-                },
-              });
-            }
-            await InAppNotificationClient.send({
-              userId: nearbyUid,
-              title: isNearbyAndSkill ? '🎯 New Skill Matched Nearby' : '📍 New Task Near You',
-              body: isNearbyAndSkill
-                ? `A ${task.categoryLabel || task.category} task "${task.title}" matches your skills near ${locationLabel}`
-                : `"${task.title}" has been posted near ${locationLabel}`,
-              category: 'recommendedTaskAlerts',
-              type: 'info',
-              data: withHelperAlertData({
-                eventKey: 'TASK_NEARBY',
-                entityType: 'task',
-                skillMatch: isNearbyAndSkill,
-                taskId: task._id.toString(),
-                taskUrl,
-                route: taskRoute,
-                actionUrl: taskRoute,
-                category: task.category,
-                categoryLabel: task.categoryLabel || task.category,
-                budget: task.budget?.amount,
-                locationLabel,
-                skillMatchCategory: skillMatchCategory || task.categoryLabel || task.category,
-              }, posterUid),
-            });
-          } catch (inAppError) {
-            logger.warn('[TaskService.createTask] NEARBY_ALERTS - In-app failed', {
-              taskId: task._id,
-              userId: nearbyUid,
-              error: inAppError instanceof Error ? inAppError.message : 'Unknown error',
-            });
-          }
-        }
-
-        logger.info('[TaskService.createTask] NEARBY_ALERTS - Notifications sent', {
-          taskId: task._id,
-          nearbyCount: nearbyTaskers.length,
-          nearbyAndSkillCount: nearbyAndSkill.length,
-          nearbyOnlyCount: nearbyOnly.length,
-          locationLabel,
-        });
-      } else {
-        logger.info('[TaskService.createTask] NEARBY_ALERTS - No nearby taskers found', {
-          taskId: task._id,
-          hasCoordinates: !!(task.location?.coordinates),
-        });
-      }
-    } catch (error) {
-      logger.error('Error sending TASK_NEARBY notification', {
-        taskId: task._id,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      });
-    }
-
-    return task.toObject();
+    return buildCreateTaskApiResponse(taskRecord);
   }
 
   /**
@@ -2051,7 +1288,7 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    // ✅ Compare ObjectIds
+    // âœ… Compare ObjectIds
     if (!task.requesterId.equals(profileId)) {
       throw new ForbiddenError("Not authorized to edit this task");
     }
@@ -2059,7 +1296,7 @@ export class TaskService {
     // STEP 1: Get old state for diff check
     const oldStatus = task.status;
     const oldScheduledDate = task.scheduledDate?.getTime();
-    const oldAssigneeId = task.assigneeId; // ✅ Updated from assigneeUid
+    const oldAssigneeId = task.assigneeId; // âœ… Updated from assigneeUid
 
     // Normalize budget field to handle both object and number formats
     let updateData = { ...updates, updatedAt: new Date() };
@@ -2116,7 +1353,7 @@ export class TaskService {
         buildScheduleVersion(mergedSchedule);
     }
 
-    logger.info("🔍 Update data after budget normalization:", updateData);
+    logger.info("ðŸ” Update data after budget normalization:", updateData);
 
     const updatedTask = await Task.findByIdAndUpdate(taskId, updateData, {
       new: true,
@@ -2132,7 +1369,7 @@ export class TaskService {
     // STEP 2: Diff check - only emit if important fields changed
     const statusChanged = oldStatus !== updatedTask.status;
     const scheduledDateChanged = oldScheduledDate !== updatedTask.scheduledDate?.getTime();
-    // ✅ Compare ObjectIds (need to convert to string for comparison)
+    // âœ… Compare ObjectIds (need to convert to string for comparison)
     const oldAssigneeIdStr = oldAssigneeId?.toString();
     const newAssigneeIdStr = updatedTask.assigneeId?.toString();
     const assigneeChanged = oldAssigneeIdStr !== newAssigneeIdStr;
@@ -2153,7 +1390,7 @@ export class TaskService {
         ? String(assigneeProfileForNotif.uid)
         : null;
 
-      // Firebase UIDs only — ObjectIds are not valid notification recipients.
+      // Firebase UIDs only â€” ObjectIds are not valid notification recipients.
       const uidRecipients: string[] = [];
       if (posterUidForNotif) uidRecipients.push(posterUidForNotif);
       if (taskerUidForNotif) uidRecipients.push(taskerUidForNotif);
@@ -2271,7 +1508,7 @@ export class TaskService {
         });
       }
 
-      // Email: task_updated → requester + assignee
+      // Email: task_updated â†’ requester + assignee
       try {
         const changes: Array<{ field: string; oldValue?: string; newValue: string }> = [];
         if (statusChanged) {
@@ -2333,8 +1570,51 @@ export class TaskService {
     return updatedTask as unknown as ITask;
   }
 
+  /** Collect parent task plus recurring visit child tasks linked in schedule or RecurringVisit collection. */
+  private static async collectTaskTreeIds(root: ITask): Promise<mongoose.Types.ObjectId[]> {
+    const idSet = new Set<string>();
+    idSet.add(String(root._id));
+
+    const { RecurringVisitRepository } = await import('../repositories/RecurringVisitRepository');
+    const collectionChildIds = await RecurringVisitRepository.listChildTaskIds(root._id);
+    for (const childId of collectionChildIds) {
+      idSet.add(childId);
+    }
+
+    const schedule = Array.isArray(root.schedule) ? root.schedule : [];
+    for (const row of schedule) {
+      const childTaskId = (row as { childTaskId?: mongoose.Types.ObjectId | string | null })
+        .childTaskId;
+      if (childTaskId) {
+        idSet.add(String(childTaskId));
+      }
+    }
+
+    const linkedChildren = await Task.find({ parentTaskId: root._id }).select("_id").lean();
+    for (const child of linkedChildren) {
+      idSet.add(String(child._id));
+    }
+
+    return [...idSet]
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+  }
+
+  private static async deleteTaskRelatedRecords(
+    taskIds: mongoose.Types.ObjectId[],
+  ): Promise<void> {
+    if (taskIds.length === 0) return;
+
+    await Promise.all([
+      TaskApplication.deleteMany({ taskId: { $in: taskIds } }),
+      TaskQuestion.deleteMany({ taskId: { $in: taskIds } }),
+      TaskFollow.deleteMany({ taskId: { $in: taskIds } }),
+      TaskReport.deleteMany({ taskId: { $in: taskIds } }),
+    ]);
+  }
+
   /**
-   * Delete a task
+   * Delete a task and any recurring visit child tasks tied to it.
    */
   static async deleteTask(taskId: string, profileId: mongoose.Types.ObjectId): Promise<void> {
     const task = await Task.findById(taskId);
@@ -2342,14 +1622,22 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    // ✅ Compare ObjectIds
+    // âœ… Compare ObjectIds
     if (!task.requesterId.equals(profileId)) {
       throw new ForbiddenError("Not authorized to delete this task");
     }
 
-    await Task.findByIdAndDelete(taskId);
-    TaskService.invalidateTaskCache(taskId);
-    logger.info(`Task deleted: ${taskId} by user ${profileId.toString()}`);
+    const taskIdsToDelete = await TaskService.collectTaskTreeIds(task);
+    await TaskService.deleteTaskRelatedRecords(taskIdsToDelete);
+    await Task.deleteMany({ _id: { $in: taskIdsToDelete } });
+
+    for (const id of taskIdsToDelete) {
+      TaskService.invalidateTaskCache(String(id));
+    }
+
+    logger.info(
+      `Task deleted: ${taskId} by user ${profileId.toString()} (including ${Math.max(0, taskIdsToDelete.length - 1)} visit child task(s))`,
+    );
   }
 
   /**
@@ -2382,6 +1670,61 @@ export class TaskService {
   }
 
   /**
+   * Cancel a recurring plan visit using the same task cancellation flow as normal work
+   * (refund policy, fees, notifications). Delegates to the per-visit child task when present.
+   */
+  static async cancelRecurringVisit(
+    planTaskId: string,
+    visitId: string,
+    profileId: mongoose.Types.ObjectId,
+    options?: { cancellationReason?: string },
+  ): Promise<ITask | void> {
+    const parent = await Task.findById(planTaskId);
+    if (!parent) {
+      throw new NotFoundError("Task not found");
+    }
+    if (!isRecurringVisitPlanTask(parent as unknown as Record<string, unknown>)) {
+      throw new BadRequestError("Not a recurring visit plan");
+    }
+
+    const isCreator = parent.requesterId.equals(profileId);
+    const isPerformer = parent.assigneeId?.equals(profileId) || false;
+    if (!isCreator && !isPerformer) {
+      throw new ForbiddenError("Not authorized to cancel this visit");
+    }
+
+    const visit = await findVisitForPlan(parent, visitId);
+    if (!visit) {
+      throw new NotFoundError("Visit not found");
+    }
+
+    if (visit.childTaskId) {
+      const child = await Task.findById(visit.childTaskId);
+      if (child && !["cancelled", "completed"].includes(String(child.status))) {
+        return TaskService.updateTaskStatus(
+          String(child._id),
+          profileId,
+          "cancelled",
+          options,
+        );
+      }
+    }
+
+    if (!isCreator) {
+      throw new BadRequestError(
+        "This visit is not assigned yet. Only the customer can cancel it.",
+      );
+    }
+
+    await RecurringVisitService.cancelUnpaidVisitOnPlan({
+      taskId: planTaskId,
+      visitId,
+      requesterProfileId: profileId,
+      reason: options?.cancellationReason,
+    });
+  }
+
+  /**
    * Update task status
    */
   static async updateTaskStatus(
@@ -2409,9 +1752,25 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    // ✅ Compare ObjectIds
+    // âœ… Compare ObjectIds
     const isCreator = task.requesterId.equals(profileId);
-    const isPerformer = task.assigneeId?.equals(profileId) || false; // ✅ Updated from assigneeUid
+    let isPerformer = task.assigneeId?.equals(profileId) || false; // âœ… Updated from assigneeUid
+
+    if (!isCreator && !isPerformer && task.parentTaskId && task.recurringVisitId) {
+      const parent = await Task.findById(task.parentTaskId).select(
+        "assigneeId recurringPlan",
+      );
+      if (parent) {
+        const plan = (parent as unknown as { recurringPlan?: Record<string, unknown> })
+          .recurringPlan;
+        isPerformer =
+          parent.assigneeId?.equals(profileId) ||
+          (plan?.taskerProfileId as mongoose.Types.ObjectId | undefined)?.equals(
+            profileId,
+          ) ||
+          false;
+      }
+    }
 
     if (!isCreator && !isPerformer) {
       throw new ForbiddenError("Not authorized to update this task");
@@ -2435,6 +1794,30 @@ export class TaskService {
           "Only assigned performer can mark task as started or in_progress"
         );
       }
+    }
+
+    if (
+      (status === "started" || status === "in_progress") &&
+      isPerformer &&
+      isRecurringVisitPlanTask(task as unknown as Record<string, unknown>) &&
+      !task.parentTaskId
+    ) {
+      const workChild = await RecurringVisitService.resolveActiveWorkChildTask(task);
+      if (workChild) {
+        return TaskService.updateTaskStatus(String(workChild._id), profileId, status, options);
+      }
+      throw new BadRequestError(
+        "Recurring visit work must be started on the paid visit task, not the plan"
+      );
+    }
+
+    // Recurring per-visit payment must be confirmed before any start transition (OTP path included).
+    if (
+      (status === "started" || status === "in_progress") &&
+      task.status === "assigned" &&
+      isPerformer
+    ) {
+      await RecurringVisitService.ensureVisitPaidBeforeWorkStart(task);
     }
 
     // OTP gate: performer cannot move assigned -> started/in_progress without successful OTP verification.
@@ -2466,13 +1849,24 @@ export class TaskService {
       throw new BadRequestError("Task can only be cancelled before it is started");
     }
 
-    // Performer cannot cancel after payment is held (poster cancel on assigned still refunds).
+    // Performer cannot cancel after payment is held â€” except recurring per-visit child
+    // tasks, where refund policy runs below (same as poster cancel on assigned visits).
     if (status === "cancelled" && isPerformer && !isCreator) {
-      const escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
-      if (isActiveEscrow(escrowForCancel)) {
-        throw new BadRequestError(
-          "Cannot cancel after payment is held. Contact support if you need help."
-        );
+      const isRecurringChildVisit =
+        Boolean(task.parentTaskId) && Boolean(task.recurringVisitId);
+      if (!isRecurringChildVisit) {
+        let escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
+        if (!escrowForCancel && task.parentTaskId && task.recurringVisitId) {
+          escrowForCancel = await PaymentClient.getEscrowByTaskIdAndVisitId(
+            String(task.parentTaskId),
+            String(task.recurringVisitId),
+          );
+        }
+        if (isActiveEscrow(escrowForCancel)) {
+          throw new BadRequestError(
+            "Cannot cancel after payment is held. Contact support if you need help."
+          );
+        }
       }
     }
 
@@ -2481,7 +1875,13 @@ export class TaskService {
       | null = null;
 
     if (status === "cancelled") {
-      const escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      let escrow = await PaymentClient.getEscrowByTaskId(taskId);
+      if (!escrow && task.parentTaskId && task.recurringVisitId) {
+        escrow = await PaymentClient.getEscrowByTaskIdAndVisitId(
+          String(task.parentTaskId),
+          String(task.recurringVisitId),
+        );
+      }
       if (escrow) {
         const isRequesterCancelled = task.requesterId.equals(profileId);
         const Profile = mongoose.connection.collection("profiles");
@@ -2496,12 +1896,25 @@ export class TaskService {
           task.budget && typeof task.budget === "object" && "amount" in task.budget
             ? Number((task.budget as { amount: number }).amount)
             : undefined;
+        const escrowPublicId =
+          escrow && typeof escrow === "object"
+            ? String((escrow as { escrowId?: unknown }).escrowId ?? "").trim() || undefined
+            : undefined;
+        const cancelTaskId = escrowPublicId
+          ? undefined
+          : task.parentTaskId && task.recurringVisitId
+            ? String(task.parentTaskId)
+            : taskId;
         logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow started', {
           taskId,
           actorProfileId: profileId.toString(),
           actorRole: isRequesterCancelled ? 'poster' : 'performer',
           actorUid: uid,
           hasEscrow: true,
+          escrowPublicId,
+          cancelTaskId,
+          recurringParentTaskId: task.parentTaskId ? String(task.parentTaskId) : undefined,
+          recurringVisitId: task.recurringVisitId,
           taskStartDate: taskStart.toISOString(),
           assignedAt: task.assignedAt ? new Date(task.assignedAt).toISOString() : undefined,
           feeBaseAmount:
@@ -2510,7 +1923,8 @@ export class TaskService {
               : undefined,
         });
         const payResult = await PaymentClient.cancelPaymentForTask({
-          taskId,
+          taskId: cancelTaskId,
+          escrowId: escrowPublicId,
           reason: options?.cancellationReason,
           userId: uid,
           cancelledBy: isRequesterCancelled ? "poster" : "performer",
@@ -2572,7 +1986,7 @@ export class TaskService {
 
     if (status === "cancelled") {
       updateData.cancelledAt = new Date();
-      updateData.cancelledById = profileId; // ✅ Updated from cancelledBy
+      updateData.cancelledById = profileId; // âœ… Updated from cancelledBy
       updateData.cancellationReason = options?.cancellationReason;
     }
 
@@ -2592,10 +2006,91 @@ export class TaskService {
 
     logger.info(`Task ${taskId} status updated to ${status} by ${profileId.toString()}`);
 
+    if (
+      status === 'completed' &&
+      updatedTask.parentTaskId &&
+      updatedTask.recurringVisitId
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.onChildVisitCompleted(updatedTask as unknown as ITask);
+        } catch (err) {
+          logger.error('[TaskService] Failed to advance recurring visit plan after child completion', {
+            taskId,
+            parentTaskId: String(updatedTask.parentTaskId),
+            recurringVisitId: updatedTask.recurringVisitId,
+            error: err,
+          });
+        }
+      });
+    }
+
+    if (
+      status === 'cancelled' &&
+      updatedTask.parentTaskId &&
+      updatedTask.recurringVisitId
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.onChildVisitCancelled(updatedTask as unknown as ITask, {
+            reason: options?.cancellationReason,
+            cancelledByProfileId: profileId,
+          });
+        } catch (err) {
+          logger.error('[TaskService] Failed to advance recurring visit plan after child cancellation', {
+            taskId,
+            parentTaskId: String(updatedTask.parentTaskId),
+            recurringVisitId: updatedTask.recurringVisitId,
+            error: err,
+          });
+        }
+      });
+    }
+
+    const PROGRESS_VISIT_STATUSES = new Set(['started', 'in_progress', 'review']);
+    if (
+      PROGRESS_VISIT_STATUSES.has(status) &&
+      updatedTask.parentTaskId &&
+      updatedTask.recurringVisitId
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.syncParentVisitOnChildProgress(
+            updatedTask as unknown as ITask,
+            status,
+          );
+        } catch (err) {
+          logger.error('[TaskService] Failed to sync recurring visit progress from child task', {
+            taskId,
+            parentTaskId: String(updatedTask.parentTaskId),
+            recurringVisitId: updatedTask.recurringVisitId,
+            error: err,
+          });
+        }
+      });
+    }
+
+    if (
+      PROGRESS_VISIT_STATUSES.has(status) &&
+      !updatedTask.parentTaskId &&
+      RecurringVisitService.isVisitPlanTask(updatedTask as unknown as Record<string, unknown>)
+    ) {
+      setImmediate(async () => {
+        try {
+          await RecurringVisitService.reconcilePlanState(taskId);
+        } catch (err) {
+          logger.error('[TaskService] Failed to reconcile recurring parent visit progress', {
+            taskId,
+            error: err,
+          });
+        }
+      });
+    }
+
     // Emit real-time status update
     emitTaskStatusChanged(taskId, updatedTask);
 
-    // ── Push + in-app notifications for progress status changes ─────────────
+    // â”€â”€ Push + in-app notifications for progress status changes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Notify the poster whenever the tasker moves the task forward.
     // Runs non-blocking so it never delays the HTTP response.
     const PROGRESS_STATUSES = new Set(['started', 'in_progress', 'review']);
@@ -2688,7 +2183,7 @@ export class TaskService {
       });
     }
 
-    // ── Push + in-app notifications to tasker for poster-triggered status changes ──
+    // â”€â”€ Push + in-app notifications to tasker for poster-triggered status changes â”€â”€
     // When the poster marks the task completed, notify the tasker immediately.
     if (status === 'completed' && isCreator && task.assigneeId) {
       const assigneeId = task.assigneeId;
@@ -2743,7 +2238,7 @@ export class TaskService {
       });
     }
 
-    // Email: task cancelled → notify the other party
+    // Email: task cancelled â†’ notify the other party
     if (status === "cancelled") {
       try {
         const Profile = mongoose.connection.collection("profiles");
@@ -2868,7 +2363,7 @@ export class TaskService {
       }
     }
 
-    // Email: task started / in_progress → notify requester
+    // Email: task started / in_progress â†’ notify requester
     if ((status === "started" || status === "in_progress") && task.status === "assigned") {
       try {
         const Profile = mongoose.connection.collection("profiles");
@@ -2899,7 +2394,7 @@ export class TaskService {
       }
     }
 
-    // Email: task completed → notify requester + assignee (when poster marks completed directly)
+    // Email: task completed â†’ notify requester + assignee (when poster marks completed directly)
     if (status === "completed" && task.status !== "completed") {
       try {
         const Profile = mongoose.connection.collection("profiles");
@@ -3006,19 +2501,22 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const effectiveTaskId = String(workTask._id);
+
+    const isPerformer = workTask.assigneeId?.equals(profileId) || false;
     if (!isPerformer) {
       throw new ForbiddenError("Only assigned performer can request start OTP");
     }
 
-    if (task.status !== "assigned") {
+    if (workTask.status !== "assigned") {
       throw new BadRequestError("OTP can only be requested when task is in assigned status");
     }
 
-    // Reverted: no additional-quote pending gate in legacy flow.
+    await RecurringVisitService.ensureVisitPaidBeforeWorkStart(workTask);
 
     const Profile = mongoose.connection.collection("profiles");
-    const requesterProfile = await Profile.findOne({ _id: task.requesterId });
+    const requesterProfile = await Profile.findOne({ _id: workTask.requesterId });
 
     const requesterUid =
       requesterProfile && typeof requesterProfile === "object" && "uid" in requesterProfile
@@ -3034,11 +2532,11 @@ export class TaskService {
     const expiresAt = new Date(now.getTime() + START_OTP_TTL_MS);
 
     const nextResendCount = options?.isResend
-      ? (task.startOtp?.resendCount || 0) + 1
-      : task.startOtp?.resendCount || 0;
+      ? (workTask.startOtp?.resendCount || 0) + 1
+      : workTask.startOtp?.resendCount || 0;
 
-    task.startOtp = {
-      codeHash: hashStartOtp(taskId, otp),
+    workTask.startOtp = {
+      codeHash: hashStartOtp(effectiveTaskId, otp),
       requestedAt: now,
       expiresAt,
       attempts: 0,
@@ -3046,12 +2544,19 @@ export class TaskService {
       requestedById: profileId,
     };
 
-    await task.save();
+    await workTask.save();
 
-    const otpBody = `Task start OTP for \"${task.title}\": ${otp}. Valid for 10 minutes.`;
+    const { workTitle: workTitleForOtp, visitNumber } =
+      await RecurringVisitService.resolveStartOtpWorkTitle(workTask);
+
+    const otpBody = `Task start OTP for \"${workTitleForOtp}\": ${otp}. Valid for 10 minutes.`;
     const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Task Start OTP';
     const notificationData = {
-      taskId,
+      taskId: effectiveTaskId,
+      taskTitle: workTitleForOtp,
+      visitNumber,
+      parentTaskId: workTask.parentTaskId ? String(workTask.parentTaskId) : undefined,
+      recurringVisitId: workTask.recurringVisitId ? String(workTask.recurringVisitId) : undefined,
       otp,
       otpType: 'task_start',
       expiresAt: expiresAt.toISOString(),
@@ -3061,15 +2566,18 @@ export class TaskService {
 
     // Send via both email and in-app notifications for redundancy
     let taskerName = "tasker";
-    if (task.assigneeId && typeof task.assigneeId === "object") {
+    if (workTask.assigneeId && typeof workTask.assigneeId === "object") {
       try {
-        const assigneeId = task.assigneeId as mongoose.Types.ObjectId;
+        const assigneeId = workTask.assigneeId as mongoose.Types.ObjectId;
         const assigneeProfile = await Profile.findOne({ _id: assigneeId });
         if (assigneeProfile) {
           taskerName = (assigneeProfile as any).name || (assigneeProfile as any).fullName || "tasker";
         }
       } catch (err) {
-        logger.warn("Failed to fetch assignee profile for task start OTP", { taskId, error: err });
+        logger.warn("Failed to fetch assignee profile for task start OTP", {
+          taskId: effectiveTaskId,
+          error: err,
+        });
       }
     }
     const requesterName = requesterProfile?.name || requesterProfile?.fullName || "requester";
@@ -3084,7 +2592,7 @@ export class TaskService {
         await EmailServiceClient.sendTaskStartOtp(requesterEmail, {
           requesterName,
           taskerName,
-          taskTitle: task.title,
+          taskTitle: workTitleForOtp,
           otp,
           expiresAt: expiresAt.toISOString(),
           userId: requesterUid,
@@ -3096,7 +2604,7 @@ export class TaskService {
       logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
     }
 
-    // Push notification (FCM) to poster — same content as in-app for lock-screen visibility
+    // Push notification (FCM) to poster â€” same content as in-app for lock-screen visibility
     try {
       await NotificationClient.send({
         eventKey: 'TASK_UPDATED',
@@ -3147,12 +2655,15 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const isPerformer = task.assigneeId?.equals(profileId) || false;
+    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const effectiveTaskId = String(workTask._id);
+
+    const isPerformer = workTask.assigneeId?.equals(profileId) || false;
     if (!isPerformer) {
       throw new ForbiddenError("Only assigned performer can verify start OTP");
     }
 
-    if (task.status !== "assigned") {
+    if (workTask.status !== "assigned") {
       throw new BadRequestError("Task is not in assigned state");
     }
 
@@ -3164,7 +2675,7 @@ export class TaskService {
     }
 
     const Profile = mongoose.connection.collection("profiles");
-    const posterProfile = await Profile.findOne({ _id: task.requesterId });
+    const posterProfile = await Profile.findOne({ _id: workTask.requesterId });
     const rawPosterUid =
       posterProfile && typeof posterProfile === "object" && "uid" in posterProfile
         ? (posterProfile as { uid?: unknown }).uid
@@ -3173,42 +2684,42 @@ export class TaskService {
 
     if (acceptsPosterDummyStartOtp(posterUid, sanitizedOtp)) {
       logger.warn("start_otp_poster_dummy_accepted", {
-        taskId,
+        taskId: effectiveTaskId,
         posterUid: posterUid ?? null,
       });
-      return TaskService.updateTaskStatus(taskId, profileId, "started", {
+      return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
         skipStartOtpValidation: true,
       });
     }
 
-    if (!task.startOtp?.codeHash || !task.startOtp?.expiresAt) {
+    if (!workTask.startOtp?.codeHash || !workTask.startOtp?.expiresAt) {
       throw new BadRequestError("Start OTP not requested. Please request OTP first");
     }
 
-    if (task.startOtp.expiresAt.getTime() < Date.now()) {
+    if (workTask.startOtp.expiresAt.getTime() < Date.now()) {
       throw new BadRequestError("OTP expired. Please resend OTP");
     }
 
-    if ((task.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
+    if ((workTask.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
       throw new BadRequestError("Too many invalid attempts. Please resend OTP");
     }
 
-    const expectedHash = hashStartOtp(taskId, sanitizedOtp);
-    if (task.startOtp.codeHash !== expectedHash) {
-      task.startOtp.attempts = (task.startOtp.attempts || 0) + 1;
-      await task.save();
+    const expectedHash = hashStartOtp(effectiveTaskId, sanitizedOtp);
+    if (workTask.startOtp.codeHash !== expectedHash) {
+      workTask.startOtp.attempts = (workTask.startOtp.attempts || 0) + 1;
+      await workTask.save();
 
-      if (task.startOtp.attempts >= START_OTP_MAX_ATTEMPTS) {
+      if (workTask.startOtp.attempts >= START_OTP_MAX_ATTEMPTS) {
         throw new BadRequestError("OTP mismatch. Max attempts reached. Please resend OTP");
       }
 
       throw new BadRequestError("OTP mismatch");
     }
 
-    task.startOtp.verifiedAt = new Date();
-    await task.save();
+    workTask.startOtp.verifiedAt = new Date();
+    await workTask.save();
 
-    return TaskService.updateTaskStatus(taskId, profileId, "started", {
+    return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
       skipStartOtpValidation: true,
     });
   }
@@ -3364,7 +2875,7 @@ export class TaskService {
             entityType: 'task',
           };
 
-          // Push notification (FCM — works when app is closed)
+          // Push notification (FCM â€” works when app is closed)
           await NotificationClient.send({
             eventKey: 'TASK_UPDATED',
             category: 'taskUpdates',

@@ -2,7 +2,13 @@
  * Rules for when a performer is locked into an assigned task (after payment or work started).
  */
 
+import mongoose from 'mongoose';
+import Task from '../models/Task';
+import { isRecurringVisitPlanTask } from './recurringVisitMeta';
+
 const ACTIVE_ESCROW_STATUSES = new Set(['pending', 'held', 'authorized', 'captured']);
+
+const TASKER_BLOCKING_STATUSES = ['assigned', 'started', 'in_progress', 'review'] as const;
 
 const WORK_IN_FLIGHT_STATUSES = new Set(['started', 'in_progress', 'review']);
 
@@ -51,4 +57,55 @@ export function canWithdrawAcceptedApplication(
   }
 
   return { allowed: true };
+}
+
+export function isEndedRecurringPlanTask(
+  task: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!task || !isRecurringVisitPlanTask(task)) return false;
+  const plan = task.recurringPlan as { status?: string } | undefined;
+  return String(plan?.status || '').toLowerCase() === 'ended';
+}
+
+/** Parent plan no longer binds the tasker (left, cancelled, or ended). */
+export function parentPlanReleasesTaskerCommitment(
+  parent: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!parent) return true;
+  if (isEndedRecurringPlanTask(parent)) return true;
+  const status = String(parent.status || '').toLowerCase();
+  return status === 'cancelled' || status === 'open';
+}
+
+/**
+ * True when the tasker still has a real in-flight assignment (not stale recurring rows
+ * after leaving or ending a recurring plan).
+ */
+export async function taskerHasBlockingActiveTask(
+  taskerProfileId: mongoose.Types.ObjectId,
+): Promise<boolean> {
+  const candidates = await Task.find({
+    assigneeId: taskerProfileId,
+    status: { $in: [...TASKER_BLOCKING_STATUSES] },
+  })
+    .select('_id status parentTaskId recurringVisitId recurringPlan')
+    .lean();
+
+  for (const task of candidates) {
+    const record = task as unknown as Record<string, unknown>;
+    if (isEndedRecurringPlanTask(record)) continue;
+
+    if (task.parentTaskId && task.recurringVisitId) {
+      const parent = await Task.findById(task.parentTaskId)
+        .select('status recurringPlan')
+        .lean();
+      if (parentPlanReleasesTaskerCommitment(parent as unknown as Record<string, unknown>)) {
+        continue;
+      }
+    }
+
+    return true;
+  }
+
+  return false;
 }
