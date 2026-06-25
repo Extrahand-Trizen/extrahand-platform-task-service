@@ -115,7 +115,11 @@ export interface ITask extends Document {
   // ❌ Removed requesterName - API Gateway will enrich with Profile data
 
   assigneeId?: mongoose.Types.ObjectId | null; // ObjectId reference to Profile
+  /** Firebase UID of the assigned helper — required for tasker My Work lookup */
+  assigneeUid?: string | null;
   assignedAt?: Date;
+  /** _id of the synthetic accepted TaskApplication created by ops assignment */
+  acceptedApplicationId?: mongoose.Types.ObjectId | null;
 
   estimatedDuration?: number;
   actualDuration?: number;
@@ -415,7 +419,13 @@ const TaskSchema = new Schema<ITask>(
       index: true,
       default: null,
     },
+    assigneeUid: { type: String, default: null, index: true },
     assignedAt: Date,
+    acceptedApplicationId: {
+      type: Schema.Types.ObjectId,
+      ref: "TaskApplication",
+      default: null,
+    },
 
     estimatedDuration: Number,
     actualDuration: Number,

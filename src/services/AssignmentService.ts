@@ -4,9 +4,66 @@ import AssignmentLog from '../models/AssignmentLog';
 import BookingOrder from '../models/BookingOrder';
 import BookingItem from '../models/BookingItem';
 import Task from '../models/Task';
+import TaskApplication from '../models/TaskApplication';
 import { PaymentClient } from './PaymentClient';
 import { BadRequestError, NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
+
+/**
+ * Create (or upsert) a synthetic accepted TaskApplication for a Book Now
+ * ops-assigned helper, so the tasker can see the job in their My Work screen.
+ *
+ * The unique index on (taskId, applicantUid) means we use findOneAndUpdate
+ * with upsert so re-assignments don't throw duplicate-key errors.
+ */
+async function upsertAcceptedApplication(params: {
+  taskId: mongoose.Types.ObjectId;
+  helperProfileId: mongoose.Types.ObjectId;
+  helperUid: string;
+  helperName?: string;
+  budgetAmount: number;
+}): Promise<mongoose.Types.ObjectId> {
+  const { taskId, helperProfileId, helperUid, helperName, budgetAmount } = params;
+
+  const application = await TaskApplication.findOneAndUpdate(
+    { taskId, applicantUid: helperUid },
+    {
+      $set: {
+        taskId,
+        applicantId: helperProfileId,
+        applicantUid: helperUid,
+        applicantProfile: helperName ? { name: helperName } : undefined,
+        status: 'accepted',
+        coverLetter: 'Book Now — assigned by operations',
+        proposedBudget: {
+          amount: budgetAmount,
+          currency: 'INR',
+          isNegotiable: false,
+        },
+        negotiation: {
+          initialAmount: budgetAmount,
+          currentAmount: budgetAmount,
+          finalAmount: budgetAmount,
+          status: 'accepted',
+          lastActionBy: 'poster',
+          history: [
+            {
+              amount: budgetAmount,
+              action: 'accept',
+              by: 'poster',
+              at: new Date(),
+            },
+          ],
+        },
+        respondedAt: new Date(),
+        respondedToRevisionRound: 0,
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  return application._id as mongoose.Types.ObjectId;
+}
 
 export class AssignmentService {
   static async listPendingAssignments(limit = 50, page = 1) {
@@ -35,13 +92,14 @@ export class AssignmentService {
     helperUid: string;
     helperProfileId: mongoose.Types.ObjectId;
     assignedByUid: string;
+    helperName?: string;
     bookingItemId?: string;
   }) {
-    const { orderId, helperUid, helperProfileId, assignedByUid, bookingItemId } = params;
+    const { orderId, helperUid, helperProfileId, assignedByUid, helperName, bookingItemId } = params;
 
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
-    if (!['paid', 'assigning'].includes(order.status)) {
+    if (!['paid', 'assigning', 'assigned', 'awaiting_payment'].includes(order.status)) {
       throw new BadRequestError(`Cannot assign helper when order status is ${order.status}`);
     }
 
@@ -55,18 +113,17 @@ export class AssignmentService {
     if (task.bookingSource !== 'book_now') {
       throw new BadRequestError('Task is not a Book Now booking');
     }
-    if (task.assigneeId) {
-      throw new BadRequestError('Task already has an assignee');
-    }
 
-    const existingAssignment = await Assignment.findOne({
-      bookingOrderId: orderId,
-      bookingItemId: item._id,
-      status: 'assigned',
-    });
-    if (existingAssignment) {
-      throw new BadRequestError('Helper already assigned for this item');
-    }
+    // Cancel any existing active assignments for this task
+    await Assignment.updateMany(
+      {
+        taskId: task._id,
+        status: { $in: ['assigned', 'pending'] },
+      },
+      {
+        $set: { status: 'cancelled' },
+      }
+    );
 
     const assignment = await Assignment.create({
       bookingOrderId: orderId,
@@ -87,24 +144,49 @@ export class AssignmentService {
       metadata: { helperUid, orderId },
     });
 
+    // Create / upsert the accepted TaskApplication so helper sees job in My Work
+    const budgetAmount = typeof task.budget === 'object' && task.budget?.amount
+      ? task.budget.amount
+      : 0;
+
+    const applicationId = await upsertAcceptedApplication({
+      taskId: task._id as mongoose.Types.ObjectId,
+      helperProfileId,
+      helperUid,
+      helperName,
+      budgetAmount,
+    });
+
+    // Update task: assignee fields + acceptedApplicationId
     task.assigneeId = helperProfileId;
+    task.assigneeUid = helperUid;
     task.assignedAt = new Date();
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
+    task.acceptedApplicationId = applicationId;
     await task.save();
 
+    // Fire-and-forget escrow attachment — never block assignment on payment errors
     if (order.paymentEscrowId) {
-      const attach = await PaymentClient.attachPerformerToEscrow({
-        escrowId: order.paymentEscrowId,
-        performerUid: helperUid,
-      });
-      if (!attach.success) {
-        logger.error('Failed to attach performer to escrow after assignment', {
-          orderId,
+      try {
+        const attach = await PaymentClient.attachPerformerToEscrow({
           escrowId: order.paymentEscrowId,
-          error: attach.error,
+          performerUid: helperUid,
         });
-        throw new BadRequestError(attach.error || 'Failed to attach performer to payment');
+        if (!attach.success) {
+          logger.warn('Escrow attachment failed (non-blocking) — assignment proceeded', {
+            orderId,
+            escrowId: order.paymentEscrowId,
+            error: attach.error,
+          });
+        } else {
+          logger.info('Performer attached to escrow', { orderId, escrowId: order.paymentEscrowId });
+        }
+      } catch (escrowErr: any) {
+        logger.warn('Escrow attachment threw error (non-blocking)', {
+          orderId,
+          error: escrowErr?.message,
+        });
       }
     }
 
@@ -115,9 +197,118 @@ export class AssignmentService {
       orderId,
       taskId: task._id,
       helperUid,
+      applicationId,
       assignedByUid,
     });
 
     return { assignment, order, task, item };
+  }
+
+  /**
+   * Look up booking order info for a task (admin use, no ownership check).
+   */
+  static async findOrderIdForTaskAdmin(taskId: string): Promise<{ orderId: string; bookingItemId: string } | null> {
+    if (!mongoose.Types.ObjectId.isValid(taskId)) return null;
+
+    // First try via Task.bookingOrderId
+    const task = await Task.findById(taskId).select('bookingOrderId').lean();
+    if (task?.bookingOrderId) {
+      const order = await BookingOrder.findOne({ orderId: task.bookingOrderId })
+        .select('orderId')
+        .lean();
+      if (order) {
+        const item = await BookingItem.findOne({ orderId: task.bookingOrderId })
+          .select('_id')
+          .lean();
+        return { orderId: task.bookingOrderId, bookingItemId: String(item?._id || '') };
+      }
+    }
+
+    // Fallback via BookingItem
+    const item = await BookingItem.findOne({ taskId: new mongoose.Types.ObjectId(taskId) })
+      .select('orderId')
+      .lean();
+    if (!item?.orderId) return null;
+
+    return { orderId: item.orderId, bookingItemId: String(item._id || '') };
+  }
+
+  /**
+   * Directly assign helper (fallback for tasks without booking orders).
+   * Also creates a synthetic accepted TaskApplication for My Work visibility.
+   */
+  static async assignHelperDirect(params: {
+    taskId: string;
+    helperUid: string;
+    helperProfileId: string;
+    helperName?: string;
+    assignedByUid: string;
+  }) {
+    const { taskId, helperUid, helperProfileId, helperName, assignedByUid } = params;
+
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError('Task not found');
+
+    // Cancel existing active assignments
+    await Assignment.updateMany(
+      {
+        taskId: task._id,
+        status: { $in: ['assigned', 'pending'] },
+      },
+      {
+        $set: { status: 'cancelled' },
+      }
+    );
+
+    const helperProfileObjId = new mongoose.Types.ObjectId(helperProfileId);
+
+    // Create assignment record for logs/audits
+    const assignment = await Assignment.create({
+      bookingOrderId: task.bookingOrderId || 'direct',
+      taskId: task._id,
+      helperUid,
+      helperProfileId: helperProfileObjId,
+      assignmentMode: 'manual',
+      status: 'assigned',
+      assignedByUid,
+      assignedAt: new Date(),
+    });
+
+    await AssignmentLog.create({
+      assignmentId: assignment._id,
+      action: 'manual_assign_direct',
+      actorUid: assignedByUid,
+      metadata: { helperUid },
+    });
+
+    // Create / upsert the accepted TaskApplication so helper sees job in My Work
+    const budgetAmount = typeof task.budget === 'object' && task.budget?.amount
+      ? task.budget.amount
+      : 0;
+
+    const applicationId = await upsertAcceptedApplication({
+      taskId: task._id as mongoose.Types.ObjectId,
+      helperProfileId: helperProfileObjId,
+      helperUid,
+      helperName,
+      budgetAmount,
+    });
+
+    task.assigneeId = helperProfileObjId;
+    task.assigneeUid = helperUid;
+    task.assignedAt = new Date();
+    task.status = 'assigned';
+    task.assignmentStatus = 'assigned';
+    task.acceptedApplicationId = applicationId;
+    await task.save();
+
+    logger.info('Direct helper assigned', {
+      taskId: task._id,
+      helperUid,
+      applicationId,
+      assignedByUid,
+    });
+
+    return { assignment, task };
   }
 }

@@ -477,6 +477,53 @@ export class BookingService {
     }
 
     if (order.status === 'paid' || order.status === 'assigning' || order.status === 'assigned') {
+      let changed = false;
+      if (!order.paymentEscrowId && params.escrowId) {
+        order.paymentEscrowId = params.escrowId;
+        changed = true;
+      }
+      if (!order.razorpayOrderId && params.razorpayOrderId) {
+        order.razorpayOrderId = params.razorpayOrderId;
+        changed = true;
+      }
+      if (!order.paidAt) {
+        order.paidAt = new Date();
+        changed = true;
+      }
+      if (changed) {
+        await order.save();
+      }
+
+      // If already assigned, automatically link performer to escrow
+      if (order.status === 'assigned') {
+        const task = await Task.findById(params.taskId).lean();
+        if (task && task.assigneeUid && params.escrowId) {
+          try {
+            const attach = await PaymentClient.attachPerformerToEscrow({
+              escrowId: params.escrowId,
+              performerUid: task.assigneeUid,
+            });
+            if (attach.success) {
+              logger.info('Self-healed escrow attachment on post-payment capture', {
+                orderId: order.orderId,
+                escrowId: params.escrowId,
+                performerUid: task.assigneeUid,
+              });
+            } else {
+              logger.warn('Failed self-healed escrow attachment', {
+                orderId: order.orderId,
+                error: attach.error,
+              });
+            }
+          } catch (err: any) {
+            logger.error('Error during self-healed escrow attachment', {
+              orderId: order.orderId,
+              error: err.message,
+            });
+          }
+        }
+      }
+
       return { success: true, duplicate: true };
     }
 
