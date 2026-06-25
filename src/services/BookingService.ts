@@ -13,6 +13,10 @@ import {
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
 import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
+import {
+  assertBookNowSlotAvailable,
+  getOccupiedBookNowSlots,
+} from '../utils/bookNowSlotAvailability';
 
 type BookingAddress = {
   label?: string;
@@ -55,6 +59,68 @@ type ResolvedLine = {
   title: string;
   snapshotName: string;
 };
+
+type PendingBookingLine = {
+  skuId?: string;
+  variantId?: string;
+  addonIds: string[];
+  packageSlug: string;
+  categorySlug: string;
+  categoryLabel: string;
+  taskCategory: string;
+  pricingUnit: 'fixed' | 'hourly';
+  quantity: number;
+  lineTotal: number;
+  durationMinutes: number;
+  title: string;
+  snapshotName: string;
+};
+
+function pendingBookNowTaskId(orderId: string): string {
+  return `booknow-pending-${orderId}`;
+}
+
+function serializePendingLine(line: ResolvedLine): PendingBookingLine {
+  return {
+    packageSlug: line.packageSlug,
+    categorySlug: line.categorySlug,
+    categoryLabel: line.categoryLabel,
+    taskCategory: line.taskCategory,
+    pricingUnit: line.pricingUnit,
+    quantity: line.quantity,
+    lineTotal: line.lineTotal,
+    durationMinutes: line.durationMinutes,
+    title: line.title,
+    snapshotName: line.snapshotName,
+    skuId: line.skuId ? String(line.skuId) : undefined,
+    variantId: line.variantId ? String(line.variantId) : undefined,
+    addonIds: line.addonIds.map((id) => String(id)),
+  };
+}
+
+function deserializePendingLine(line: PendingBookingLine): ResolvedLine {
+  return {
+    packageSlug: line.packageSlug,
+    categorySlug: line.categorySlug,
+    categoryLabel: line.categoryLabel,
+    taskCategory: line.taskCategory,
+    pricingUnit: line.pricingUnit,
+    quantity: line.quantity,
+    lineTotal: line.lineTotal,
+    durationMinutes: line.durationMinutes,
+    title: line.title,
+    snapshotName: line.snapshotName,
+    skuId: line.skuId && mongoose.Types.ObjectId.isValid(line.skuId)
+      ? new mongoose.Types.ObjectId(line.skuId)
+      : undefined,
+    variantId: line.variantId && mongoose.Types.ObjectId.isValid(line.variantId)
+      ? new mongoose.Types.ObjectId(line.variantId)
+      : undefined,
+    addonIds: (line.addonIds || [])
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id)),
+  };
+}
 
 export class BookingService {
   /** Helper on site — highest Book Now cancellation tier. */
@@ -250,6 +316,29 @@ export class BookingService {
       throw new BadRequestError('At least one service item is required');
     }
 
+    if (scheduledDate && (scheduledTimeStart || timeSlot)) {
+      try {
+        await assertBookNowSlotAvailable({
+          date: scheduledDate,
+          city: address.city,
+          scheduledTimeStart,
+          timeSlot,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
+          throw new BadRequestError(
+            'This time slot is no longer available. Please choose another slot.',
+          );
+        }
+        if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
+          throw new BadRequestError(
+            'Book Now requires at least 3 hours notice. Please choose a later time slot.',
+          );
+        }
+        throw error;
+      }
+    }
+
     const resolvedLines = await Promise.all(rawLines.map((line) => this.resolveLine(line)));
     const pricingResult = await PaymentClient.calculateBookNowOrderTotals(
       resolvedLines.map((line) => ({
@@ -274,7 +363,9 @@ export class BookingService {
       customerProfileId,
       status: 'awaiting_payment',
       address,
-      scheduledDate: scheduledDate ? new Date(scheduledDate) : undefined,
+      scheduledDate: scheduledDate
+        ? new Date(`${scheduledDate}T00:00:00.000+05:30`)
+        : undefined,
       scheduledTimeStart,
       scheduledTimeEnd,
       timeSlot,
@@ -283,55 +374,14 @@ export class BookingService {
       platformFee: pricing.platformFee,
       gst: pricing.gst,
       total: pricing.total,
+      pendingLines: resolvedLines.map(serializePendingLine),
+      bookingNotes: notes?.trim() || undefined,
     });
 
-    const createdTasks: InstanceType<typeof Task>[] = [];
     const createdItems: InstanceType<typeof BookingItem>[] = [];
 
     try {
       for (const line of resolvedLines) {
-        const description =
-          notes?.trim() ||
-          `Book Now: ${line.title}. Address: ${address.line1}, ${address.city} ${address.pinCode}.`;
-
-        const task = await Task.create({
-          title: line.title,
-          description,
-          category: line.taskCategory as any,
-          categorySlug: line.categorySlug,
-          categoryLabel: line.categoryLabel,
-          subcategory: line.packageSlug,
-          budget: { amount: line.lineTotal, currency: 'INR', type: line.pricingUnit },
-          isNegotiable: false,
-          location: {
-            type: 'Point',
-            coordinates: address.coordinates,
-            address: [address.line1, address.line2].filter(Boolean).join(', '),
-            city: address.city,
-            state: address.state,
-            pinCode: address.pinCode,
-            country: 'IN',
-          },
-          urgency: 'medium',
-          priority: 'normal',
-          status: 'open',
-          requesterId: customerProfileId,
-          scheduledDate: order.scheduledDate,
-          scheduledTimeStart,
-          scheduledTimeEnd,
-          timeSlot,
-          flexibility: 'strict',
-          estimatedDuration: line.durationMinutes,
-          views: 0,
-          isFeatured: false,
-          currentRevisionRound: 0,
-          negotiationStatus: 'closed',
-          bookingSource: 'book_now',
-          bookingOrderId: orderId,
-          assignmentStatus: 'pending',
-        });
-        createdTasks.push(task);
-
         const item = await BookingItem.create({
           orderId,
           ...(line.skuId ? { skuId: line.skuId } : {}),
@@ -340,7 +390,6 @@ export class BookingService {
           quantity: line.quantity,
           unitPrice: line.lineTotal / line.quantity,
           lineTotal: line.lineTotal,
-          taskId: task._id,
           skuSnapshot: {
             name: line.snapshotName,
             slug: line.packageSlug,
@@ -348,19 +397,17 @@ export class BookingService {
           },
         });
         createdItems.push(item);
-
-        await Task.findByIdAndUpdate(task._id, { bookingItemId: String(item._id) });
       }
 
-      const primaryTask = createdTasks[0];
       const primaryLine = resolvedLines[0];
       const combinedTitle =
         resolvedLines.length === 1
           ? primaryLine.title
           : `Book Now (${resolvedLines.length} services)`;
+      const placeholderTaskId = pendingBookNowTaskId(orderId);
 
       const escrowResult = await PaymentClient.createBookingEscrow({
-        taskId: String(primaryTask._id),
+        taskId: placeholderTaskId,
         bookingOrderId: orderId,
         posterUid: customerUid,
         amount: pricing.total,
@@ -379,12 +426,12 @@ export class BookingService {
             platformFee: 0,
             totalPaid: pricing.total,
           },
-          bookNowLineItems: createdTasks.map((task, index) => ({
-            taskId: String(task._id),
-            taskTitle: resolvedLines[index]?.title || task.title,
-            lineAmountRupees: resolvedLines[index]?.lineTotal,
-            catalogId: resolvedLines[index]?.categorySlug,
-            categorySlug: resolvedLines[index]?.categorySlug,
+          bookNowLineItems: resolvedLines.map((line) => ({
+            taskId: `${placeholderTaskId}:${line.packageSlug}`,
+            taskTitle: line.title,
+            lineAmountRupees: line.lineTotal,
+            catalogId: line.categorySlug,
+            categorySlug: line.categorySlug,
           })),
         },
       });
@@ -403,9 +450,8 @@ export class BookingService {
       order.razorpayOrderId = escrowResult.order.id || escrowResult.escrow?.razorpayOrderId;
       await order.save();
 
-      logger.info('Book Now booking created', {
+      logger.info('Book Now booking checkout created (tasks deferred until payment)', {
         orderId,
-        taskIds: createdTasks.map((t) => t._id),
         customerUid,
         total: pricing.total,
         itemCount: resolvedLines.length,
@@ -415,8 +461,8 @@ export class BookingService {
         order,
         item: createdItems[0],
         items: createdItems,
-        task: primaryTask,
-        tasks: createdTasks,
+        task: null,
+        tasks: [],
         escrow: escrowResult.escrow,
         razorpayOrder: escrowResult.order,
       };
@@ -425,11 +471,177 @@ export class BookingService {
       for (const item of createdItems) {
         await BookingItem.findByIdAndDelete(item._id);
       }
-      for (const task of createdTasks) {
-        await Task.findByIdAndDelete(task._id);
-      }
       throw error;
     }
+  }
+
+  private static async materializeBookingTasks(
+    order: InstanceType<typeof BookingOrder>,
+  ): Promise<InstanceType<typeof Task>[]> {
+    const items = await BookingItem.find({ orderId: order.orderId }).sort({ createdAt: 1 });
+    const existingTaskIds = items.map((item) => item.taskId).filter(Boolean);
+    if (existingTaskIds.length > 0) {
+      return Task.find({ _id: { $in: existingTaskIds } }).sort({ createdAt: 1 });
+    }
+
+    const rawPending = (order.pendingLines || []) as PendingBookingLine[];
+    const lines = rawPending.map((line) => deserializePendingLine(line));
+    if (!lines.length) {
+      throw new BadRequestError('Booking has no services to post after payment');
+    }
+
+    const address = order.address;
+    const createdTasks: InstanceType<typeof Task>[] = [];
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const description =
+        order.bookingNotes?.trim() ||
+        `Book Now: ${line.title}. Address: ${address.line1}, ${address.city} ${address.pinCode}.`;
+
+      const task = await Task.create({
+        title: line.title,
+        description,
+        category: line.taskCategory as any,
+        categorySlug: line.categorySlug,
+        categoryLabel: line.categoryLabel,
+        subcategory: line.packageSlug,
+        budget: { amount: line.lineTotal, currency: 'INR', type: line.pricingUnit },
+        isNegotiable: false,
+        location: {
+          type: 'Point',
+          coordinates: address.coordinates,
+          address: [address.line1, address.line2].filter(Boolean).join(', '),
+          city: address.city,
+          state: address.state,
+          pinCode: address.pinCode,
+          country: 'IN',
+        },
+        urgency: 'medium',
+        priority: 'normal',
+        status: 'open',
+        requesterId: order.customerProfileId,
+        scheduledDate: order.scheduledDate,
+        scheduledTimeStart: order.scheduledTimeStart,
+        scheduledTimeEnd: order.scheduledTimeEnd,
+        timeSlot: order.timeSlot,
+        flexibility: 'strict',
+        estimatedDuration: line.durationMinutes,
+        views: 0,
+        isFeatured: false,
+        currentRevisionRound: 0,
+        negotiationStatus: 'closed',
+        bookingSource: 'book_now',
+        bookingOrderId: order.orderId,
+        assignmentStatus: 'pending',
+      });
+      createdTasks.push(task);
+
+      const item = items[index];
+      if (item) {
+        item.taskId = task._id;
+        await item.save();
+        await Task.findByIdAndUpdate(task._id, { bookingItemId: String(item._id) });
+      } else {
+        const createdItem = await BookingItem.create({
+          orderId: order.orderId,
+          ...(line.skuId ? { skuId: line.skuId } : {}),
+          ...(line.variantId ? { variantId: line.variantId } : {}),
+          addonIds: line.addonIds,
+          quantity: line.quantity,
+          unitPrice: line.lineTotal / line.quantity,
+          lineTotal: line.lineTotal,
+          taskId: task._id,
+          skuSnapshot: {
+            name: line.snapshotName,
+            slug: line.packageSlug,
+            categorySlug: line.categorySlug,
+          },
+        });
+        await Task.findByIdAndUpdate(task._id, { bookingItemId: String(createdItem._id) });
+      }
+    }
+
+    order.pendingLines = undefined;
+    await order.save();
+
+    logger.info('Book Now tasks posted after payment', {
+      orderId: order.orderId,
+      taskIds: createdTasks.map((task) => task._id),
+    });
+
+    return createdTasks;
+  }
+
+  static async abandonUnpaidBooking(orderId: string, customerUid: string) {
+    const order = await BookingOrder.findOne({ orderId });
+    if (!order) throw new NotFoundError('Booking not found');
+    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
+    if (order.status !== 'awaiting_payment' || order.paidAt) {
+      return { order, abandoned: false };
+    }
+
+    const items = await BookingItem.find({ orderId });
+    for (const item of items) {
+      if (item.taskId) {
+        await Task.findByIdAndDelete(item.taskId);
+      }
+      await BookingItem.findByIdAndDelete(item._id);
+    }
+
+    order.status = 'cancelled';
+    order.cancelledAt = new Date();
+    order.cancellationReason = 'Payment not completed';
+    order.pendingLines = undefined;
+    await order.save();
+
+    logger.info('Abandoned unpaid Book Now checkout', { orderId, customerUid });
+    return { order, abandoned: true };
+  }
+
+  static async getSlotAvailability(date: string, city: string) {
+    const occupied = await getOccupiedBookNowSlots(date, city);
+    return {
+      date: String(date || '').trim(),
+      city: String(city || '').trim(),
+      ...occupied,
+    };
+  }
+
+  /**
+   * Client fallback when payment-service → task-service callback fails after Razorpay verify.
+   * Idempotent — safe to call after every successful Book Now payment.
+   */
+  static async confirmPaymentForCustomer(orderId: string, customerUid: string) {
+    const order = await BookingOrder.findOne({ orderId });
+    if (!order) throw new NotFoundError('Booking not found');
+    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
+
+    if (order.status !== 'awaiting_payment') {
+      if (order.pendingLines?.length) {
+        await this.materializeBookingTasks(order);
+      }
+      return { success: true, alreadyConfirmed: true, order };
+    }
+
+    const escrowId = String(order.paymentEscrowId || '').trim();
+    const razorpayOrderId = String(order.razorpayOrderId || '').trim();
+    if (!escrowId || !razorpayOrderId) {
+      throw new BadRequestError('Payment details are missing for this booking');
+    }
+
+    const escrow = await PaymentClient.getEscrowByEscrowId(escrowId);
+    const escrowStatus = String(escrow?.status || '').toLowerCase();
+    if (!escrow || !['held', 'completed', 'released'].includes(escrowStatus)) {
+      throw new BadRequestError('Payment has not been captured yet. Please wait a moment and try again.');
+    }
+
+    return this.onPaymentCaptured({
+      bookingOrderId: orderId,
+      escrowId,
+      razorpayOrderId,
+      taskId: pendingBookNowTaskId(orderId),
+    });
   }
 
   static async getOrderForCustomer(orderId: string, customerUid: string) {
@@ -496,6 +708,9 @@ export class BookingService {
     }
 
     if (order.status === 'paid' || order.status === 'assigning' || order.status === 'assigned') {
+      if (order.pendingLines?.length) {
+        await this.materializeBookingTasks(order);
+      }
       let changed = false;
       if (!order.paymentEscrowId && params.escrowId) {
         order.paymentEscrowId = params.escrowId;
@@ -552,12 +767,16 @@ export class BookingService {
     order.paidAt = new Date();
     await order.save();
 
+    const tasks = await this.materializeBookingTasks(order);
+    const primaryTaskId = tasks[0] ? String(tasks[0]._id) : params.taskId;
+
     logger.info('Book Now order marked paid/assigning', {
       orderId: order.orderId,
-      taskId: params.taskId,
+      taskId: primaryTaskId,
+      taskCount: tasks.length,
     });
 
-    return { success: true, order };
+    return { success: true, order, tasks };
   }
 
   static async cancelBookingItem(

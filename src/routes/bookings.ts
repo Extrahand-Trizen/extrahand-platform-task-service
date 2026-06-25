@@ -11,11 +11,26 @@ router.use(serviceAuthMiddleware);
 router.post('/', authMiddleware, asyncHandler(BookingController.createBooking));
 router.get('/mine', authMiddleware, asyncHandler(BookingController.listMyOrders));
 router.get(
+  '/slot-availability',
+  authMiddleware,
+  asyncHandler(BookingController.getSlotAvailability),
+);
+router.get(
   '/by-task/:taskId',
   authMiddleware,
   asyncHandler(BookingController.getOrderIdForTask),
 );
 router.get('/:orderId', authMiddleware, asyncHandler(BookingController.getOrder));
+router.post(
+  '/:orderId/abandon',
+  authMiddleware,
+  asyncHandler(BookingController.abandonUnpaidBooking),
+);
+router.post(
+  '/:orderId/confirm-payment',
+  authMiddleware,
+  asyncHandler(BookingController.confirmPayment),
+);
 router.post(
   '/:orderId/cancel-item',
   authMiddleware,
