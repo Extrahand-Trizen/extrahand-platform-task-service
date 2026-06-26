@@ -221,27 +221,38 @@ export class AssignmentService {
   static async findOrderIdForTaskAdmin(taskId: string): Promise<{ orderId: string; bookingItemId: string } | null> {
     if (!mongoose.Types.ObjectId.isValid(taskId)) return null;
 
-    // First try via Task.bookingOrderId
+    const taskIdObj = new mongoose.Types.ObjectId(taskId);
+
+    // Try finding via BookingItem with this taskId directly first
+    const item = await BookingItem.findOne({ taskId: taskIdObj }).lean();
+    if (item && item.orderId) {
+      return { orderId: item.orderId, bookingItemId: String(item._id) };
+    }
+
+    // Fallback: try via Task.bookingOrderId
     const task = await Task.findById(taskId).select('bookingOrderId').lean();
     if (task?.bookingOrderId) {
       const order = await BookingOrder.findOne({ orderId: task.bookingOrderId })
         .select('orderId')
         .lean();
       if (order) {
-        const item = await BookingItem.findOne({ orderId: task.bookingOrderId })
+        // Find the specific item matching our taskId in this order
+        const matchItem = await BookingItem.findOne({ 
+          orderId: task.bookingOrderId, 
+          taskId: taskIdObj 
+        }).lean();
+        if (matchItem) {
+          return { orderId: task.bookingOrderId, bookingItemId: String(matchItem._id) };
+        }
+        // Last fallback: find any item in this order
+        const anyItem = await BookingItem.findOne({ orderId: task.bookingOrderId })
           .select('_id')
           .lean();
-        return { orderId: task.bookingOrderId, bookingItemId: String(item?._id || '') };
+        return { orderId: task.bookingOrderId, bookingItemId: String(anyItem?._id || '') };
       }
     }
 
-    // Fallback via BookingItem
-    const item = await BookingItem.findOne({ taskId: new mongoose.Types.ObjectId(taskId) })
-      .select('orderId')
-      .lean();
-    if (!item?.orderId) return null;
-
-    return { orderId: item.orderId, bookingItemId: String(item._id || '') };
+    return null;
   }
 
   /**
@@ -384,12 +395,27 @@ export class AssignmentService {
     await task.save();
 
     // Reset escrow performer to pending_assignment
-    if (escrowId) {
+    let resolvedEscrowId = escrowId;
+    if (!resolvedEscrowId) {
       try {
-        await PaymentClient.detachPerformerFromEscrow(escrowId);
+        const item = await BookingItem.findOne({ taskId: task._id }).lean();
+        if (item && item.orderId) {
+          const order = await BookingOrder.findOne({ orderId: item.orderId }).select('paymentEscrowId').lean();
+          if (order?.paymentEscrowId) {
+            resolvedEscrowId = order.paymentEscrowId;
+          }
+        }
+      } catch (resolveErr: any) {
+        logger.warn('Failed to resolve escrowId for unassignment', { taskId, error: resolveErr?.message });
+      }
+    }
+
+    if (resolvedEscrowId) {
+      try {
+        await PaymentClient.detachPerformerFromEscrow(resolvedEscrowId);
       } catch (err: any) {
         logger.warn('Failed to detach performer from escrow (non-blocking)', {
-          escrowId,
+          escrowId: resolvedEscrowId,
           error: err?.message,
         });
       }
