@@ -243,12 +243,18 @@ export async function assertBookNowSlotAvailable(params: {
 
   const occupied = await getOccupiedBookNowSlots(date, city);
   const anchors = occupied.occupiedBookingAnchors;
+  const hasExactStartSlot = Boolean(scheduledTimeStart);
 
   if (scheduledTimeStart && isAnchorBlocked(scheduledTimeStart, anchors)) {
     throw new Error('SLOT_UNAVAILABLE');
   }
 
-  if (timeSlot) {
+  /**
+   * `timeSlot` is a coarse fallback bucket for legacy clients.
+   * When exact `scheduledTimeStart` is provided, do not re-validate by bucket anchor;
+   * that can incorrectly reject valid later slots in the same bucket.
+   */
+  if (!hasExactStartSlot && timeSlot) {
     const bucketAnchor = bucketAnchorSlot(timeSlot);
     if (isBookNowSlotWithinLeadTime(bucketAnchor, date)) {
       throw new Error('SLOT_TOO_SOON');
