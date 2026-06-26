@@ -1,4 +1,4 @@
-﻿import mongoose from 'mongoose';
+import mongoose from 'mongoose';
 import type { ITask } from '../models/Task';
 import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
@@ -149,7 +149,7 @@ export async function runPostCreateNotifications(
         try {
           await InAppNotificationClient.send({
             userId: requesterProfile.uid,
-            title: 'âœ… Task Posted Successfully',
+            title: 'Work Posted Successfully',
             body: `Your task "${task.title}" is now visible to taskers`,
             category: 'taskUpdates',
             type: 'success',
@@ -318,7 +318,7 @@ export async function runPostCreateNotifications(
             try {
               await InAppNotificationClient.send({
                 userId: matchedUid,
-                title: 'ðŸŽ¯ New Skill Matched Nearby',
+                title: 'New Skill Matched Nearby',
                 body: `A new "${skillMatchCategory}" task "${task.title}" has been posted near ${recommendedLocationLabel}`,
                 category: 'recommendedTaskAlerts',
                 type: 'info',
@@ -584,7 +584,7 @@ export async function runPostCreateNotifications(
                       try {
                         await InAppNotificationClient.send({
                           userId: p.uid,
-                          title: 'ðŸ”” Task Found: ' + matchedKeywordStr,
+                          title: 'Work Found: ' + matchedKeywordStr,
                           body: `A new task "${task.title}" matches your keywords`,
                           category: 'keywordTaskAlerts',
                           type: 'info',
@@ -883,7 +883,7 @@ export async function runPostCreateNotifications(
             }
             await InAppNotificationClient.send({
               userId: nearbyUid,
-              title: isNearbyAndSkill ? 'ðŸŽ¯ New Skill Matched Nearby' : 'ðŸ“ New Task Near You',
+              title: isNearbyAndSkill ? 'New Skill Matched Nearby' : 'New Work Near You',
               body: isNearbyAndSkill
                 ? `A ${task.categoryLabel || task.category} task "${task.title}" matches your skills near ${locationLabel}`
                 : `"${task.title}" has been posted near ${locationLabel}`,

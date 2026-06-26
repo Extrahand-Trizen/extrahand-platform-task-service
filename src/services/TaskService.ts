@@ -28,6 +28,7 @@ import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
+import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 
@@ -220,7 +221,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce';
 
 /** Post & Choose only â€” Book Now tasks are assigned via ops, not helper browse. */
 function buildMarketplaceBrowseClause(): Record<string, unknown> {
@@ -1313,14 +1314,16 @@ export class TaskService {
       }
     }
 
-    // Non-negotiable tasks: poster may change the listed budget at most once via updateTask (Edit Work).
-    if (updateData.budget && task.isNegotiable === false) {
+    // Non-negotiable + Pick & Drop: poster may change listed budget at most once via updateTask.
+    if (enforcesOneTimePosterBudgetFormEdit(task) && updateData.budget) {
       const newAmt = Number((updateData.budget as any).amount);
       const oldAmt = Number((task.budget as any)?.amount ?? 0);
       if (Number.isFinite(newAmt) && newAmt !== oldAmt) {
         if ((task as any).posterBudgetEditedViaFormOnce === true) {
           throw new BadRequestError(
-            "You can only update the fixed budget once. Further budget changes are not allowed here."
+            taskHasPickDropDetails(task)
+              ? 'You can only update the delivery budget once. Further budget changes are not allowed.'
+              : 'You can only update the fixed budget once. Further budget changes are not allowed here.',
           );
         }
         (updateData as any).posterBudgetEditedViaFormOnce = true;
