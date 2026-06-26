@@ -48,6 +48,27 @@ export class AssignmentController {
     res.json({ success: true, data: info });
   }
 
+  static async unassignHelper(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+
+    const { taskId, escrowId } = req.body;
+    if (!taskId) {
+      throw new BadRequestError('taskId is required');
+    }
+
+    const data = await AssignmentService.unassignHelper({
+      taskId,
+      escrowId,
+      unassignedByUid: user.uid,
+    });
+
+    res.json({ success: true, data });
+  }
+
   static async assignHelperDirect(req: AuthenticatedRequest, res: Response): Promise<void> {
     const user = req.user;
     if (!user?.uid) {

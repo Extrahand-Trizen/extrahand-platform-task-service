@@ -8,6 +8,10 @@ import TaskApplication from '../models/TaskApplication';
 import { PaymentClient } from './PaymentClient';
 import { BadRequestError, NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
+import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
+import { emitTaskStatusChanged } from '../socket/socketHandlers';
+import { NotificationClient } from './NotificationClient';
+import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 
 /**
  * Create (or upsert) a synthetic accepted TaskApplication for a Book Now
@@ -124,6 +128,13 @@ export class AssignmentService {
         $set: { status: 'cancelled' },
       }
     );
+
+    // Cancel old helper's accepted application so they no longer see this task
+    if (task.acceptedApplicationId) {
+      await TaskApplication.findByIdAndUpdate(task.acceptedApplicationId, {
+        $set: { status: 'cancelled' },
+      });
+    }
 
     const assignment = await Assignment.create({
       bookingOrderId: orderId,
@@ -260,6 +271,13 @@ export class AssignmentService {
       }
     );
 
+    // Cancel old helper's accepted application so they no longer see this task
+    if (task.acceptedApplicationId) {
+      await TaskApplication.findByIdAndUpdate(task.acceptedApplicationId, {
+        $set: { status: 'cancelled' },
+      });
+    }
+
     const helperProfileObjId = new mongoose.Types.ObjectId(helperProfileId);
 
     // Create assignment record for logs/audits
@@ -310,5 +328,130 @@ export class AssignmentService {
     });
 
     return { assignment, task };
+  }
+
+  static async unassignHelper(params: {
+    taskId: string;
+    escrowId?: string;
+    unassignedByUid: string;
+  }) {
+    const { taskId, escrowId, unassignedByUid } = params;
+
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError('Task not found');
+
+    const oldHelperUid = task.assigneeUid;
+
+    const activeAssignment = await Assignment.findOne({
+      taskId: task._id,
+      status: { $in: ['assigned', 'pending'] },
+    });
+
+    // Cancel existing active assignments
+    await Assignment.updateMany(
+      {
+        taskId: task._id,
+        status: { $in: ['assigned', 'pending'] },
+      },
+      { $set: { status: 'cancelled' } }
+    );
+
+    if (activeAssignment) {
+      await AssignmentLog.create({
+        assignmentId: activeAssignment._id,
+        action: 'manual_unassign',
+        actorUid: unassignedByUid,
+        metadata: { oldHelperUid },
+      });
+    } else {
+      logger.info('No active assignment record found for unassignment log', { taskId: task._id });
+    }
+
+    // Remove/cancel the accepted application
+    if (task.acceptedApplicationId) {
+      await TaskApplication.findByIdAndUpdate(task.acceptedApplicationId, {
+        $set: { status: 'cancelled' },
+      });
+    }
+
+    // Reset task fields
+    task.assigneeId = null;
+    task.assigneeUid = null;
+    task.assignedAt = undefined;
+    task.status = 'open';
+    task.assignmentStatus = undefined;
+    task.acceptedApplicationId = null;
+    await task.save();
+
+    // Reset escrow performer to pending_assignment
+    if (escrowId) {
+      try {
+        await PaymentClient.detachPerformerFromEscrow(escrowId);
+      } catch (err: any) {
+        logger.warn('Failed to detach performer from escrow (non-blocking)', {
+          escrowId,
+          error: err?.message,
+        });
+      }
+    }
+
+    // Emit socket event so customer & helper UIs update in real-time
+    try {
+      const taskJson = task.toObject();
+      emitTaskStatusChanged(taskId, taskJson);
+    } catch (err: any) {
+      logger.warn('Failed to emit socket event on unassign', { taskId, error: err?.message });
+    }
+
+    // Notify customer that helper was unassigned
+    if (task.requesterUid) {
+      try {
+        await InAppNotificationClient.send({
+          userId: task.requesterUid,
+          title: 'Helper unassigned',
+          body: `The helper assigned to your task "${task.title}" has been unassigned by operations.`,
+          type: 'info',
+          category: 'taskUpdates',
+          data: { taskId, action: 'unassigned' },
+        });
+      } catch (err: any) {
+        logger.warn('Failed to send unassign notification to customer', { taskId, error: err?.message });
+      }
+    }
+
+    // Notify old helper that they were unassigned
+    if (oldHelperUid) {
+      try {
+        await InAppNotificationClient.send({
+          userId: oldHelperUid,
+          title: 'Task unassigned',
+          body: `You have been unassigned from task "${task.title}" by operations.`,
+          type: 'info',
+          category: 'taskUpdates',
+          data: { taskId, action: 'unassigned' },
+        });
+
+        await NotificationClient.send({
+          eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+          category: 'taskUpdates',
+          actorId: unassignedByUid,
+          recipients: [oldHelperUid],
+          entity: { type: 'task', id: taskId },
+          title: 'Task unassigned',
+          body: `You have been unassigned from task "${task.title}" by operations.`,
+          data: { taskId, action: 'unassigned' },
+        });
+      } catch (err: any) {
+        logger.warn('Failed to send unassign notification to helper', { taskId, error: err?.message });
+      }
+    }
+
+    logger.info('Helper unassigned from Book Now task', {
+      taskId,
+      oldHelperUid,
+      unassignedByUid,
+    });
+
+    return { task };
   }
 }

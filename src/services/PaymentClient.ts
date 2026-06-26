@@ -189,6 +189,48 @@ export class PaymentClient {
     }
   }
 
+  static async detachPerformerFromEscrow(escrowId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.patch(
+        `${this.baseURL}/api/v1/escrow/${encodeURIComponent(escrowId)}/reset-performer`,
+        {},
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        }
+      );
+
+      if (response.data.success) {
+        return { success: true };
+      }
+
+      return {
+        success: false,
+        error: response.data.error || 'Failed to detach performer',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to detach performer',
+      };
+    }
+  }
+
   /** Move held recurring visit escrow to the next visit when a paid visit is rescheduled. */
   static async reassignRecurringVisitEscrow(params: {
     escrowId: string;
