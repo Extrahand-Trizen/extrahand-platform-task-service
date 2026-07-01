@@ -27,6 +27,7 @@ import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
@@ -2844,11 +2845,13 @@ export class TaskService {
     logger.info(`Change request submitted for task ${taskId} by requester ${profileId.toString()}`);
 
     // Send notification to assignee about the change request
-    if (task.assigneeId) {
+    if (task.assigneeId || task.assigneeUid) {
       try {
         const Profile = mongoose.connection.collection("profiles");
         const requesterProfile = await Profile.findOne({ _id: profileId });
-        const assigneeProfile = await Profile.findOne({ _id: task.assigneeId });
+        const assigneeProfile = task.assigneeId
+          ? await Profile.findOne({ _id: task.assigneeId })
+          : null;
 
         if (assigneeProfile?.email && requesterProfile?.name) {
           EmailServiceClient.sendChangesRequested(assigneeProfile.email, {
@@ -2866,55 +2869,14 @@ export class TaskService {
           );
         }
 
-        // Send in-app + push notification to tasker using Firebase UID
-        if (assigneeProfile?.uid) {
-          const taskerUid = String(assigneeProfile.uid);
-          const posterName = requesterProfile?.name || requesterProfile?.fullName || 'The poster';
-          const notifData = {
-            taskId,
-            changeMessage: message,
-            status: 'started',
-            eventKey: 'TASK_UPDATED',
-            entityType: 'task',
-          };
-
-          // Push notification (FCM â€” works when app is closed)
-          await NotificationClient.send({
-            eventKey: 'TASK_UPDATED',
-            category: 'taskUpdates',
-            actorId: profileId.toString(),
-            recipients: [taskerUid],
-            entity: { type: 'task', id: taskId },
-            title: 'Revision requested',
-            body: `${posterName} has requested changes on "${task.title}". Please review and resubmit.`,
-            data: notifData,
-          }).catch((err: Error) =>
-            logger.error('Error sending push notification for changes_requested', {
-              taskId,
-              error: err instanceof Error ? err.message : 'Unknown error',
-            })
-          );
-
-          // In-app notification
-          await InAppNotificationClient.send({
-            userId: taskerUid,
-            title: 'Revision requested',
-            body: `${posterName} has requested changes on "${task.title}". Please review and resubmit.`,
-            type: 'warning',
-            category: 'taskUpdates',
-            data: notifData,
-          }).catch((err: Error) =>
-            logger.error('Error sending in-app notification for changes_requested', {
-              taskId,
-              error: err instanceof Error ? err.message : 'Unknown error',
-            })
-          );
-        } else {
-          logger.warn('[TaskService.requestChanges] Could not resolve tasker Firebase UID for notification', {
-            taskId,
-            assigneeId: task.assigneeId?.toString(),
-          });
-        }
+        await notifyHelperRevisionRequested({
+          taskId,
+          taskTitle: task.title,
+          message,
+          assigneeId: task.assigneeId,
+          assigneeUid: task.assigneeUid,
+          posterProfileId: profileId,
+        });
       } catch (error) {
         logger.error("Error notifying assignee about change request", {
           taskId,

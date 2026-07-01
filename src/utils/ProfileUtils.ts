@@ -106,6 +106,21 @@ export class ProfileUtils {
   }
 
   /**
+   * Resolve a task assignee's Firebase UID from profile id and/or denormalized task field.
+   */
+  static async resolveAssigneeFirebaseUid(task: {
+    assigneeId?: mongoose.Types.ObjectId | string | null;
+    assigneeUid?: string | null;
+  }): Promise<string | undefined> {
+    if (task.assigneeId) {
+      const fromProfile = await ProfileUtils.getUidByProfileId(task.assigneeId);
+      if (fromProfile) return fromProfile;
+    }
+    const fromTask = String(task.assigneeUid || "").trim();
+    return fromTask || undefined;
+  }
+
+  /**
    * Look up profile Mongo ObjectId by auth uid (Firebase uid or dev dummy uid stored on profile).
    */
   static async getProfileIdByUid(

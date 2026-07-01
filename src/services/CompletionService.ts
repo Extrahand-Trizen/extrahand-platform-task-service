@@ -13,6 +13,7 @@ import { config } from '../config/env';
 import { emitProofSubmitted, emitProofApproved, emitProofRejected } from '../socket/socketHandlers';
 import { TaskService } from './TaskService';
 import { RecurringVisitService } from './RecurringVisitService';
+import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { ITask } from '../models/Task';
 
 export class CompletionService {
@@ -499,48 +500,14 @@ export class CompletionService {
 
     // Send notifications to tasker about rejection and request to resubmit
     try {
-      const Profile = mongoose.connection.collection('profiles');
-      const assigneeProfile = task.assigneeId
-        ? await Profile.findOne({ _id: task.assigneeId })
-        : null;
-      const resubmitUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
-
-      // Notify tasker via FCM + in-app
-      if (assigneeProfile?.uid) {
-        // FCM Notification
-        await NotificationClient.send({
-          eventKey: 'TASK_UPDATED',
-          category: 'taskUpdates',
-          actorId: taskOwnerProfileId,
-          recipients: [assigneeProfile.uid],
-          entity: { type: 'task', id: taskId },
-          title: 'Changes requested on your submission',
-          body: `${reason || 'Please revise and resubmit your work.'}`,
-          data: {
-            taskId,
-            status: 'in_progress',
-            action: 'resubmit_required',
-            taskUrl: resubmitUrl,
-          },
-        });
-
-        // In-app Notification
-        await InAppNotificationClient.send({
-          userId: String(assigneeProfile.uid),
-          title: 'Changes requested on your submission',
-          body: `${reason || 'Please revise and resubmit your work.'}`,
-          type: 'warning',
-          category: 'taskUpdates',
-          data: {
-            taskId,
-            status: 'in_progress',
-            action: 'resubmit_required',
-            taskUrl: resubmitUrl,
-            eventKey: 'TASK_UPDATED',
-            entityType: 'task',
-          },
-        });
-      }
+      await notifyHelperRevisionRequested({
+        taskId,
+        taskTitle: task.title,
+        message: reason,
+        assigneeId: task.assigneeId,
+        assigneeUid: task.assigneeUid,
+        posterProfileId: taskOwnerProfileId,
+      });
     } catch (error) {
       logger.error('Error sending rejection notification', {
         taskId,
