@@ -61,6 +61,22 @@ router.get(
   asyncHandler(TaskController.getOpenTaskCount)
 );
 
+// GET /api/v1/tasks/:id/tracking-bundle - Combined task tracking payload
+router.get(
+  "/:id/tracking-bundle",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getTrackingBundle)
+);
+
+// GET /api/v1/tasks/:id/my-application - Current user's application for a task
+router.get(
+  "/:id/my-application",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getMyApplication)
+);
+
 // GET /api/v1/tasks/:id - Get a single task (public route)
 router.get(
   "/:id",

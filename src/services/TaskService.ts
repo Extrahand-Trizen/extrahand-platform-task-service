@@ -32,6 +32,13 @@ import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse'
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
+import {
+  MY_TASKS_LIST_SELECT,
+  buildApplicationPreviewsForTasks,
+  buildRecurringSummary,
+  parseMyTasksInclude,
+  truncateDescription,
+} from './myTasksEnrichment';
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -736,12 +743,14 @@ export class TaskService {
       status?: TaskStatus;
       limit?: number;
       page?: number;
+      include?: string;
     }
   ): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, limit = 50, page = 1 } = filters;
+    const { status, limit = 50, page = 1, include } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
+    const includeFlags = parseMyTasksInclude(include);
 
     const query: any = {
       requesterId: profileId,
@@ -750,7 +759,7 @@ export class TaskService {
     if (status) query.status = status;
 
     const tasks = await Task.find(query)
-      .select(TASK_LIST_SELECT)
+      .select(MY_TASKS_LIST_SELECT)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(effectiveLimit)
@@ -758,8 +767,41 @@ export class TaskService {
 
     const total = await Task.countDocuments(query);
 
+    let enrichedTasks = tasks.map((task) => {
+      const row = task as Record<string, unknown>;
+      if (typeof row.description === 'string') {
+        row.description = truncateDescription(row.description);
+      }
+      return row;
+    });
+
+    if (includeFlags.applicationPreview && enrichedTasks.length > 0) {
+      const previewMap = await buildApplicationPreviewsForTasks(
+        enrichedTasks as Array<{ _id?: mongoose.Types.ObjectId | string; status?: string }>,
+      );
+      enrichedTasks = enrichedTasks.map((task) => {
+        const row = task as Record<string, unknown>;
+        const preview = previewMap.get(String(row._id));
+        if (preview) {
+          row.applicationPreview = preview;
+        }
+        return row;
+      });
+    }
+
+    if (includeFlags.recurringSummary && enrichedTasks.length > 0) {
+      enrichedTasks = enrichedTasks.map((task) => {
+        const row = task as Record<string, unknown>;
+        const summary = buildRecurringSummary(row);
+        if (summary) {
+          row.recurringSummary = summary;
+        }
+        return row;
+      });
+    }
+
     return {
-      tasks: tasks as unknown as ITask[],
+      tasks: enrichedTasks as unknown as ITask[],
       pagination: {
         page: effectivePage,
         limit: effectiveLimit,

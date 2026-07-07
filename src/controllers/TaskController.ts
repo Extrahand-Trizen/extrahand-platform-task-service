@@ -9,6 +9,7 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import logger from '../config/logger';
+import { TaskTrackingBundleService } from '../services/TaskTrackingBundleService';
 import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
 
 export class TaskController {
@@ -154,7 +155,7 @@ export class TaskController {
    * Get tasks posted by the current user
    */
   static async getMyTasks(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { status, limit, page } = req.query;
+    const { status, limit, page, include } = req.query;
 
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
@@ -164,6 +165,7 @@ export class TaskController {
       status: status as any,
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
+      include: typeof include === 'string' ? include : undefined,
     });
 
     ApiResponse.paginated(res, result.tasks, 'Your tasks retrieved successfully', result.pagination);
@@ -507,6 +509,44 @@ export class TaskController {
       req.user!.profileId
     );
     ApiResponse.success(res, task, 'Additional payment request withdrawn');
+  }
+
+  static async getTrackingBundle(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id: taskId } = req.params;
+
+    if (!taskId) {
+      throw new BadRequestError('Task ID is required');
+    }
+
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const bundle = await TaskTrackingBundleService.getTrackingBundle(
+      taskId,
+      req.user!.profileId,
+    );
+
+    ApiResponse.success(res, bundle, 'Task tracking bundle retrieved successfully');
+  }
+
+  static async getMyApplication(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id: taskId } = req.params;
+
+    if (!taskId) {
+      throw new BadRequestError('Task ID is required');
+    }
+
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await TaskTrackingBundleService.getMyApplicationForTask(
+      taskId,
+      req.user!.profileId,
+    );
+
+    ApiResponse.success(res, result, 'My application retrieved successfully');
   }
 
   static async getTasksBatch(req: Request, res: Response): Promise<void> {
