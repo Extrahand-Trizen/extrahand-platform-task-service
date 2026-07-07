@@ -21,16 +21,13 @@ export class StatsController {
       throw new BadRequestError('uid query parameter is required');
     }
 
-    const [taskStats, reviewData] = await Promise.all([
+    const [taskStats, reviewStats] = await Promise.all([
       AnalyticsService.getUserTaskStats(profileId, uid),
-      ReviewService.getUserReviews(profileId, { limit: 1000, skip: 0 }),
+      ReviewService.getUserReviewStats(profileId),
     ]);
 
-    const reviews = reviewData?.reviews || [];
-    const totalReviews = reviews.length;
-    const avgRating = totalReviews > 0
-      ? reviews.reduce((sum: number, review: any) => sum + Number(review?.rating || 0), 0) / totalReviews
-      : 0;
+    const totalReviews = reviewStats.totalReviews || 0;
+    const avgRating = Number(reviewStats.avgRating || 0);
 
     res.json({
       success: true,

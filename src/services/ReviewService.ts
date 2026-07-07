@@ -60,7 +60,7 @@ export class ReviewService {
     }
 
     // Get the performer's ID from task
-    //@ts-ignore
+    // @ts-ignore
     const performerId = task.assigneeId;
 
     // If no assignee, can't review
@@ -103,7 +103,7 @@ export class ReviewService {
       rating: rating,
       review: comment || '',
       completedAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
     });
 
     // Update performer's profile rating
@@ -115,23 +115,27 @@ export class ReviewService {
           $group: {
             _id: null,
             avgRating: { $avg: '$rating' },
-            count: { $sum: 1 }
-          }
-        }
+            count: { $sum: 1 },
+          },
+        },
       ]);
 
       if (avgRatingResult.length > 0) {
         const { avgRating, count } = avgRatingResult[0];
-        await Profile.updateOne(
-          { _id: performerId },
-          {
-            $set: {
-              rating: Math.round(avgRating * 10) / 10, // Round to 1 decimal place
-              totalReviews: count,
-              updatedAt: new Date()
-            }
-          }
-        );
+      await Profile.updateOne(
+        { _id: performerId },
+        {
+          $set: {
+            rating: Math.round(avgRating * 10) / 10, // Round to 1 decimal place
+            totalReviews: count,
+            updatedAt: new Date(),
+          },
+          $inc: {
+            completedTasks: 1,
+            totalTasks: 1,
+          },
+        }
+      );
       }
     } catch (error) {
       logger.warn('Could not update performer rating:', error);
@@ -153,7 +157,7 @@ export class ReviewService {
 
     // Check if user is involved in the task (using ObjectId comparison)
     const isRequester = task.requesterId.equals(profileId);
-    //@ts-ignore
+    // @ts-ignore
     const isAssignee = task.assigneeId && task.assigneeId.equals(profileId);
 
     if (!isRequester && !isAssignee) {
@@ -173,7 +177,7 @@ export class ReviewService {
 
       const [reviewerProfile, reviewedProfile] = await Promise.all([
         Profile.findOne({ _id: review.reviewerId }),
-        Profile.findOne({ _id: review.reviewedId })
+        Profile.findOne({ _id: review.reviewedId }),
       ]);
 
       // Attach profile data to review
@@ -232,6 +236,40 @@ export class ReviewService {
 
     const updated = await Review.findByIdAndUpdate(reviewId, update, { new: true });
     return updated as IReview;
+  }
+
+  /**
+   * Get aggregated review statistics for a specific user (count + average rating)
+   */
+  static async getUserReviewStats(userId: string): Promise<{ totalReviews: number; avgRating: number }> {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        return { totalReviews: 0, avgRating: 0 };
+      }
+
+      const objectId = new mongoose.Types.ObjectId(userId);
+      const agg = await Review.aggregate([
+        { $match: { reviewedId: objectId, isPublic: true } },
+        {
+          $group: {
+            _id: null,
+            totalReviews: { $sum: 1 },
+            avgRating: { $avg: '$rating' },
+          },
+        },
+      ]);
+
+      if (!agg || agg.length === 0) return { totalReviews: 0, avgRating: 0 };
+
+      const row = agg[0] as any;
+      return {
+        totalReviews: Number(row.totalReviews || 0),
+        avgRating: Number(row.avgRating || 0),
+      };
+    } catch (error) {
+      logger.warn('Failed to compute user review stats:', error);
+      return { totalReviews: 0, avgRating: 0 };
+    }
   }
 
   /**
@@ -316,3 +354,4 @@ export class ReviewService {
   }
 }
 
+export default ReviewService;

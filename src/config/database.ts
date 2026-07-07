@@ -25,6 +25,16 @@ export class Database {
 
     mongoose.set('strictQuery', true);
 
+    // Fix malformed URI if detected (common issue with duplicate appName parameter)
+    let cleanUri = uri;
+    if (uri.includes('appName=Cluster0w=majority')) {
+      cleanUri = uri.replace(
+        /appName=Cluster0w=majority&appName=Cluster0/,
+        'appName=Cluster0'
+      );
+      logger.warn('⚠️ Detected malformed MongoDB URI, auto-fixing...');
+    }
+
     try {
       const connectionOptions = {
         dbName: process.env.MONGODB_DB || 'extrahand',
@@ -38,7 +48,7 @@ export class Database {
       logger.info('🔌 Attempting to connect to MongoDB...');
       logger.info(`📊 Database: ${connectionOptions.dbName}`);
 
-      await mongoose.connect(uri, connectionOptions);
+      await mongoose.connect(cleanUri, connectionOptions);
 
       isConnected = true;
 
@@ -49,7 +59,6 @@ export class Database {
         }`
       );
 
-      // Handle connection events
       mongoose.connection.on('error', (err) => {
         logger.error('❌ MongoDB connection error:', err);
         isConnected = false;
@@ -80,6 +89,24 @@ export class Database {
   }
 
   public static isConnected(): boolean {
-    return isConnected && mongoose.connection.readyState === 1;
+    const readyState = mongoose.connection.readyState;
+    const connected = isConnected && readyState === 1;
+
+    if (!connected && readyState !== 0) {
+      const states = [
+        'disconnected',
+        'connected',
+        'connecting',
+        'disconnecting',
+      ];
+
+      logger.warn(
+        `⚠️ MongoDB connection state: ${
+          states[readyState] || 'unknown'
+        } (${readyState})`
+      );
+    }
+
+    return connected;
   }
 }

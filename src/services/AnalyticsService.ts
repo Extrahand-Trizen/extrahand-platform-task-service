@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Task from '../models/Task';
 // import TaskQuestion from '../models/TaskQuestion';
 import TaskApplication from '../models/TaskApplication';
+import logger from '../config/logger';
 
 const GENUINE_STATUSES = ['assigned', 'started', 'in_progress', 'review', 'completed'];
 
@@ -99,36 +100,55 @@ export class AnalyticsService {
     };
   }
 
-  static async getUserTaskStats(profileId: string, _uid: string): Promise<{
+  static async getUserTaskStats(profileId: string, uid: string): Promise<{
     totalTasks: number;
     completedTasks: number;
     postedTasks: number;
   }> {
-    const profileObjectId = new mongoose.Types.ObjectId(profileId);
+    if (!mongoose.Types.ObjectId.isValid(profileId)) {
+      logger.warn(`getUserTaskStats: invalid ObjectId profileId=${profileId} uid=${uid}`);
+      return {
+        totalTasks: 0,
+        completedTasks: 0,
+        postedTasks: 0,
+      };
+    }
 
-    const [assigneeStats, posterStats] = await Promise.all([
-      Task.aggregate([
-        { $match: { assigneeId: profileObjectId } },
-        {
-          $group: {
-            _id: null,
-            totalTasks: { $sum: 1 },
-            completedTasks: {
-              $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] },
+    const profileObjectId = new mongoose.Types.ObjectId(profileId);
+    logger.info(`getUserTaskStats: querying tasks for profileId=${profileId} uid=${uid} assigneeObjectId=${profileObjectId}`);
+
+    const [result] = await Task.aggregate([
+      {
+        $facet: {
+          assigneeStats: [
+            { $match: { assigneeId: profileObjectId } },
+            {
+              $group: {
+                _id: null,
+                totalTasks: { $sum: 1 },
+                completedTasks: {
+                  $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] },
+                },
+              },
             },
-          },
+          ],
+          posterStats: [
+            { $match: { requesterId: profileObjectId } },
+            { $count: 'postedTasks' },
+          ],
         },
-      ]),
-      Task.aggregate([
-        { $match: { requesterId: profileObjectId } },
-        { $count: 'postedTasks' },
-      ]),
+      },
     ]);
 
+    const assigneeStats = result?.assigneeStats?.[0] || {};
+    const posterStats = result?.posterStats?.[0] || {};
+
+    logger.info(`getUserTaskStats: result for profileId=${profileId} uid=${uid} assigneeStats=${JSON.stringify(assigneeStats)} posterStats=${JSON.stringify(posterStats)}`);
+
     return {
-      totalTasks: Number(assigneeStats?.[0]?.totalTasks || 0),
-      completedTasks: Number(assigneeStats?.[0]?.completedTasks || 0),
-      postedTasks: Number(posterStats?.[0]?.postedTasks || 0),
+      totalTasks: Number(assigneeStats.totalTasks || 0),
+      completedTasks: Number(assigneeStats.completedTasks || 0),
+      postedTasks: Number(posterStats.postedTasks || 0),
     };
   }
 
