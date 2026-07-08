@@ -177,6 +177,43 @@ export class AssignmentService {
     task.acceptedApplicationId = applicationId;
     await task.save();
 
+    // Attempt fallback escrow creation if missing
+    if (!order.paymentEscrowId) {
+      try {
+        logger.info('Order missing paymentEscrowId during assignment, attempting fallback creation', { orderId });
+        const createRes = await PaymentClient.createBookingEscrow({
+          taskId: `booknow-pending-${order.orderId}`,
+          bookingOrderId: order.orderId,
+          posterUid: order.customerUid,
+          amount: order.total,
+          taskAmount: order.subtotal,
+          taskCategory: task.category?.toString() || 'other',
+          taskTitle: task.title || 'Book Now Task',
+          metadata: {
+            bookingOrderId: order.orderId,
+            bookingMode: 'book_now',
+            amountBreakdown: {
+              taskAmount: order.subtotal,
+              gst: order.gst,
+              platformFee: order.platformFee,
+              totalPaid: order.total,
+            },
+            adminFallbackCreated: true,
+          }
+        });
+
+        if (createRes.success && createRes.escrow?.escrowId) {
+          order.paymentEscrowId = createRes.escrow.escrowId;
+          await order.save();
+          logger.info('Fallback escrow created successfully', { orderId, escrowId: order.paymentEscrowId });
+        } else {
+          logger.warn('Fallback escrow creation failed', { orderId, error: createRes.error });
+        }
+      } catch (fallbackErr: any) {
+        logger.warn('Fallback escrow creation threw error', { orderId, error: fallbackErr?.message });
+      }
+    }
+
     // Fire-and-forget escrow attachment — never block assignment on payment errors
     if (order.paymentEscrowId) {
       try {
