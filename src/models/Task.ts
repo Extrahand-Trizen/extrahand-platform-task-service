@@ -294,6 +294,11 @@ export interface ITask extends Document {
   bookingItemId?: string;
   assignmentStatus?: 'pending' | 'assigned' | 'failed';
 
+  /** Partner who accepted this Book Now lead */
+  partnerId?: mongoose.Types.ObjectId | null;
+  partnerUid?: string | null;
+  partnerAcceptedAt?: Date;
+
   notificationGovernance?: {
     /** Bumped when scheduled date/time changes — invalidates old start-soon idempotency keys. */
     scheduleVersion?: string;
@@ -756,6 +761,15 @@ const TaskSchema = new Schema<ITask>(
       enum: ['pending', 'assigned', 'failed'],
     },
 
+    partnerId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Profile',
+      default: null,
+      index: true,
+    },
+    partnerUid: { type: String, default: null, index: true },
+    partnerAcceptedAt: Date,
+
     notificationGovernance: {
       scheduleVersion: String,
       applicantsViewedAt: Date,
@@ -786,6 +800,9 @@ TaskSchema.index({ status: 1, scheduledDate: 1 });
 // Global revision: poster's revisable open tasks
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 TaskSchema.index({ bookingSource: 1, status: 1 });
+TaskSchema.index({ partnerId: 1, status: 1 });
+TaskSchema.index({ partnerUid: 1, status: 1 });
+TaskSchema.index({ partnerId: 1, bookingSource: 1, status: 1 });
 TaskSchema.index({ bookingOrderId: 1 });
 TaskSchema.index(
   { parentTaskId: 1, status: 1, recurringVisitId: 1 },

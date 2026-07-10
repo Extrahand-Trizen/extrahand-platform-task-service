@@ -285,7 +285,7 @@ const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
 
 function generateStartOtpCode(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
 function hashStartOtp(taskId: string, otp: string): string {
@@ -2715,9 +2715,9 @@ export class TaskService {
 
     // Reverted: no additional-quote pending gate in legacy flow.
 
-    const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 6);
-    if (sanitizedOtp.length !== 6) {
-      throw new BadRequestError("Please enter a valid 6-digit OTP");
+    const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 4);
+    if (sanitizedOtp.length !== 4) {
+      throw new BadRequestError("Please enter a valid 4-digit OTP");
     }
 
     const Profile = mongoose.connection.collection("profiles");
