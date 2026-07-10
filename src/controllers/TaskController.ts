@@ -391,6 +391,41 @@ export class TaskController {
   }
 
   /**
+   * GET /api/v1/tasks/:id/start-otp
+   * Poster-only: read active start OTP for Work Progress
+   */
+  static async getStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const result = await TaskService.getStartOtpForPoster(
+      req.params.id,
+      req.user!.profileId,
+    );
+
+    ApiResponse.success(res, result, 'Start OTP retrieved');
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/execution-phase/arrived
+   * Helper marks arrived at customer location
+   */
+  static async markExecutionArrived(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+
+    const task = await TaskService.markExecutionArrived(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+    );
+
+    ApiResponse.success(res, task, 'Marked as arrived');
+  }
+
+  /**
    * POST /api/v1/tasks/:id/submit-proof
    * Submit completion proof for review
    */

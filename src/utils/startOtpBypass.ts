@@ -9,7 +9,7 @@
 
 import { config } from '../config/env';
 
-export const POSTER_DUMMY_START_OTP = '123123';
+export const POSTER_DUMMY_START_OTP = '1234';
 
 function parseUidList(raw: string | undefined): Set<string> {
   if (raw == null || !String(raw).trim()) return new Set();

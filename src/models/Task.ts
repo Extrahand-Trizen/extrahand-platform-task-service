@@ -232,8 +232,18 @@ export interface ITask extends Document {
     createdAt: Date;
   }>;
 
+  /**
+   * Journey sub-phase while task.status is still `assigned`.
+   * Helper updates this (no live GPS). OTP is issued when journey starts (`on_the_way`).
+   */
+  executionPhase?: 'assigned' | 'on_the_way' | 'arrived';
+  onTheWayAt?: Date;
+  arrivedAt?: Date;
+
   startOtp?: {
     codeHash: string;
+    /** Short-lived plaintext for poster Work Progress display only; never returned on public getTask. */
+    codePlain?: string;
     requestedAt: Date;
     expiresAt: Date;
     verifiedAt?: Date;
@@ -667,8 +677,16 @@ const TaskSchema = new Schema<ITask>(
       },
       createdAt: { type: Date, default: Date.now },
     }],
+    executionPhase: {
+      type: String,
+      enum: ['assigned', 'on_the_way', 'arrived'],
+      index: true,
+    },
+    onTheWayAt: Date,
+    arrivedAt: Date,
     startOtp: {
       codeHash: String,
+      codePlain: String,
       requestedAt: Date,
       expiresAt: Date,
       verifiedAt: Date,

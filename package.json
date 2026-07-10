@@ -12,6 +12,7 @@
     "test:recurring": "ts-node src/tests/recurringVisitBuffer.test.ts",
     "assign:book-now-ac-diagnosis": "ts-node src/scripts/assignBookNowAcDiagnosisTask.ts",
     "create:book-now-application": "ts-node src/scripts/createBookNowAcceptedApplication.ts",
+    "simulate:helper-journey": "ts-node src/scripts/simulateHelperJourneyProgress.ts",
     "fetch:dev-user-applications": "ts-node src/scripts/fetchDevUserApplications.ts",
     "backfill:recurring-visits": "ts-node src/scripts/backfillRecurringVisits.ts",
     "validate:recurring-visits": "ts-node src/scripts/validateRecurringVisitMigration.ts",

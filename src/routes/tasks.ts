@@ -133,6 +133,22 @@ router.post(
   asyncHandler(TaskController.verifyStartOtp)
 );
 
+// GET /api/v1/tasks/:id/start-otp - Poster reads OTP for Work Progress
+router.get(
+  "/:id/start-otp",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getStartOtp)
+);
+
+// POST /api/v1/tasks/:id/execution-phase/arrived - Helper marks arrived
+router.post(
+  "/:id/execution-phase/arrived",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.markExecutionArrived)
+);
+
 // POST /api/v1/tasks/:id/submit-proof - Submit completion proof for review
 router.post(
   "/:id/submit-proof",
