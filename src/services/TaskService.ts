@@ -1,5 +1,4 @@
 import mongoose from "mongoose";
-import crypto from "crypto";
 import Task, { ITask } from "../models/Task";
 import {
   BadRequestError,
@@ -283,31 +282,9 @@ function buildNearbyLocationClause(
 
 const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
-const START_OTP_LENGTH = 4;
 
 function generateStartOtpCode(): string {
-  const min = 10 ** (START_OTP_LENGTH - 1);
-  const max = 10 ** START_OTP_LENGTH - 1;
-  return Math.floor(min + Math.random() * (max - min + 1)).toString();
-}
-
-function hashStartOtp(taskId: string, otp: string): string {
-  return crypto.createHash("sha256").update(`${taskId}:${otp}`).digest("hex");
-}
-
-/** Strip OTP secrets before caching or returning task payloads. */
-function stripStartOtpSecrets<T extends Record<string, unknown>>(task: T): T {
-  const startOtp = task.startOtp;
-  if (!startOtp || typeof startOtp !== 'object') return task;
-  const otp = startOtp as Record<string, unknown>;
-  const { codeHash: _h, codePlain: _p, ...safe } = otp;
-  return {
-    ...task,
-    startOtp: {
-      ...safe,
-      hasPendingOtp: Boolean(_h && !safe.verifiedAt),
-    },
-  };
+  return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
 function getPendingAdditionalQuoteRequest(task: ITask): any | null {
@@ -913,7 +890,7 @@ export class TaskService {
       }
     }
 
-    const result = stripStartOtpSecrets(task as unknown as Record<string, unknown>) as unknown as ITask;
+    const result = task as unknown as ITask;
     const resolvedTaskId = String((result as unknown as { _id?: unknown })._id ?? taskId);
 
     try {
@@ -2526,23 +2503,39 @@ export class TaskService {
         });
       }
 
-      // Payout is now helper-requested from app (not auto-processed here).
-      try {
-        if (task.assigneeId) {
+      // Auto-request payout immediately after task status set to completed
+      const performerUid = updatedTask?.assigneeUid || task.assigneeUid;
+      if (updatedTask?.assigneeId && performerUid) {
+        try {
+          const payoutAmount = typeof task.budget === 'object' ? task.budget.amount : Number(task.budget);
+          logger.info(`[Auto-Payout] Initiating auto-payout from updateTaskStatus for task ${taskId}, performer: ${performerUid}, amount: ${payoutAmount}`);
+          const payoutResult = await PaymentClient.processTaskCompletionPayout({
+            taskId,
+            performerUid,
+            amount: payoutAmount,
+            taskTitle: updatedTask.title || task.title,
+            visitId: updatedTask.recurringVisitId ? String(updatedTask.recurringVisitId) : undefined,
+          });
+          logger.info(`[Auto-Payout] Payout result from updateTaskStatus for task ${taskId}:`, payoutResult);
+          
           await InAppNotificationClient.send({
-            userId: task.assigneeId.toString(),
-            title: "Request your payout",
-            body: `Task completed. Open task tracking and request payout for \"${task.title}\".`,
-            type: "info",
-            category: "payments",
+            userId: updatedTask.assigneeId.toString(),
+            title: payoutResult.success ? 'Payout Initiated' : 'Payout Initiation Failed',
+            body: payoutResult.success
+              ? `Task completed. Payout of ₹${payoutAmount} has been initiated automatically.`
+              : `Task completed. Payout initiation failed: ${payoutResult.error || 'Please request manually'}.`,
+            type: 'info',
+            category: 'payments',
             data: {
               taskId,
-              actionUrl: "/profile?section=payments",
+              actionUrl: '/profile?section=payments',
             },
           });
+        } catch (paymentError: any) {
+          logger.error(`[Auto-Payout] Error processing auto-payout in updateTaskStatus for task ${taskId}:`, paymentError);
         }
-      } catch (paymentError) {
-        logger.error(`Error sending payout-request notification from updateTaskStatus for task ${taskId}:`, paymentError);
+      } else {
+        logger.warn('[Auto-Payout] Skipping auto-payout in updateTaskStatus: assignee details missing', { taskId });
       }
     }
 
@@ -2592,6 +2585,7 @@ export class TaskService {
     }
 
     const otp = generateStartOtpCode();
+    logger.info(`[OTP] Generated 4-digit start OTP: ${otp} for task: ${effectiveTaskId}`);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + START_OTP_TTL_MS);
 
@@ -2600,7 +2594,7 @@ export class TaskService {
       : workTask.startOtp?.resendCount || 0;
 
     workTask.startOtp = {
-      codeHash: hashStartOtp(effectiveTaskId, otp),
+      codeHash: otp,
       codePlain: otp,
       requestedAt: now,
       expiresAt,
@@ -2608,12 +2602,7 @@ export class TaskService {
       resendCount: nextResendCount,
       requestedById: profileId,
     };
-
-    // Journey start: OTP is issued when the helper starts toward the customer.
-    if (!workTask.onTheWayAt) {
-      workTask.onTheWayAt = now;
-    }
-    workTask.executionPhase = 'on_the_way';
+    workTask.executionPhase = "on_the_way";
 
     await workTask.save();
 
@@ -2621,7 +2610,7 @@ export class TaskService {
       await RecurringVisitService.resolveStartOtpWorkTitle(workTask);
 
     const otpBody = `Task start OTP for \"${workTitleForOtp}\": ${otp}. Valid for 10 minutes.`;
-    const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Helper on the way — share OTP';
+    const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Task Start OTP';
     const notificationData = {
       taskId: effectiveTaskId,
       taskTitle: workTitleForOtp,
@@ -2631,7 +2620,6 @@ export class TaskService {
       otp,
       otpType: 'task_start',
       expiresAt: expiresAt.toISOString(),
-      executionPhase: 'on_the_way',
       eventKey: 'TASK_UPDATED',
       entityType: 'task',
     };
@@ -2706,151 +2694,13 @@ export class TaskService {
       logger.warn("Failed to send task start OTP via in-app notification", { taskId, error: inAppError });
     }
 
+    logger.info(`[OTP SUCCESS] Generated and successfully dispatched 4-digit start OTP: ${otp} for task: ${effectiveTaskId} to poster: ${requesterName}`);
     TaskService.invalidateTaskCache(taskId);
-    TaskService.invalidateTaskCache(effectiveTaskId);
 
     return {
       expiresAt,
       sentTo: requesterName,
-      executionPhase: 'on_the_way' as const,
     };
-  }
-
-  /**
-   * Poster-only: read the active start OTP for Work Progress display.
-   */
-  static async getStartOtpForPoster(
-    taskId: string,
-    profileId: mongoose.Types.ObjectId,
-  ): Promise<{
-    otp: string | null;
-    expiresAt: string | null;
-    executionPhase: string | null;
-    hasPendingOtp: boolean;
-  }> {
-    const task = await Task.findById(taskId);
-    if (!task) {
-      throw new NotFoundError('Task not found');
-    }
-
-    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
-    const isRequester = workTask.requesterId?.equals(profileId) || false;
-    if (!isRequester) {
-      throw new ForbiddenError('Only the work owner can view the start OTP');
-    }
-
-    const phase = String((workTask as any).executionPhase || '').toLowerCase() || null;
-    const startOtp = workTask.startOtp;
-    if (!startOtp?.codePlain || !startOtp.expiresAt || startOtp.verifiedAt) {
-      return {
-        otp: null,
-        expiresAt: startOtp?.expiresAt ? new Date(startOtp.expiresAt).toISOString() : null,
-        executionPhase: phase,
-        hasPendingOtp: Boolean(startOtp?.codeHash && !startOtp?.verifiedAt),
-      };
-    }
-
-    if (new Date(startOtp.expiresAt).getTime() < Date.now()) {
-      return {
-        otp: null,
-        expiresAt: new Date(startOtp.expiresAt).toISOString(),
-        executionPhase: phase,
-        hasPendingOtp: false,
-      };
-    }
-
-    return {
-      otp: String(startOtp.codePlain),
-      expiresAt: new Date(startOtp.expiresAt).toISOString(),
-      executionPhase: phase,
-      hasPendingOtp: true,
-    };
-  }
-
-  /**
-   * Helper marks arrived at customer location (status stays assigned until OTP verify).
-   */
-  static async markExecutionArrived(
-    taskId: string,
-    profileId: mongoose.Types.ObjectId,
-    _uid: string,
-  ): Promise<ITask> {
-    const task = await Task.findById(taskId);
-    if (!task) {
-      throw new NotFoundError('Task not found');
-    }
-
-    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
-    const isPerformer = workTask.assigneeId?.equals(profileId) || false;
-    if (!isPerformer) {
-      throw new ForbiddenError('Only the assigned helper can mark arrived');
-    }
-
-    if (workTask.status !== 'assigned') {
-      throw new BadRequestError('Can only mark arrived while the task is assigned');
-    }
-
-    const now = new Date();
-    if (!(workTask as any).onTheWayAt) {
-      (workTask as any).onTheWayAt = now;
-    }
-    (workTask as any).arrivedAt = now;
-    (workTask as any).executionPhase = 'arrived';
-    await workTask.save();
-
-    TaskService.invalidateTaskCache(String(workTask._id));
-    if (String(workTask._id) !== taskId) {
-      TaskService.invalidateTaskCache(taskId);
-    }
-
-    // Notify poster that helper arrived (OTP still needed to start).
-    try {
-      const Profile = mongoose.connection.collection('profiles');
-      const requesterProfile = await Profile.findOne({ _id: workTask.requesterId });
-      const requesterUid =
-        requesterProfile && typeof requesterProfile === 'object' && 'uid' in requesterProfile
-          ? (requesterProfile as { uid?: unknown }).uid
-          : undefined;
-      if (typeof requesterUid === 'string' && requesterUid) {
-        const title = 'Helper Arrived';
-        const body = `Your helper has arrived. Share the start OTP to begin \"${workTask.title}\".`;
-        const data = {
-          taskId: String(workTask._id),
-          taskTitle: workTask.title,
-          executionPhase: 'arrived',
-          eventKey: 'TASK_UPDATED',
-          entityType: 'task',
-          status: 'assigned',
-        };
-        await NotificationClient.send({
-          eventKey: 'TASK_UPDATED',
-          category: 'taskUpdates',
-          actorId: _uid,
-          recipients: [requesterUid],
-          entity: { type: 'task', id: String(workTask._id) },
-          title,
-          body,
-          data,
-        }).catch(() => undefined);
-        await InAppNotificationClient.send({
-          userId: requesterUid,
-          title,
-          body,
-          type: 'info',
-          category: 'taskUpdates',
-          data,
-        }).catch(() => undefined);
-      }
-    } catch (err) {
-      logger.warn('Failed to notify poster of helper arrival', {
-        taskId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    return stripStartOtpSecrets(
-      workTask.toObject() as unknown as Record<string, unknown>,
-    ) as unknown as ITask;
   }
 
   /**
@@ -2880,9 +2730,9 @@ export class TaskService {
 
     // Reverted: no additional-quote pending gate in legacy flow.
 
-    const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, START_OTP_LENGTH);
-    if (sanitizedOtp.length !== START_OTP_LENGTH) {
-      throw new BadRequestError(`Please enter a valid ${START_OTP_LENGTH}-digit OTP`);
+    const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 4);
+    if (sanitizedOtp.length !== 4) {
+      throw new BadRequestError("Please enter a valid 4-digit OTP");
     }
 
     const Profile = mongoose.connection.collection("profiles");
@@ -2915,8 +2765,7 @@ export class TaskService {
       throw new BadRequestError("Too many invalid attempts. Please resend OTP");
     }
 
-    const expectedHash = hashStartOtp(effectiveTaskId, sanitizedOtp);
-    if (workTask.startOtp.codeHash !== expectedHash) {
+    if (workTask.startOtp.codeHash !== sanitizedOtp) {
       workTask.startOtp.attempts = (workTask.startOtp.attempts || 0) + 1;
       await workTask.save();
 
@@ -2928,9 +2777,6 @@ export class TaskService {
     }
 
     workTask.startOtp.verifiedAt = new Date();
-    if (workTask.startOtp.codePlain) {
-      workTask.startOtp.codePlain = undefined;
-    }
     await workTask.save();
 
     return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
@@ -3292,5 +3138,66 @@ export class TaskService {
     if (!updated) throw new NotFoundError("Task not found");
     TaskService.invalidateTaskCache(taskId);
     return updated as unknown as ITask;
+  }
+
+  static async markExecutionArrived(
+    taskId: string,
+    performerProfileId: mongoose.Types.ObjectId,
+    _performerUid: string
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const effectiveTaskId = String(workTask._id);
+
+    const isPerformer = workTask.assigneeId?.equals(performerProfileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only assigned performer can mark arrival");
+    }
+
+    if (workTask.status !== "assigned") {
+      throw new BadRequestError("Task must be in assigned state to mark arrival");
+    }
+
+    if (workTask.executionPhase !== "on_the_way") {
+      throw new BadRequestError("Helper journey must be started (on the way) to mark arrival");
+    }
+
+    const updated = await Task.findByIdAndUpdate(
+      effectiveTaskId,
+      {
+        executionPhase: "arrived",
+        arrivedAt: new Date(),
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    ).lean();
+
+    if (!updated) throw new NotFoundError("Task not found");
+    TaskService.invalidateTaskCache(effectiveTaskId);
+    return updated as unknown as ITask;
+  }
+
+  static async getStartOtpForPoster(
+    taskId: string,
+    posterProfileId: mongoose.Types.ObjectId
+  ): Promise<{ otp: string | null; expiresAt: Date | null; executionPhase: string | null }> {
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError("Task not found");
+
+    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+
+    const isRequester = workTask.requesterId.equals(posterProfileId);
+    if (!isRequester) {
+      throw new ForbiddenError("Only the task requester can view the start OTP");
+    }
+
+    const startOtp = workTask.startOtp;
+    return {
+      otp: startOtp?.codePlain || null,
+      expiresAt: startOtp?.expiresAt || null,
+      executionPhase: workTask.executionPhase || null,
+    };
   }
 }
