@@ -28,6 +28,7 @@ import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
+import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
@@ -1025,15 +1026,25 @@ export class TaskService {
           ? [taskData.location.longitude, taskData.location.latitude]
           : null);
 
-      location = {
-        type: "Point" as const,
-        // Only set coordinates if we have valid non-zero values
-        ...(coords && coords[0] !== 0 && coords[1] !== 0 ? { coordinates: coords } : {}),
-        address: taskData.location.address || taskData.location || undefined,
-        city: taskData.location.city || taskData.city || undefined,
-        state: taskData.location.state || taskData.state || undefined,
-        country: taskData.location.country || taskData.country || "India",
-      };
+      location = applyTaskAreaToLocation(
+        {
+          type: "Point" as const,
+          // Only set coordinates if we have valid non-zero values
+          ...(coords && coords[0] !== 0 && coords[1] !== 0 ? { coordinates: coords } : {}),
+          address: taskData.location.address || taskData.location || undefined,
+          city: taskData.location.city || taskData.city || undefined,
+          state: taskData.location.state || taskData.state || undefined,
+          pinCode: taskData.location.pinCode || taskData.pinCode || undefined,
+          country: taskData.location.country || taskData.country || "India",
+          ...(taskData.location.taskArea
+            ? { taskArea: String(taskData.location.taskArea).trim() }
+            : {}),
+        },
+        {
+          taskArea: taskData.location.taskArea,
+          legacyTaskArea: taskData.taskArea,
+        },
+      );
     }
 
     const taskPayload: any = {
@@ -1206,6 +1217,9 @@ export class TaskService {
       taskPayload.location = location;
     }
 
+    // Legacy top-level taskArea is no longer persisted; nested under location.taskArea.
+    delete taskPayload.taskArea;
+
     // â”€â”€ Packers & Movers specific fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Only store when category is packers-movers â€” no impact on other categories
     if (mappedCategory === 'packers-movers' && taskData.packersMoversDetails) {
@@ -1377,6 +1391,20 @@ export class TaskService {
     }
     if (updateData.categoryLabel) {
       updateData.categoryLabel = updateData.categoryLabel.toString();
+    }
+
+    if (updateData.location) {
+      updateData.location = applyTaskAreaToLocation(updateData.location, {
+        taskArea: updateData.location.taskArea,
+        legacyTaskArea: updateData.taskArea,
+      });
+      delete updateData.taskArea;
+    } else if (updateData.taskArea) {
+      updateData.location = applyTaskAreaToLocation(
+        (task.location || {}) as Record<string, unknown>,
+        { legacyTaskArea: updateData.taskArea },
+      );
+      delete updateData.taskArea;
     }
 
     // Reschedule invalidates prior start-soon WhatsApp idempotency keys.
