@@ -17,6 +17,7 @@ import {
   assertBookNowSlotAvailable,
   getOccupiedBookNowSlots,
 } from '../utils/bookNowSlotAvailability';
+import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 
 type BookingAddress = {
   label?: string;
@@ -508,7 +509,7 @@ export class BookingService {
         subcategory: line.packageSlug,
         budget: { amount: line.lineTotal, currency: 'INR', type: line.pricingUnit },
         isNegotiable: false,
-        location: {
+        location: applyTaskAreaToLocation({
           type: 'Point',
           coordinates: address.coordinates,
           address: [address.line1, address.line2].filter(Boolean).join(', '),
@@ -516,7 +517,7 @@ export class BookingService {
           state: address.state,
           pinCode: address.pinCode,
           country: 'IN',
-        },
+        }),
         urgency: 'medium',
         priority: 'normal',
         status: 'open',

@@ -97,6 +97,8 @@ export interface ITask extends Document {
     state?: string;
     pinCode?: string;
     country?: string;
+    /** Neighborhood / locality captured at post time for helper browse views. */
+    taskArea?: string;
   };
 
   urgency: "low" | "medium" | "high" | "urgent";
@@ -439,6 +441,7 @@ const TaskSchema = new Schema<ITask>(
       state: String,
       pinCode: String,
       country: { type: String, default: "India" },
+      taskArea: { type: String, trim: true },
     },
 
     urgency: {
