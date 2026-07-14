@@ -54,7 +54,7 @@ export function resolveTaskAreaForCreate(input: {
 }): string {
   const explicit = String(input.taskArea || "").trim();
   if (explicit) return explicit;
-  return extractAreaFromAddress(String(input.address || ""), input.city);
+  return extractAreaFromAddress(String(input.address || ""), input.city ?? undefined);
 }
 
 export function applyTaskAreaToLocation<T extends Record<string, unknown>>(
@@ -64,7 +64,7 @@ export function applyTaskAreaToLocation<T extends Record<string, unknown>>(
     legacyTaskArea?: string | null;
   },
 ): T | undefined {
-  if (!location) return location;
+  if (!location) return undefined;
 
   const resolvedTaskArea = resolveTaskAreaForCreate({
     taskArea: taskAreaInput?.taskArea || taskAreaInput?.legacyTaskArea,
@@ -75,3 +75,4 @@ export function applyTaskAreaToLocation<T extends Record<string, unknown>>(
   if (!resolvedTaskArea) return location;
   return { ...location, taskArea: resolvedTaskArea };
 }
+
