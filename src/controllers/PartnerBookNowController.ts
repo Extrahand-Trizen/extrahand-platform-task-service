@@ -204,7 +204,7 @@ export class PartnerBookNowController {
     emitBookNowLeadRemoved(
       String(taskDoc._id),
       String(taskDoc.category || ''),
-      profileId,
+      String(profileId),
     );
 
     ApiResponse.success(res, task, 'Lead accepted successfully');
