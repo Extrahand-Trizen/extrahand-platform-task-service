@@ -2575,6 +2575,9 @@ export class TaskService {
             data: {
               taskId,
               actionUrl: '/profile?section=payments',
+              eventKey: payoutResult.success ? 'PAYOUT_INITIATED' : 'PAYOUT_FAILED',
+              entityType: 'payout',
+              category: 'payments',
             },
           });
         } catch (paymentError: any) {
