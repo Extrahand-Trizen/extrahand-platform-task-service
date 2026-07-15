@@ -12,7 +12,7 @@ import { config } from '../config/env';
 /** Primary dummy OTP for allowlisted poster UIDs (matches env docs / ops). */
 export const POSTER_DUMMY_START_OTP = '123123';
 
-/** Legacy dummy accepted during migration from 4-digit test OTP. */
+/** Legacy dummy accepted during migration from 4-digit test OTP (new-work-progress). */
 const LEGACY_POSTER_DUMMY_START_OTP = '1234';
 
 function parseUidList(raw: string | undefined): Set<string> {

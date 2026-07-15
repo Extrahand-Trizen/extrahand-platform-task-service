@@ -97,6 +97,8 @@ export interface ITask extends Document {
     state?: string;
     pinCode?: string;
     country?: string;
+    /** Neighborhood / locality captured at post time for helper browse views. */
+    taskArea?: string;
   };
 
   urgency: "low" | "medium" | "high" | "urgent";
@@ -120,6 +122,15 @@ export interface ITask extends Document {
   /** Firebase UID of the assigned helper — required for tasker My Work lookup */
   /** Firebase uid of assigned helper when denormalized on the task document. */
   assigneeUid?: string | null;
+  /**
+   * Canonical denormalized helper display name, stored at assignment time.
+   * Prefer this field for customer-facing "Professional assigned" UI.
+   */
+  assignedHelperName?: string | null;
+  /** @deprecated Prefer assignedHelperName — kept for older readers/writers. */
+  assignedToName?: string | null;
+  /** @deprecated Prefer assignedHelperName — kept for older readers/writers. */
+  assigneeName?: string | null;
   assignedAt?: Date;
   /** _id of the synthetic accepted TaskApplication created by ops assignment */
   acceptedApplicationId?: mongoose.Types.ObjectId | null;
@@ -232,8 +243,19 @@ export interface ITask extends Document {
     createdAt: Date;
   }>;
 
+  /**
+   * Journey sub-phase while task.status is still `assigned`.
+   * Helper updates this (no live GPS). OTP is issued when journey starts (`on_the_way`).
+   */
+  executionPhase?: 'assigned' | 'on_the_way' | 'arrived';
+  executionPhaseUpdatedAt?: Date;
+  onTheWayAt?: Date;
+  arrivedAt?: Date;
+
   startOtp?: {
     codeHash: string;
+    /** Short-lived plaintext for poster Work Progress display only; never returned on public getTask. */
+    codePlain?: string;
     requestedAt: Date;
     expiresAt: Date;
     verifiedAt?: Date;
@@ -434,6 +456,7 @@ const TaskSchema = new Schema<ITask>(
       state: String,
       pinCode: String,
       country: { type: String, default: "India" },
+      taskArea: { type: String, trim: true },
     },
 
     urgency: {
@@ -479,6 +502,10 @@ const TaskSchema = new Schema<ITask>(
       default: null,
     },
     assigneeUid: { type: String, default: null, index: true },
+    /** Stored at assignment time — exact helper name for work progress / history. */
+    assignedHelperName: { type: String, default: null },
+    assignedToName: { type: String, default: null },
+    assigneeName: { type: String, default: null },
     assignedAt: Date,
     acceptedApplicationId: {
       type: Schema.Types.ObjectId,
@@ -672,8 +699,17 @@ const TaskSchema = new Schema<ITask>(
       },
       createdAt: { type: Date, default: Date.now },
     }],
+    executionPhase: {
+      type: String,
+      enum: ['assigned', 'on_the_way', 'arrived'],
+      index: true,
+    },
+    executionPhaseUpdatedAt: Date,
+    onTheWayAt: Date,
+    arrivedAt: Date,
     startOtp: {
       codeHash: String,
+      codePlain: String,
       requestedAt: Date,
       expiresAt: Date,
       verifiedAt: Date,
