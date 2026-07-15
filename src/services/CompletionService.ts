@@ -15,6 +15,7 @@ import { TaskService } from './TaskService';
 import { RecurringVisitService } from './RecurringVisitService';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { ITask } from '../models/Task';
+import { PaymentClient } from './PaymentClient';
 
 export class CompletionService {
   /**
@@ -418,21 +419,39 @@ export class CompletionService {
       });
     }
 
-    // Payout is now helper-requested from app (not auto-processed here).
-    try {
-      await InAppNotificationClient.send({
-        userId: task.assigneeId!.toString(),
-        title: 'Request your payout',
-        body: `Task approved. Open task tracking and request payout for \"${task.title}\".`,
-        type: 'info',
-        category: 'payments',
-        data: {
+    // Auto-request payout immediately after task approved
+    const performerUid = updatedTask?.assigneeUid || task.assigneeUid;
+    if (updatedTask?.assigneeId && performerUid) {
+      try {
+        const payoutAmount = typeof task.budget === 'object' ? task.budget.amount : Number(task.budget);
+        logger.info(`[Auto-Payout] Initiating auto-payout for task ${taskId}, performer: ${performerUid}, amount: ${payoutAmount}`);
+        const payoutResult = await PaymentClient.processTaskCompletionPayout({
           taskId,
-          actionUrl: '/profile?section=payments',
-        },
-      });
-    } catch (paymentError) {
-      logger.error(`Error sending payout-request notification for task ${taskId}:`, paymentError);
+          performerUid,
+          amount: payoutAmount,
+          taskTitle: updatedTask.title || task.title,
+          visitId: updatedTask.recurringVisitId ? String(updatedTask.recurringVisitId) : undefined,
+        });
+        logger.info(`[Auto-Payout] Payout result for task ${taskId}:`, payoutResult);
+        
+        await InAppNotificationClient.send({
+          userId: updatedTask.assigneeId.toString(),
+          title: payoutResult.success ? 'Payout Initiated' : 'Payout Initiation Failed',
+          body: payoutResult.success
+            ? `Task approved. Payout of ₹${payoutAmount} has been initiated automatically.`
+            : `Task approved. Payout initiation failed: ${payoutResult.error || 'Please request manually'}.`,
+          type: 'info',
+          category: 'payments',
+          data: {
+            taskId,
+            actionUrl: '/profile?section=payments',
+          },
+        });
+      } catch (paymentError: any) {
+        logger.error(`[Auto-Payout] Error processing auto-payout for task ${taskId}:`, paymentError);
+      }
+    } else {
+      logger.warn('[Auto-Payout] Skipping auto-payout: assignee details missing', { taskId });
     }
 
     // Emit real-time proof approval
