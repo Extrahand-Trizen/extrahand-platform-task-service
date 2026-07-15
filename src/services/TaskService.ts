@@ -2063,6 +2063,20 @@ export class TaskService {
       updateData.cancellationReason = options?.cancellationReason;
     }
 
+    // Clear journey phase once work leaves assigned (avoid enum null validation issues).
+    if (
+      status === "started" ||
+      status === "in_progress" ||
+      status === "completed" ||
+      status === "cancelled"
+    ) {
+      updateData.$unset = {
+        ...(updateData.$unset || {}),
+        executionPhase: 1,
+        executionPhaseUpdatedAt: 1,
+      };
+    }
+
     // Clear OTP state once task leaves assigned state.
     if (task.status === "assigned" && status !== "assigned") {
       updateData.startOtp = undefined;
@@ -2814,6 +2828,64 @@ export class TaskService {
     return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
       skipStartOtpValidation: true,
     });
+  }
+
+  /**
+   * Update journey execution phase while task is still assigned
+   * (on_the_way after Start Journey, arrived when helper reaches location).
+   */
+  static async setExecutionPhase(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    phase: "on_the_way" | "arrived"
+  ): Promise<ITask> {
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const isPerformer = workTask.assigneeId?.equals(profileId) || false;
+    if (!isPerformer) {
+      throw new ForbiddenError("Only the assigned helper can update execution phase");
+    }
+
+    if (workTask.status !== "assigned") {
+      throw new BadRequestError("Execution phase can only change while work is assigned");
+    }
+
+    const current = String(workTask.executionPhase || "assigned");
+    if (phase === "on_the_way") {
+      if (current === "arrived") {
+        throw new BadRequestError("Helper already marked as arrived");
+      }
+      if (current === "on_the_way") {
+        return workTask;
+      }
+    } else if (phase === "arrived") {
+      if (current === "arrived") {
+        return workTask;
+      }
+      if (current !== "on_the_way") {
+        throw new BadRequestError("Start journey before marking arrived");
+      }
+    }
+
+    workTask.executionPhase = phase;
+    workTask.executionPhaseUpdatedAt = new Date();
+    await workTask.save();
+
+    try {
+      emitTaskStatusChanged(String(workTask._id), workTask);
+    } catch (err) {
+      logger.warn("emitTaskStatusChanged failed after execution phase update", {
+        taskId: String(workTask._id),
+        phase,
+        error: err,
+      });
+    }
+
+    return workTask;
   }
 
   /**

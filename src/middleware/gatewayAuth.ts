@@ -9,7 +9,9 @@ export function gatewayAuthMiddleware(req: Request, res: Response, next: NextFun
    const profileIdHeader = req.headers['x-profile-id'] as string | undefined;
    const sessionId = req.headers['x-session-id'] as string | undefined;
    
-   if (serviceAuth !== process.env.SERVICE_AUTH_TOKEN) {
+   // Prefer validated config so we stay in sync with serviceAuthMiddleware.
+   const expectedToken = process.env.SERVICE_AUTH_TOKEN;
+   if (!serviceAuth || !expectedToken || serviceAuth !== expectedToken) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
    }

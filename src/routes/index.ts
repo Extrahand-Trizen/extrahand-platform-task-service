@@ -54,6 +54,10 @@ router.get(
   asyncHandler(CatalogController.checkPinCode),
 );
 
+// Consolidated profile stats — service-to-service only (user-service calls this).
+// Must be registered BEFORE gatewayAuthMiddleware so it is not rejected as a gateway request.
+router.use('/stats', statsRoutes);
+
 // Gateway auth middleware (requires gateway auth)
 router.use(gatewayAuthMiddleware);
 
@@ -109,7 +113,6 @@ router.use('/matches', matchRoutes);
 router.use('/uploads', uploadRoutes);
 router.use('/test/reminders', testReminderRoutes); // Test endpoints (dev only)
 router.use('/analytics', analyticsRoutes);
-router.use('/stats', statsRoutes);
 router.use('/catalog', catalogRoutes);
 router.use('/bookings', bookingsRoutes);
 router.use('/admin/assignments', assignmentsRoutes);

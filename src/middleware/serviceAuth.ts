@@ -11,8 +11,10 @@ export function serviceAuthMiddleware(
   res: Response,
   next: NextFunction
 ): void {
-  const serviceAuthToken = req.headers['x-service-auth'] as string;
-  const serviceName = req.headers['x-service-name'] as string;
+  const rawToken = req.headers['x-service-auth'];
+  const serviceAuthToken = Array.isArray(rawToken) ? rawToken[0] : rawToken;
+  const rawName = req.headers['x-service-name'];
+  const serviceName = Array.isArray(rawName) ? rawName[0] : rawName;
 
   const expectedToken = config.SERVICE_AUTH_TOKEN;
 
