@@ -39,6 +39,20 @@ export async function authMiddleware(
       }
     }
     
+    // If profileId wasn't in headers, fallback to lookup in database by uid
+    if (!profileId && uid) {
+      try {
+        const Profile = mongoose.connection.collection('profiles');
+        const found = await Profile.findOne({ uid }, { projection: { _id: 1 } });
+        if (found) {
+          profileId = found._id as mongoose.Types.ObjectId;
+          console.log(`[Task-Service Auth] Resolved profileId from uid fallback: uid=${uid} profileId=${profileId}`);
+        }
+      } catch (dbErr) {
+        console.error('[Task-Service Auth] Fallback profile lookup failed:', dbErr);
+      }
+    }
+
     // Extract token from Authorization header (for backward compatibility)
     const authHeader = req.headers.authorization || '';
     const match = /^Bearer (.+)$/.exec(authHeader);
@@ -78,7 +92,7 @@ export async function optionalAuthMiddleware(
     const uid = req.headers['x-user-id'] as string;
     
     if (uid) {
-      // Extract profileId from X-Profile-Id header (optional)
+      // Extract profileId from X-Profile-Id header
       const profileIdHeader = req.headers['x-profile-id'] as string;
       let profileId: mongoose.Types.ObjectId | undefined;
       
@@ -86,11 +100,23 @@ export async function optionalAuthMiddleware(
         try {
           profileId = new mongoose.Types.ObjectId(profileIdHeader);
         } catch (error) {
-          // Invalid ObjectId format - continue without profileId
+          // Invalid format
         }
       }
       
-      // Extract token from Authorization header (optional)
+      // Fallback DB lookup by uid
+      if (!profileId) {
+        try {
+          const Profile = mongoose.connection.collection('profiles');
+          const found = await Profile.findOne({ uid }, { projection: { _id: 1 } });
+          if (found) {
+            profileId = found._id as mongoose.Types.ObjectId;
+          }
+        } catch (dbErr) {
+          // Ignore
+        }
+      }
+      
       const authHeader = req.headers.authorization || '';
       const match = /^Bearer (.+)$/.exec(authHeader);
       const token = match?.[1];

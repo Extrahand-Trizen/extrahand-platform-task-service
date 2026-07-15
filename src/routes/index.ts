@@ -14,6 +14,7 @@ import statsRoutes from './stats';
 import catalogRoutes from './catalog';
 import bookingsRoutes from './bookings';
 import assignmentsRoutes from './assignments';
+import partnerBookNowRoutes from './partnerBookNow';
 import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
 import { BookingController } from '../controllers/BookingController';
@@ -113,6 +114,7 @@ router.use('/stats', statsRoutes);
 router.use('/catalog', catalogRoutes);
 router.use('/bookings', bookingsRoutes);
 router.use('/admin/assignments', assignmentsRoutes);
+router.use('/book-now', partnerBookNowRoutes);
 
 export default router;
 
