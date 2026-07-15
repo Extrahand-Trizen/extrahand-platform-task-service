@@ -30,6 +30,35 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
       logger.info(`👋 User ${profileId} left task room: ${taskId}`);
     });
 
+    // Book Now lead room subscription — partners join category-specific rooms
+    socket.on("book-now:join", (data: { categories?: string[] }) => {
+      const categories = data.categories || [];
+      if (categories.length === 0) {
+        socket.join('book-now:all');
+        logger.info(`📋 User ${profileId} joined book-now:all`);
+      } else {
+        categories.forEach((cat) => {
+          socket.join(`book-now:${cat}`);
+          logger.info(`📋 User ${profileId} joined book-now:${cat}`);
+        });
+        socket.join('book-now:all');
+      }
+    });
+
+    // Book Now lead room unsubscription
+    socket.on("book-now:leave", (data: { categories?: string[] }) => {
+      const categories = data.categories || [];
+      if (categories.length === 0) {
+        socket.leave('book-now:all');
+      } else {
+        categories.forEach((cat) => {
+          socket.leave(`book-now:${cat}`);
+        });
+        socket.leave('book-now:all');
+      }
+      logger.info(`👋 User ${profileId} left book-now rooms`);
+    });
+
     // Disconnection handler
     socket.on("disconnect", (reason) => {
       logger.info(`🔌 User disconnected from task service: ${profileId} (${socket.id}) - ${reason}`);
@@ -42,6 +71,28 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
   });
 
   logger.info("✅ Task service Socket.IO event handlers initialized");
+}
+
+/**
+ * Emit book_now lead:removed to all connected partners.
+ * Partners in the matching category room receive this so they can remove the lead from their lists.
+ */
+export function emitBookNowLeadRemoved(
+  taskId: string,
+  category: string,
+  acceptedByProfileId?: string,
+): void {
+  if (!io) {
+    logger.error('Socket.IO not initialized');
+    return;
+  }
+
+  const room = `book-now:${category}`;
+  io.to(room).emit('lead:removed', { taskId, category, acceptedByProfileId });
+  logger.info(`📨 Emitted lead:removed for task:${taskId} in room:${room}`);
+
+  // Also emit to the general book-now room
+  io.to('book-now:all').emit('lead:removed', { taskId, category, acceptedByProfileId });
 }
 
 // Helper function to emit task status change

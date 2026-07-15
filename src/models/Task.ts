@@ -97,8 +97,6 @@ export interface ITask extends Document {
     state?: string;
     pinCode?: string;
     country?: string;
-    /** Neighborhood / locality captured at post time for helper browse views. */
-    taskArea?: string;
   };
 
   urgency: "low" | "medium" | "high" | "urgent";
@@ -122,15 +120,6 @@ export interface ITask extends Document {
   /** Firebase UID of the assigned helper — required for tasker My Work lookup */
   /** Firebase uid of assigned helper when denormalized on the task document. */
   assigneeUid?: string | null;
-  /**
-   * Canonical denormalized helper display name, stored at assignment time.
-   * Prefer this field for customer-facing "Professional assigned" UI.
-   */
-  assignedHelperName?: string | null;
-  /** @deprecated Prefer assignedHelperName — kept for older readers/writers. */
-  assignedToName?: string | null;
-  /** @deprecated Prefer assignedHelperName — kept for older readers/writers. */
-  assigneeName?: string | null;
   assignedAt?: Date;
   /** _id of the synthetic accepted TaskApplication created by ops assignment */
   acceptedApplicationId?: mongoose.Types.ObjectId | null;
@@ -243,18 +232,8 @@ export interface ITask extends Document {
     createdAt: Date;
   }>;
 
-  /**
-   * Journey sub-phase while task.status is still `assigned`.
-   * Helper updates this (no live GPS). OTP is issued when journey starts (`on_the_way`).
-   */
-  executionPhase?: 'assigned' | 'on_the_way' | 'arrived';
-  onTheWayAt?: Date;
-  arrivedAt?: Date;
-
   startOtp?: {
     codeHash: string;
-    /** Short-lived plaintext for poster Work Progress display only; never returned on public getTask. */
-    codePlain?: string;
     requestedAt: Date;
     expiresAt: Date;
     verifiedAt?: Date;
@@ -314,6 +293,11 @@ export interface ITask extends Document {
   bookingOrderId?: string;
   bookingItemId?: string;
   assignmentStatus?: 'pending' | 'assigned' | 'failed';
+
+  /** Partner who accepted this Book Now lead */
+  partnerId?: mongoose.Types.ObjectId | null;
+  partnerUid?: string | null;
+  partnerAcceptedAt?: Date;
 
   notificationGovernance?: {
     /** Bumped when scheduled date/time changes — invalidates old start-soon idempotency keys. */
@@ -450,7 +434,6 @@ const TaskSchema = new Schema<ITask>(
       state: String,
       pinCode: String,
       country: { type: String, default: "India" },
-      taskArea: { type: String, trim: true },
     },
 
     urgency: {
@@ -496,10 +479,6 @@ const TaskSchema = new Schema<ITask>(
       default: null,
     },
     assigneeUid: { type: String, default: null, index: true },
-    /** Stored at assignment time — exact helper name for work progress / history. */
-    assignedHelperName: { type: String, default: null },
-    assignedToName: { type: String, default: null },
-    assigneeName: { type: String, default: null },
     assignedAt: Date,
     acceptedApplicationId: {
       type: Schema.Types.ObjectId,
@@ -693,16 +672,8 @@ const TaskSchema = new Schema<ITask>(
       },
       createdAt: { type: Date, default: Date.now },
     }],
-    executionPhase: {
-      type: String,
-      enum: ['assigned', 'on_the_way', 'arrived'],
-      index: true,
-    },
-    onTheWayAt: Date,
-    arrivedAt: Date,
     startOtp: {
       codeHash: String,
-      codePlain: String,
       requestedAt: Date,
       expiresAt: Date,
       verifiedAt: Date,
@@ -790,6 +761,15 @@ const TaskSchema = new Schema<ITask>(
       enum: ['pending', 'assigned', 'failed'],
     },
 
+    partnerId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Profile',
+      default: null,
+      index: true,
+    },
+    partnerUid: { type: String, default: null, index: true },
+    partnerAcceptedAt: Date,
+
     notificationGovernance: {
       scheduleVersion: String,
       applicantsViewedAt: Date,
@@ -820,6 +800,9 @@ TaskSchema.index({ status: 1, scheduledDate: 1 });
 // Global revision: poster's revisable open tasks
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 TaskSchema.index({ bookingSource: 1, status: 1 });
+TaskSchema.index({ partnerId: 1, status: 1 });
+TaskSchema.index({ partnerUid: 1, status: 1 });
+TaskSchema.index({ partnerId: 1, bookingSource: 1, status: 1 });
 TaskSchema.index({ bookingOrderId: 1 });
 TaskSchema.index(
   { parentTaskId: 1, status: 1, recurringVisitId: 1 },
