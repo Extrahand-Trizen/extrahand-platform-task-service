@@ -149,3 +149,17 @@ export function emitTaskAssigned(taskId: string, task: any) {
   io.to(`task:${taskId}`).emit("task:assigned", task);
   logger.info(`👤 Emitted task assignment for task:${taskId}`);
 }
+
+/**
+ * Emit to all partners listening on book-now category rooms that a lead has been claimed.
+ * Used so the available-offers list auto-refreshes across devices in real time.
+ */
+export function emitBookNowLeadRemoved(taskId: string, category: string, _acceptedByProfileId: string): void {
+  if (!io) {
+    logger.error('Socket.IO not initialized');
+    return;
+  }
+  // Broadcast to the category room so all partners browsing that category know it's taken
+  io.to(`book-now:${category}`).emit('book-now:lead-removed', { taskId });
+  logger.info(`🔔 Emitted book-now lead removal for task:${taskId} category:${category}`);
+}
