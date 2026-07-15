@@ -35,6 +35,7 @@ export class StatsController {
         totalTasks: taskStats.totalTasks,
         completedTasks: taskStats.completedTasks,
         postedTasks: taskStats.postedTasks,
+        cancelledTasks: taskStats.cancelledTasks,
         totalReviews,
         avgRating,
       },

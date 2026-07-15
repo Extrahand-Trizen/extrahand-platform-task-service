@@ -74,7 +74,7 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
 }
 
 /**
- * Emit book_now lead:removed to all connected partners.
+ * Emit book_now lead removal to all connected partners.
  * Partners in the matching category room receive this so they can remove the lead from their lists.
  */
 export function emitBookNowLeadRemoved(
@@ -88,11 +88,15 @@ export function emitBookNowLeadRemoved(
   }
 
   const room = `book-now:${category}`;
-  io.to(room).emit('lead:removed', { taskId, category, acceptedByProfileId });
-  logger.info(`📨 Emitted lead:removed for task:${taskId} in room:${room}`);
+  const payload = { taskId, category, acceptedByProfileId };
+
+  io.to(room).emit('lead:removed', payload);
+  io.to(room).emit('book-now:lead-removed', payload);
+  logger.info(`📨 Emitted lead removal for task:${taskId} in room:${room}`);
 
   // Also emit to the general book-now room
-  io.to('book-now:all').emit('lead:removed', { taskId, category, acceptedByProfileId });
+  io.to('book-now:all').emit('lead:removed', payload);
+  io.to('book-now:all').emit('book-now:lead-removed', payload);
 }
 
 // Helper function to emit task status change
@@ -150,16 +154,3 @@ export function emitTaskAssigned(taskId: string, task: any) {
   logger.info(`👤 Emitted task assignment for task:${taskId}`);
 }
 
-/**
- * Emit to all partners listening on book-now category rooms that a lead has been claimed.
- * Used so the available-offers list auto-refreshes across devices in real time.
- */
-export function emitBookNowLeadRemoved(taskId: string, category: string, _acceptedByProfileId: string): void {
-  if (!io) {
-    logger.error('Socket.IO not initialized');
-    return;
-  }
-  // Broadcast to the category room so all partners browsing that category know it's taken
-  io.to(`book-now:${category}`).emit('book-now:lead-removed', { taskId });
-  logger.info(`🔔 Emitted book-now lead removal for task:${taskId} category:${category}`);
-}

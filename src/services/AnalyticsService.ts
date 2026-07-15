@@ -101,6 +101,7 @@ export class AnalyticsService {
     totalTasks: number;
     completedTasks: number;
     postedTasks: number;
+    cancelledTasks: number;
   }> {
     const profileObjectId = new mongoose.Types.ObjectId(profileId);
 
@@ -113,6 +114,9 @@ export class AnalyticsService {
             totalTasks: { $sum: 1 },
             completedTasks: {
               $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] },
+            },
+            cancelledTasks: {
+              $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] },
             },
           },
         },
@@ -127,6 +131,7 @@ export class AnalyticsService {
       totalTasks: Number(assigneeStats?.[0]?.totalTasks || 0),
       completedTasks: Number(assigneeStats?.[0]?.completedTasks || 0),
       postedTasks: Number(posterStats?.[0]?.postedTasks || 0),
+      cancelledTasks: Number(assigneeStats?.[0]?.cancelledTasks || 0),
     };
   }
 
