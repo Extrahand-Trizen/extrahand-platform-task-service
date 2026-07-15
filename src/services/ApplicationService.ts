@@ -814,6 +814,8 @@ export class ApplicationService {
         logger.info(`✅ Recurring task ${task._id} dates assigned to ${application.applicantId}`);
       } else {
         // Concurrency-safe: only assign if task is still open (prevents two users accepting different applications simultaneously)
+        const assignedHelperName =
+          ProfileUtils.resolveProfileDisplayName(applicantProfile) || "Assigned User";
         const updatedTask = await Task.findOneAndUpdate(
           { _id: task._id, status: "open" },
           {
@@ -821,7 +823,9 @@ export class ApplicationService {
               status: "assigned",
               assigneeId: application.applicantId,
               assigneeUid: applicantProfile?.uid || null,
-              assignedToName: applicantProfile?.name || applicantProfile?.fullName || "Assigned User",
+              assignedHelperName,
+              assignedToName: assignedHelperName,
+              assigneeName: assignedHelperName,
               assignedAt: new Date(),
               updatedAt: new Date(),
             },
@@ -1660,6 +1664,10 @@ export class ApplicationService {
       {
         status: "open",
         assigneeId: null,
+        assigneeUid: null,
+        assignedHelperName: null,
+        assignedToName: null,
+        assigneeName: null,
         assignedAt: null,
         updatedAt: new Date(),
       }

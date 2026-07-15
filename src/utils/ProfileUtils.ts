@@ -36,7 +36,11 @@ export class ProfileUtils {
       normalized === "verified user" ||
       normalized === "there" ||
       normalized === "helper" ||
-      normalized === "applicant"
+      normalized === "performer" ||
+      normalized === "applicant" ||
+      normalized === "assigned user" ||
+      normalized === "tasker" ||
+      normalized === "your tasker"
     );
   }
 

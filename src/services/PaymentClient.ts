@@ -741,6 +741,8 @@ export class PaymentClient {
   static async cancelPaymentForTask(params: {
     taskId?: string;
     escrowId?: string;
+    /** Book Now: escrow is keyed by booking order / pending task id — prefer this. */
+    bookingOrderId?: string;
     reason?: string;
     userId?: string;
     cancelledBy: 'poster' | 'performer';
@@ -767,6 +769,7 @@ export class PaymentClient {
         baseURL: this.baseURL,
         taskId: params.taskId,
         escrowId: params.escrowId,
+        bookingOrderId: params.bookingOrderId,
         cancelledBy: params.cancelledBy,
         taskStartDate: params.taskStartDate,
         hasAssignedAt: Boolean(params.assignedAt),
@@ -778,6 +781,7 @@ export class PaymentClient {
         {
           taskId: params.taskId,
           escrowId: params.escrowId,
+          bookingOrderId: params.bookingOrderId,
           reason: params.reason,
           userId: params.userId,
           cancelledBy: params.cancelledBy,

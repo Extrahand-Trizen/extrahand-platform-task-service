@@ -27,6 +27,8 @@ export class BookingController {
       name,
       unitPrice,
       lineTotal,
+      useExtraCoins,
+      requestedCoinDiscountRupees,
     } = req.body;
 
     const hasItems = Array.isArray(items) && items.length > 0;
@@ -52,6 +54,8 @@ export class BookingController {
       name,
       unitPrice,
       lineTotal,
+      useExtraCoins: useExtraCoins === true,
+      requestedCoinDiscountRupees: Number(requestedCoinDiscountRupees) || 0,
     });
 
     res.status(201).json({

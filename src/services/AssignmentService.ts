@@ -12,6 +12,55 @@ import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { NotificationClient } from './NotificationClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { ProfileUtils } from '../utils/ProfileUtils';
+
+/**
+ * Resolve the helper's display name (request body first, then profile lookup)
+ * and denormalize it onto the task for customer-facing screens.
+ */
+async function resolveAssignedHelperName(params: {
+  helperName?: string;
+  helperProfileId: mongoose.Types.ObjectId | string;
+  helperUid?: string;
+}): Promise<string | undefined> {
+  const fromRequest = String(params.helperName || '').trim();
+  if (fromRequest && !ProfileUtils.isPlaceholderProfileName(fromRequest)) {
+    return fromRequest;
+  }
+
+  const profile =
+    (await ProfileUtils.getByProfileId(
+      params.helperProfileId,
+      'name fullName displayName firstName lastName',
+    )) ||
+    (params.helperUid
+      ? await mongoose.connection.collection('profiles').findOne(
+          { uid: String(params.helperUid).trim() },
+          {
+            projection: {
+              name: 1,
+              fullName: 1,
+              displayName: 1,
+              firstName: 1,
+              lastName: 1,
+            },
+          },
+        )
+      : null);
+
+  return ProfileUtils.resolveProfileDisplayName(profile);
+}
+
+function applyAssignedHelperNameToTask(
+  task: { assignedHelperName?: string | null; assignedToName?: string | null; assigneeName?: string | null } & Record<string, any>,
+  helperName: string | undefined,
+): void {
+  const name = String(helperName || '').trim();
+  if (!name || ProfileUtils.isPlaceholderProfileName(name)) return;
+  task.assignedHelperName = name;
+  task.assignedToName = name;
+  task.assigneeName = name;
+}
 
 /**
  * Create (or upsert) a synthetic accepted TaskApplication for a Book Now
@@ -160,11 +209,17 @@ export class AssignmentService {
       ? task.budget.amount
       : 0;
 
+    const resolvedHelperName = await resolveAssignedHelperName({
+      helperName,
+      helperProfileId,
+      helperUid,
+    });
+
     const applicationId = await upsertAcceptedApplication({
       taskId: task._id as mongoose.Types.ObjectId,
       helperProfileId,
       helperUid,
-      helperName,
+      helperName: resolvedHelperName,
       budgetAmount,
     });
 
@@ -175,6 +230,7 @@ export class AssignmentService {
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
     task.acceptedApplicationId = applicationId;
+    applyAssignedHelperNameToTask(task as any, resolvedHelperName);
     await task.save();
 
     // Attempt fallback escrow creation if missing
@@ -352,11 +408,17 @@ export class AssignmentService {
       ? task.budget.amount
       : 0;
 
+    const resolvedHelperName = await resolveAssignedHelperName({
+      helperName,
+      helperProfileId: helperProfileObjId,
+      helperUid,
+    });
+
     const applicationId = await upsertAcceptedApplication({
       taskId: task._id as mongoose.Types.ObjectId,
       helperProfileId: helperProfileObjId,
       helperUid,
-      helperName,
+      helperName: resolvedHelperName,
       budgetAmount,
     });
 
@@ -366,6 +428,7 @@ export class AssignmentService {
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
     task.acceptedApplicationId = applicationId;
+    applyAssignedHelperNameToTask(task as any, resolvedHelperName);
     await task.save();
 
     logger.info('Direct helper assigned', {
@@ -425,6 +488,9 @@ export class AssignmentService {
     // Reset task fields
     task.assigneeId = null;
     task.assigneeUid = null;
+    task.assignedHelperName = null;
+    task.assignedToName = null;
+    task.assigneeName = null;
     task.assignedAt = undefined;
     task.status = 'open';
     task.assignmentStatus = undefined;

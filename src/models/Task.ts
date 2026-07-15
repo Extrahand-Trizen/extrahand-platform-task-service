@@ -122,6 +122,15 @@ export interface ITask extends Document {
   /** Firebase UID of the assigned helper — required for tasker My Work lookup */
   /** Firebase uid of assigned helper when denormalized on the task document. */
   assigneeUid?: string | null;
+  /**
+   * Canonical denormalized helper display name, stored at assignment time.
+   * Prefer this field for customer-facing "Professional assigned" UI.
+   */
+  assignedHelperName?: string | null;
+  /** @deprecated Prefer assignedHelperName — kept for older readers/writers. */
+  assignedToName?: string | null;
+  /** @deprecated Prefer assignedHelperName — kept for older readers/writers. */
+  assigneeName?: string | null;
   assignedAt?: Date;
   /** _id of the synthetic accepted TaskApplication created by ops assignment */
   acceptedApplicationId?: mongoose.Types.ObjectId | null;
@@ -487,6 +496,10 @@ const TaskSchema = new Schema<ITask>(
       default: null,
     },
     assigneeUid: { type: String, default: null, index: true },
+    /** Stored at assignment time — exact helper name for work progress / history. */
+    assignedHelperName: { type: String, default: null },
+    assignedToName: { type: String, default: null },
+    assigneeName: { type: String, default: null },
     assignedAt: Date,
     acceptedApplicationId: {
       type: Schema.Types.ObjectId,

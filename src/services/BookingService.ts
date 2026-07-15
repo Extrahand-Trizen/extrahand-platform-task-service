@@ -267,6 +267,8 @@ export class BookingService {
     name?: string;
     unitPrice?: number;
     lineTotal?: number;
+    useExtraCoins?: boolean;
+    requestedCoinDiscountRupees?: number;
   }) {
     const {
       customerUid,
@@ -280,6 +282,8 @@ export class BookingService {
       name,
       unitPrice,
       lineTotal,
+      useExtraCoins,
+      requestedCoinDiscountRupees,
     } = params;
 
     const serviceable = await CatalogService.isPinCodeServiceable(
@@ -406,6 +410,10 @@ export class BookingService {
           ? primaryLine.title
           : `Book Now (${resolvedLines.length} services)`;
       const placeholderTaskId = pendingBookNowTaskId(orderId);
+      const applyCoins = useExtraCoins === true;
+      const coinDiscountRequest = applyCoins
+        ? Math.max(0, Math.floor(Number(requestedCoinDiscountRupees) || 0))
+        : 0;
 
       const escrowResult = await PaymentClient.createBookingEscrow({
         taskId: placeholderTaskId,
@@ -421,11 +429,14 @@ export class BookingService {
           itemCount: resolvedLines.length,
           skuSlugs: resolvedLines.map((l) => l.packageSlug),
           gstByCategory: pricing.categories,
+          useExtraCoins: applyCoins && coinDiscountRequest > 0,
+          requestedCoinDiscountRupees: coinDiscountRequest,
           amountBreakdown: {
             taskAmount: pricing.subtotal,
             gst: pricing.gst,
             platformFee: 0,
-            totalPaid: pricing.total,
+            extraCoinsDiscount: coinDiscountRequest,
+            totalPaid: Math.max(0, pricing.total - coinDiscountRequest),
           },
           bookNowLineItems: resolvedLines.map((line) => ({
             taskId: `${placeholderTaskId}:${line.packageSlug}`,
@@ -838,8 +849,10 @@ export class BookingService {
           throw new BadRequestError(refundResult.error || 'Refund failed for this service');
         }
       } else {
-        await PaymentClient.cancelPaymentForTask({
+        const refundResult = await PaymentClient.cancelPaymentForTask({
           taskId: String(task._id),
+          bookingOrderId: orderId,
+          escrowId: order.paymentEscrowId || undefined,
           reason: reason || 'Book Now cancelled by customer',
           userId: customerUid,
           cancelledBy: 'poster',
@@ -850,6 +863,9 @@ export class BookingService {
           catalogId,
           partnerReachedLocation,
         });
+        if (!refundResult.success) {
+          throw new BadRequestError(refundResult.error || 'Refund failed for this service');
+        }
       }
     }
 
@@ -895,8 +911,10 @@ export class BookingService {
 
       if (order.paidAt && task.status === 'open' && !refundInitiated) {
         const firstItem = items.find((i) => String(i.taskId) === String(task._id)) || items[0];
-        await PaymentClient.cancelPaymentForTask({
+        const refundResult = await PaymentClient.cancelPaymentForTask({
           taskId: String(task._id),
+          bookingOrderId: orderId,
+          escrowId: order.paymentEscrowId || undefined,
           reason: reason || 'Book Now cancelled before assignment',
           userId: customerUid,
           cancelledBy: 'poster',
@@ -907,6 +925,9 @@ export class BookingService {
           catalogId: firstItem?.skuSnapshot?.categorySlug || task.categorySlug,
           partnerReachedLocation: BookingService.isBookNowPartnerReached(task),
         });
+        if (!refundResult.success) {
+          throw new BadRequestError(refundResult.error || 'Refund failed for this booking');
+        }
         refundInitiated = true;
       }
 

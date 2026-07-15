@@ -2017,6 +2017,10 @@ export class TaskService {
         const payResult = await PaymentClient.cancelPaymentForTask({
           taskId: cancelTaskId,
           escrowId: escrowPublicId,
+          bookingOrderId:
+            typeof task.bookingOrderId === 'string' && task.bookingOrderId.trim()
+              ? task.bookingOrderId.trim()
+              : undefined,
           reason: options?.cancellationReason,
           userId: uid,
           cancelledBy: isRequesterCancelled ? "poster" : "performer",
