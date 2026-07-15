@@ -286,13 +286,6 @@ const START_OTP_MAX_ATTEMPTS = 5;
 
 function generateStartOtpCode(): string {
   return Math.floor(1000 + Math.random() * 9000).toString();
-<<<<<<< HEAD
-=======
-}
-
-function hashStartOtp(taskId: string, otp: string): string {
-  return crypto.createHash("sha256").update(`${taskId}:${otp}`).digest("hex");
->>>>>>> 3e9bf70 (updates)
 }
 
 function getPendingAdditionalQuoteRequest(task: ITask): any | null {
