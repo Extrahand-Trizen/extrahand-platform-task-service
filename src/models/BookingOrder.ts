@@ -39,6 +39,10 @@ export interface IBookingOrder extends Document {
   paidAt?: Date;
   cancelledAt?: Date;
   cancellationReason?: string;
+  /** Customer soft-delete — hide from customer booking lists only. */
+  isDeletedByCustomer?: boolean;
+  deletedByCustomerAt?: Date;
+  deletedByCustomerId?: string;
   /** Serialized cart lines — tasks are created only after payment succeeds. */
   pendingLines?: Record<string, unknown>[];
   bookingNotes?: string;
@@ -80,6 +84,9 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     paidAt: Date,
     cancelledAt: Date,
     cancellationReason: String,
+    isDeletedByCustomer: { type: Boolean, default: false, index: true },
+    deletedByCustomerAt: Date,
+    deletedByCustomerId: { type: String, index: true },
     pendingLines: { type: [Schema.Types.Mixed], default: undefined },
     bookingNotes: String,
   },

@@ -308,6 +308,23 @@ export interface ITask extends Document {
   cancellationReason?: string;
 
   /**
+   * Customer soft-delete: hides from customer lists only.
+   * Does not change lifecycle status. Financial records remain.
+   */
+  isDeletedByCustomer?: boolean;
+  deletedByCustomerAt?: Date;
+  deletedByCustomerId?: string;
+
+  /**
+   * Support/admin soft-delete: hide from customer/helper normal lists.
+   * Finance/support keep access via admin APIs and direct IDs.
+   */
+  isDeletedBySupport?: boolean;
+  deletedBySupportAt?: Date;
+  deletedBySupportId?: string;
+  deleteReason?: string;
+
+  /**
    * WhatsApp / notification governance (digest caps, schedule versioning, etc.).
    */
   /** marketplace = bid flow; book_now = paid upfront, ops assigns helper */
@@ -783,6 +800,14 @@ const TaskSchema = new Schema<ITask>(
       index: true,
     },
     cancellationReason: String,
+
+    isDeletedByCustomer: { type: Boolean, default: false, index: true },
+    deletedByCustomerAt: Date,
+    deletedByCustomerId: { type: String, index: true },
+    isDeletedBySupport: { type: Boolean, default: false, index: true },
+    deletedBySupportAt: Date,
+    deletedBySupportId: String,
+    deleteReason: String,
 
     bookingSource: {
       type: String,

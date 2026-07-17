@@ -263,16 +263,18 @@ export class TaskController {
 
   /**
    * DELETE /api/v1/tasks/:id
-   * Delete a task
+   * Hard-delete untouched open tasks, or soft-remove from customer lists.
    */
   static async deleteTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    await TaskService.deleteTask(req.params.id, req.user!.profileId);
+    const result = await TaskService.deleteTask(req.params.id, req.user!.profileId, {
+      actorUid: req.user!.uid,
+    });
 
-    ApiResponse.success(res, null, 'Task deleted successfully');
+    ApiResponse.success(res, { deletionType: result.deletionType }, result.message);
   }
 
   /**
