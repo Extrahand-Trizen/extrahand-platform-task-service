@@ -1,4 +1,5 @@
 import BookingOrder, { type BookingOrderStatus } from '../models/BookingOrder';
+import BookingItem from '../models/BookingItem';
 
 /** Only confirmed (paid) bookings block slots — not unpaid checkouts. */
 const BLOCKING_STATUSES: BookingOrderStatus[] = ['paid', 'assigning', 'assigned'];
@@ -167,6 +168,22 @@ function addAnchorToOccupied(
   }
 }
 
+function resolveScheduleAnchor(input: {
+  scheduledTimeStart?: string | null;
+  timeSlot?: BookNowTimeBucket | null;
+}): string | null {
+  const start = String(input.scheduledTimeStart || '').trim();
+  if (start) return start;
+  if (input.timeSlot) return bucketAnchorSlot(input.timeSlot);
+  return null;
+}
+
+function isScheduledDateOnQueryDate(scheduledDate: Date | undefined, range: { start: Date; end: Date }): boolean {
+  if (!scheduledDate) return false;
+  const time = scheduledDate.getTime();
+  return time >= range.start.getTime() && time <= range.end.getTime();
+}
+
 export async function getOccupiedBookNowSlots(
   date: string,
   city: string,
@@ -178,21 +195,44 @@ export async function getOccupiedBookNowSlots(
   }
 
   const orders = await BookingOrder.find({
-    scheduledDate: { $gte: range.start, $lte: range.end },
     'address.city': cityFilter,
     status: { $in: BLOCKING_STATUSES },
   })
-    .select('status scheduledTimeStart timeSlot')
+    .select('orderId scheduledDate scheduledTimeStart timeSlot')
+    .lean();
+
+  if (!orders.length) {
+    return { occupiedTimeStarts: [], occupiedTimeSlots: [], occupiedBookingAnchors: [] };
+  }
+
+  const orderIds = orders.map((order) => order.orderId);
+  const items = await BookingItem.find({
+    orderId: { $in: orderIds },
+    status: { $ne: 'cancelled' },
+    scheduledDate: { $gte: range.start, $lte: range.end },
+  })
+    .select('orderId scheduledDate scheduledTimeStart timeSlot')
     .lean();
 
   const occupiedTimeStarts = new Set<string>();
   const occupiedTimeSlots = new Set<BookNowTimeBucket>();
   const occupiedBookingAnchors = new Set<string>();
+  const ordersWithItemAnchors = new Set<string>();
+
+  for (const item of items) {
+    const anchor = resolveScheduleAnchor(item);
+    if (!anchor) continue;
+    addAnchorToOccupied(anchor, occupiedTimeStarts, occupiedTimeSlots, occupiedBookingAnchors);
+    ordersWithItemAnchors.add(item.orderId);
+  }
 
   for (const order of orders) {
-    const start = String(order.scheduledTimeStart || '').trim();
-    if (start) {
-      addAnchorToOccupied(start, occupiedTimeStarts, occupiedTimeSlots, occupiedBookingAnchors);
+    if (ordersWithItemAnchors.has(order.orderId)) continue;
+    if (!isScheduledDateOnQueryDate(order.scheduledDate, range)) continue;
+
+    const anchor = resolveScheduleAnchor(order);
+    if (anchor) {
+      addAnchorToOccupied(anchor, occupiedTimeStarts, occupiedTimeSlots, occupiedBookingAnchors);
       continue;
     }
 

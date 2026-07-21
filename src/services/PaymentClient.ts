@@ -851,6 +851,70 @@ export class PaymentClient {
       };
     }
   }
+
+  /**
+   * Financial footprint for task deletion decisions (hard vs soft).
+   * Throws on transport failures so callers do not hard-delete blindly.
+   */
+  static async getTaskDeletionSafety(
+    taskId: string,
+    options?: { bookingOrderId?: string },
+  ): Promise<{
+    hasSuccessfulPayment: boolean;
+    hasEscrow: boolean;
+    escrowStatus: string | null;
+    hasRefund: boolean;
+    refundStatus: string | null;
+    isRefundFinal: boolean;
+    hasPayout: boolean;
+    payoutStatus: string | null;
+    hasActiveFinancialOperation: boolean;
+    safeToHardDelete: boolean;
+    safeToSoftDelete: boolean;
+    hasFinancialHistory: boolean;
+  }> {
+    if (!this.baseURL || !this.serviceAuthToken) {
+      this.initialize();
+    }
+
+    const params =
+      options?.bookingOrderId && String(options.bookingOrderId).trim()
+        ? { bookingOrderId: String(options.bookingOrderId).trim() }
+        : undefined;
+
+    const response = await axios.get(
+      `${this.baseURL}/api/v1/escrow/task/${encodeURIComponent(taskId)}/deletion-safety`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Service-Auth': this.serviceAuthToken,
+          'X-Service-Name': 'task-service',
+        },
+        params,
+        timeout: 10000,
+      },
+    );
+
+    const data = response.data || {};
+    if (!data.success) {
+      throw new Error(data.error || 'Failed to load deletion safety snapshot');
+    }
+
+    return {
+      hasSuccessfulPayment: Boolean(data.hasSuccessfulPayment),
+      hasEscrow: Boolean(data.hasEscrow),
+      escrowStatus: data.escrowStatus ?? null,
+      hasRefund: Boolean(data.hasRefund),
+      refundStatus: data.refundStatus ?? null,
+      isRefundFinal: Boolean(data.isRefundFinal),
+      hasPayout: Boolean(data.hasPayout),
+      payoutStatus: data.payoutStatus ?? null,
+      hasActiveFinancialOperation: Boolean(data.hasActiveFinancialOperation),
+      safeToHardDelete: Boolean(data.safeToHardDelete),
+      safeToSoftDelete: data.safeToSoftDelete !== false,
+      hasFinancialHistory: Boolean(data.hasFinancialHistory),
+    };
+  }
 }
 
 

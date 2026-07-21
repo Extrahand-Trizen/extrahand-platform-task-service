@@ -4,6 +4,8 @@ import {
   BadRequestError,
   NotFoundError,
   ForbiddenError,
+  ConflictError,
+  ServiceUnavailableError,
 } from "../errors/AppError";
 import logger from "../config/logger";
 import { TaskCategory, TaskStatus } from "../types";
@@ -16,6 +18,7 @@ import TaskApplication from "../models/TaskApplication";
 import TaskQuestion from "../models/TaskQuestion";
 import TaskFollow from "../models/TaskFollow";
 import TaskReport from "../models/TaskReport";
+import BookingOrder from "../models/BookingOrder";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -446,14 +449,16 @@ export class TaskService {
       andClauses.push({ assigneeId: new mongoose.Types.ObjectId(assigneeId) });
     }
 
-    // Filter by requester profile ID
+    // Filter by requester profile ID (customer "my tasks" style lists)
     if (requesterId && mongoose.Types.ObjectId.isValid(requesterId)) {
       andClauses.push({ requesterId: new mongoose.Types.ObjectId(requesterId) });
+      andClauses.push({ isDeletedByCustomer: { $ne: true } });
     }
 
     // Filter by poster UID (for posted tasks)
     if (posterUid) {
       andClauses.push({ posterUid: posterUid });
+      andClauses.push({ isDeletedByCustomer: { $ne: true } });
     }
 
     // Support multi-category (comma separated from query) or single category mapping
@@ -647,6 +652,7 @@ export class TaskService {
 
     if (posterUid) {
       andClauses.push({ posterUid });
+      andClauses.push({ isDeletedByCustomer: { $ne: true } });
     }
 
     if (category) {
@@ -751,6 +757,7 @@ export class TaskService {
     const query: any = {
       requesterId: profileId,
       $or: [{ parentTaskId: { $exists: false } }, { parentTaskId: null }],
+      isDeletedByCustomer: { $ne: true },
     };
     if (status) query.status = status;
 
@@ -818,6 +825,7 @@ export class TaskService {
     return Task.countDocuments({
       requesterId: new mongoose.Types.ObjectId(requesterId),
       status: "open",
+      isDeletedByCustomer: { $ne: true },
       ...buildLiveOpenExpiryClause(new Date()),
     });
   }
@@ -1683,30 +1691,161 @@ export class TaskService {
   }
 
   /**
-   * Delete a task and any recurring visit child tasks tied to it.
+   * Delete or soft-remove a task for the customer.
+   * - Untouched unpaid marketplace open tasks → hard delete
+   * - Active / assigned / in-progress → reject
+   * - Paid / completed / cancelled / Book Now with financial history → soft delete
+   * Refund status never blocks soft deletion (financial rows are retained).
    */
-  static async deleteTask(taskId: string, profileId: mongoose.Types.ObjectId): Promise<void> {
+  static async deleteTask(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    options?: { actorUid?: string },
+  ): Promise<{ deletionType: 'hard' | 'soft'; message: string }> {
     const task = await Task.findById(taskId);
     if (!task) {
       throw new NotFoundError("Task not found");
     }
 
-    // âœ… Compare ObjectIds
     if (!task.requesterId.equals(profileId)) {
       throw new ForbiddenError("Not authorized to delete this task");
     }
 
-    const taskIdsToDelete = await TaskService.collectTaskTreeIds(task);
-    await TaskService.deleteTaskRelatedRecords(taskIdsToDelete);
-    await Task.deleteMany({ _id: { $in: taskIdsToDelete } });
+    if (task.isDeletedByCustomer) {
+      return {
+        deletionType: 'soft',
+        message: 'Work deleted successfully.',
+      };
+    }
 
-    for (const id of taskIdsToDelete) {
+    const status = String(task.status || '').toLowerCase();
+    const executionPhase = String((task as any).executionPhase || '').toLowerCase();
+
+    const ACTIVE_DELETE_BLOCKED_STATUSES = new Set([
+      'assigned',
+      'started',
+      'in_progress',
+      'ongoing',
+      'review',
+    ]);
+    const ACTIVE_EXECUTION_PHASES = new Set(['on_the_way', 'arrived']);
+
+    if (ACTIVE_DELETE_BLOCKED_STATUSES.has(status) || ACTIVE_EXECUTION_PHASES.has(executionPhase)) {
+      throw new ConflictError(
+        'This work cannot be deleted while it is active.',
+        'TASK_ACTIVE',
+      );
+    }
+
+    const hasAssignee = Boolean(
+      task.assigneeId ||
+        task.assigneeUid ||
+        task.acceptedApplicationId ||
+        (task as any).assignedHelperName,
+    );
+
+    const isBookNow = String(task.bookingSource || '') === 'book_now';
+    const bookingOrderId = String(task.bookingOrderId || '').trim() || undefined;
+
+    let safety: Awaited<ReturnType<typeof PaymentClient.getTaskDeletionSafety>>;
+    try {
+      safety = await PaymentClient.getTaskDeletionSafety(String(task._id), {
+        bookingOrderId,
+      });
+    } catch (err) {
+      logger.error('[TaskService.deleteTask] Payment deletion-safety lookup failed', {
+        taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Never hard-delete when finance state is unknown.
+      throw new ServiceUnavailableError(
+        'Unable to verify payment records right now. Please try again shortly.',
+        'PAYMENT_SERVICE_UNAVAILABLE',
+      );
+    }
+
+    const completionProof = Array.isArray(task.completionProof) ? task.completionProof : [];
+    const hasCompletionProof = completionProof.length > 0;
+    const isTerminalStatus = status === 'completed' || status === 'cancelled';
+
+    const mustSoftDelete =
+      isBookNow ||
+      safety.hasFinancialHistory ||
+      safety.hasSuccessfulPayment ||
+      safety.hasEscrow ||
+      safety.hasRefund ||
+      safety.hasPayout ||
+      hasAssignee ||
+      hasCompletionProof ||
+      isTerminalStatus ||
+      Boolean(task.assignedAt);
+
+    const canHardDelete =
+      !mustSoftDelete &&
+      status === 'open' &&
+      !hasAssignee &&
+      safety.safeToHardDelete;
+
+    if (canHardDelete) {
+      const taskIdsToDelete = await TaskService.collectTaskTreeIds(task);
+      await TaskService.deleteTaskRelatedRecords(taskIdsToDelete);
+      await Task.deleteMany({ _id: { $in: taskIdsToDelete } });
+
+      for (const id of taskIdsToDelete) {
+        TaskService.invalidateTaskCache(String(id));
+      }
+
+      logger.info(
+        `Task hard-deleted: ${taskId} by user ${profileId.toString()} (including ${Math.max(0, taskIdsToDelete.length - 1)} visit child task(s))`,
+      );
+
+      return {
+        deletionType: 'hard',
+        message: 'Work deleted successfully.',
+      };
+    }
+
+    // Soft delete — preserve document + lifecycle status
+    const now = new Date();
+    const actorId = String(options?.actorUid || profileId.toString());
+    const treeIds = await TaskService.collectTaskTreeIds(task);
+
+    await Task.updateMany(
+      { _id: { $in: treeIds } },
+      {
+        $set: {
+          isDeletedByCustomer: true,
+          deletedByCustomerAt: now,
+          deletedByCustomerId: actorId,
+        },
+      },
+    );
+
+    if (bookingOrderId) {
+      await BookingOrder.updateOne(
+        { orderId: bookingOrderId },
+        {
+          $set: {
+            isDeletedByCustomer: true,
+            deletedByCustomerAt: now,
+            deletedByCustomerId: actorId,
+          },
+        },
+      );
+    }
+
+    for (const id of treeIds) {
       TaskService.invalidateTaskCache(String(id));
     }
 
     logger.info(
-      `Task deleted: ${taskId} by user ${profileId.toString()} (including ${Math.max(0, taskIdsToDelete.length - 1)} visit child task(s))`,
+      `Task soft-deleted by customer: ${taskId} (status=${status}, bookNow=${isBookNow}) by ${actorId}`,
     );
+
+    return {
+      deletionType: 'soft',
+      message: 'Work deleted successfully.',
+    };
   }
 
   /**
@@ -2061,20 +2200,6 @@ export class TaskService {
       updateData.cancelledAt = new Date();
       updateData.cancelledById = profileId; // âœ… Updated from cancelledBy
       updateData.cancellationReason = options?.cancellationReason;
-    }
-
-    // Clear journey phase once work leaves assigned (avoid enum null validation issues).
-    if (
-      status === "started" ||
-      status === "in_progress" ||
-      status === "completed" ||
-      status === "cancelled"
-    ) {
-      updateData.$unset = {
-        ...(updateData.$unset || {}),
-        executionPhase: 1,
-        executionPhaseUpdatedAt: 1,
-      };
     }
 
     // Clear OTP state once task leaves assigned state.
@@ -2575,9 +2700,6 @@ export class TaskService {
             data: {
               taskId,
               actionUrl: '/profile?section=payments',
-              eventKey: payoutResult.success ? 'PAYOUT_INITIATED' : 'PAYOUT_FAILED',
-              entityType: 'payout',
-              category: 'payments',
             },
           });
         } catch (paymentError: any) {
@@ -2831,64 +2953,6 @@ export class TaskService {
     return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
       skipStartOtpValidation: true,
     });
-  }
-
-  /**
-   * Update journey execution phase while task is still assigned
-   * (on_the_way after Start Journey, arrived when helper reaches location).
-   */
-  static async setExecutionPhase(
-    taskId: string,
-    profileId: mongoose.Types.ObjectId,
-    phase: "on_the_way" | "arrived"
-  ): Promise<ITask> {
-    const task = await Task.findById(taskId);
-    if (!task) {
-      throw new NotFoundError("Task not found");
-    }
-
-    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
-    const isPerformer = workTask.assigneeId?.equals(profileId) || false;
-    if (!isPerformer) {
-      throw new ForbiddenError("Only the assigned helper can update execution phase");
-    }
-
-    if (workTask.status !== "assigned") {
-      throw new BadRequestError("Execution phase can only change while work is assigned");
-    }
-
-    const current = String(workTask.executionPhase || "assigned");
-    if (phase === "on_the_way") {
-      if (current === "arrived") {
-        throw new BadRequestError("Helper already marked as arrived");
-      }
-      if (current === "on_the_way") {
-        return workTask;
-      }
-    } else if (phase === "arrived") {
-      if (current === "arrived") {
-        return workTask;
-      }
-      if (current !== "on_the_way") {
-        throw new BadRequestError("Start journey before marking arrived");
-      }
-    }
-
-    workTask.executionPhase = phase;
-    workTask.executionPhaseUpdatedAt = new Date();
-    await workTask.save();
-
-    try {
-      emitTaskStatusChanged(String(workTask._id), workTask);
-    } catch (err) {
-      logger.warn("emitTaskStatusChanged failed after execution phase update", {
-        taskId: String(workTask._id),
-        phase,
-        error: err,
-      });
-    }
-
-    return workTask;
   }
 
   /**

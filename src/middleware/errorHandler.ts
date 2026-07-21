@@ -36,6 +36,7 @@ export function errorHandler(
     res.status(statusCode).json({
       success: false,
       error: errMessage,
+      ...(err.code ? { code: err.code } : {}),
       ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
     });
     return;

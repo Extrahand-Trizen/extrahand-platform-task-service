@@ -16,7 +16,19 @@ import { isHardcodedSupportedLocation } from '../constants/locations/isHardcoded
 import {
   assertBookNowSlotAvailable,
   getOccupiedBookNowSlots,
+  type BookNowTimeBucket,
 } from '../utils/bookNowSlotAvailability';
+import {
+  assertPerItemScheduleFieldsComplete,
+  collectDistinctBookNowSlotChecks,
+  isCompleteResolvedBookNowSchedule,
+  resolveBookNowLineDurationMinutes,
+  resolveBookNowLineSchedule,
+  scheduleFieldsFromResolved,
+  usesPerItemBookNowScheduling,
+  type BookNowScheduleInput,
+  type ResolvedBookNowLineSchedule,
+} from '../utils/bookNowScheduleResolution';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 
@@ -45,6 +57,11 @@ export type BookingLineInput = {
   unitPrice?: number;
   lineTotal?: number;
   taskDescription?: string;
+  scheduledDate?: string;
+  scheduledTimeStart?: string;
+  scheduledTimeEnd?: string;
+  timeSlot?: BookNowTimeBucket;
+  durationMinutes?: number;
 };
 
 type ResolvedLine = {
@@ -61,6 +78,7 @@ type ResolvedLine = {
   durationMinutes: number;
   title: string;
   snapshotName: string;
+  schedule?: ResolvedBookNowLineSchedule;
 };
 
 type PendingBookingLine = {
@@ -77,6 +95,10 @@ type PendingBookingLine = {
   durationMinutes: number;
   title: string;
   snapshotName: string;
+  scheduledDate?: string;
+  scheduledTimeStart?: string;
+  scheduledTimeEnd?: string;
+  timeSlot?: BookNowTimeBucket;
 };
 
 function pendingBookNowTaskId(orderId: string): string {
@@ -84,6 +106,7 @@ function pendingBookNowTaskId(orderId: string): string {
 }
 
 function serializePendingLine(line: ResolvedLine): PendingBookingLine {
+  const schedule = scheduleFieldsFromResolved(line.schedule);
   return {
     packageSlug: line.packageSlug,
     categorySlug: line.categorySlug,
@@ -98,10 +121,25 @@ function serializePendingLine(line: ResolvedLine): PendingBookingLine {
     skuId: line.skuId ? String(line.skuId) : undefined,
     variantId: line.variantId ? String(line.variantId) : undefined,
     addonIds: line.addonIds.map((id) => String(id)),
+    scheduledDate: schedule?.scheduledDate,
+    scheduledTimeStart: schedule?.scheduledTimeStart,
+    scheduledTimeEnd: schedule?.scheduledTimeEnd,
+    timeSlot: schedule?.timeSlot,
   };
 }
 
 function deserializePendingLine(line: PendingBookingLine): ResolvedLine {
+  const schedule = resolveBookNowLineSchedule({
+    lineSchedule: {
+      scheduledDate: line.scheduledDate,
+      scheduledTimeStart: line.scheduledTimeStart,
+      scheduledTimeEnd: line.scheduledTimeEnd,
+      timeSlot: line.timeSlot,
+      durationMinutes: line.durationMinutes,
+    },
+    catalogDurationMinutes: line.durationMinutes,
+  });
+
   return {
     packageSlug: line.packageSlug,
     categorySlug: line.categorySlug,
@@ -113,6 +151,7 @@ function deserializePendingLine(line: PendingBookingLine): ResolvedLine {
     durationMinutes: line.durationMinutes,
     title: line.title,
     snapshotName: line.snapshotName,
+    schedule: schedule ?? undefined,
     skuId: line.skuId && mongoose.Types.ObjectId.isValid(line.skuId)
       ? new mongoose.Types.ObjectId(line.skuId)
       : undefined,
@@ -122,6 +161,35 @@ function deserializePendingLine(line: PendingBookingLine): ResolvedLine {
     addonIds: (line.addonIds || [])
       .filter((id) => mongoose.Types.ObjectId.isValid(id))
       .map((id) => new mongoose.Types.ObjectId(id)),
+  };
+}
+
+function bookingItemScheduleFields(line: ResolvedLine) {
+  if (!line.schedule) return {};
+  return {
+    scheduledDate: line.schedule.scheduledDateValue,
+    scheduledTimeStart: line.schedule.scheduledTimeStart,
+    scheduledTimeEnd: line.schedule.scheduledTimeEnd,
+    timeSlot: line.schedule.timeSlot,
+    durationMinutes: line.schedule.durationMinutes,
+  };
+}
+
+function orderScheduleFromLine(line: ResolvedLine | undefined) {
+  if (!line?.schedule) {
+    return {
+      scheduledDate: undefined,
+      scheduledTimeStart: undefined,
+      scheduledTimeEnd: undefined,
+      timeSlot: undefined,
+    };
+  }
+
+  return {
+    scheduledDate: line.schedule.scheduledDateValue,
+    scheduledTimeStart: line.schedule.scheduledTimeStart,
+    scheduledTimeEnd: line.schedule.scheduledTimeEnd,
+    timeSlot: line.schedule.timeSlot,
   };
 }
 
@@ -180,6 +248,8 @@ export class BookingService {
       throw new BadRequestError(`Invalid price for ${name}`);
     }
 
+    const durationMinutes = resolveBookNowLineDurationMinutes(60, line.durationMinutes);
+
     return {
       packageSlug: packageId,
       categorySlug: catalogId,
@@ -188,7 +258,7 @@ export class BookingService {
       pricingUnit: 'fixed',
       quantity,
       lineTotal,
-      durationMinutes: 60,
+      durationMinutes,
       title: name,
       snapshotName: name,
       addonIds: [],
@@ -224,7 +294,10 @@ export class BookingService {
       quantity,
     );
 
-    const durationMinutes = sku.durationMinutes + (variant?.durationDeltaMinutes || 0);
+    const durationMinutes = resolveBookNowLineDurationMinutes(
+      sku.durationMinutes + (variant?.durationDeltaMinutes || 0),
+      line.durationMinutes,
+    );
     const title = `${sku.name}${variant && !variant.isDefault ? ` — ${variant.name}` : ''}`;
 
     return {
@@ -323,13 +396,63 @@ export class BookingService {
       throw new BadRequestError('At least one service item is required');
     }
 
-    if (scheduledDate && (scheduledTimeStart || timeSlot)) {
+    const legacySchedule: BookNowScheduleInput = {
+      scheduledDate,
+      scheduledTimeStart,
+      scheduledTimeEnd,
+      timeSlot,
+    };
+    const perItemScheduling = usesPerItemBookNowScheduling(rawLines, rawLines.length);
+
+    if (perItemScheduling) {
+      rawLines.forEach((line, index) => {
+        try {
+          assertPerItemScheduleFieldsComplete(line, index);
+        } catch (error) {
+          if (error instanceof Error && error.message.startsWith('INCOMPLETE_LINE_SCHEDULE:')) {
+            const message = error.message.split(':').slice(2).join(':');
+            throw new BadRequestError(message);
+          }
+          if (error instanceof Error && error.message.startsWith('INVALID_LINE_SCHEDULE_DATE:')) {
+            const message = error.message.split(':').slice(2).join(':');
+            throw new BadRequestError(message);
+          }
+          throw error;
+        }
+      });
+    }
+
+    const resolvedLines = await Promise.all(rawLines.map((line) => this.resolveLine(line)));
+    const resolvedLinesWithSchedule = resolvedLines.map((line, index) => {
+      const schedule = resolveBookNowLineSchedule({
+        lineSchedule: rawLines[index],
+        legacySchedule,
+        catalogDurationMinutes: line.durationMinutes,
+      });
+
+      if (perItemScheduling && !isCompleteResolvedBookNowSchedule(schedule)) {
+        throw new BadRequestError(
+          `Each service must include a complete schedule (date and start time or time slot)`,
+        );
+      }
+
+      return {
+        ...line,
+        durationMinutes: schedule?.durationMinutes ?? line.durationMinutes,
+        schedule: schedule ?? undefined,
+      };
+    });
+
+    const slotChecks = collectDistinctBookNowSlotChecks(
+      resolvedLinesWithSchedule.map((line) => line.schedule),
+    );
+    for (const slotCheck of slotChecks) {
       try {
         await assertBookNowSlotAvailable({
-          date: scheduledDate,
+          date: slotCheck.date,
           city: address.city,
-          scheduledTimeStart,
-          timeSlot,
+          scheduledTimeStart: slotCheck.scheduledTimeStart,
+          timeSlot: slotCheck.timeSlot,
         });
       } catch (error) {
         if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
@@ -346,9 +469,8 @@ export class BookingService {
       }
     }
 
-    const resolvedLines = await Promise.all(rawLines.map((line) => this.resolveLine(line)));
     const pricingResult = await PaymentClient.calculateBookNowOrderTotals(
-      resolvedLines.map((line) => ({
+      resolvedLinesWithSchedule.map((line) => ({
         categorySlug: line.categorySlug,
         lineTotal: line.lineTotal,
       })),
@@ -364,31 +486,29 @@ export class BookingService {
     const addonsTotal = pricing.addonsTotal ?? 0;
 
     const orderId = crypto.randomUUID();
+    const primaryScheduleLine = resolvedLinesWithSchedule[0];
+    const orderSchedule = orderScheduleFromLine(primaryScheduleLine);
+
     const order = await BookingOrder.create({
       orderId,
       customerUid,
       customerProfileId,
       status: 'awaiting_payment',
       address,
-      scheduledDate: scheduledDate
-        ? new Date(`${scheduledDate}T00:00:00.000+05:30`)
-        : undefined,
-      scheduledTimeStart,
-      scheduledTimeEnd,
-      timeSlot,
+      ...orderSchedule,
       subtotal: pricing.subtotal,
       addonsTotal,
       platformFee: pricing.platformFee,
       gst: pricing.gst,
       total: pricing.total,
-      pendingLines: resolvedLines.map(serializePendingLine),
+      pendingLines: resolvedLinesWithSchedule.map(serializePendingLine),
       bookingNotes: notes?.trim() || undefined,
     });
 
     const createdItems: InstanceType<typeof BookingItem>[] = [];
 
     try {
-      for (const line of resolvedLines) {
+      for (const line of resolvedLinesWithSchedule) {
         const item = await BookingItem.create({
           orderId,
           ...(line.skuId ? { skuId: line.skuId } : {}),
@@ -402,15 +522,16 @@ export class BookingService {
             slug: line.packageSlug,
             categorySlug: line.categorySlug,
           },
+          ...bookingItemScheduleFields(line),
         });
         createdItems.push(item);
       }
 
-      const primaryLine = resolvedLines[0];
+      const primaryLine = resolvedLinesWithSchedule[0];
       const combinedTitle =
-        resolvedLines.length === 1
+        resolvedLinesWithSchedule.length === 1
           ? primaryLine.title
-          : `Book Now (${resolvedLines.length} services)`;
+          : `Book Now (${resolvedLinesWithSchedule.length} services)`;
       const placeholderTaskId = pendingBookNowTaskId(orderId);
       const applyCoins = useExtraCoins === true;
       const coinDiscountRequest = applyCoins
@@ -428,8 +549,8 @@ export class BookingService {
         metadata: {
           bookingOrderId: orderId,
           bookingMode: 'book_now',
-          itemCount: resolvedLines.length,
-          skuSlugs: resolvedLines.map((l) => l.packageSlug),
+          itemCount: resolvedLinesWithSchedule.length,
+          skuSlugs: resolvedLinesWithSchedule.map((l) => l.packageSlug),
           gstByCategory: pricing.categories,
           useExtraCoins: applyCoins && coinDiscountRequest > 0,
           requestedCoinDiscountRupees: coinDiscountRequest,
@@ -440,12 +561,17 @@ export class BookingService {
             extraCoinsDiscount: coinDiscountRequest,
             totalPaid: Math.max(0, pricing.total - coinDiscountRequest),
           },
-          bookNowLineItems: resolvedLines.map((line) => ({
+          bookNowLineItems: resolvedLinesWithSchedule.map((line) => ({
             taskId: `${placeholderTaskId}:${line.packageSlug}`,
             taskTitle: line.title,
             lineAmountRupees: line.lineTotal,
             catalogId: line.categorySlug,
             categorySlug: line.categorySlug,
+            scheduledDate: line.schedule?.scheduledDate,
+            scheduledTimeStart: line.schedule?.scheduledTimeStart,
+            scheduledTimeEnd: line.schedule?.scheduledTimeEnd,
+            timeSlot: line.schedule?.timeSlot,
+            durationMinutes: line.schedule?.durationMinutes,
           })),
         },
       });
@@ -468,7 +594,7 @@ export class BookingService {
         orderId,
         customerUid,
         total: pricing.total,
-        itemCount: resolvedLines.length,
+        itemCount: resolvedLinesWithSchedule.length,
       });
 
       return {
@@ -535,12 +661,12 @@ export class BookingService {
         priority: 'normal',
         status: 'open',
         requesterId: order.customerProfileId,
-        scheduledDate: order.scheduledDate,
-        scheduledTimeStart: order.scheduledTimeStart,
-        scheduledTimeEnd: order.scheduledTimeEnd,
-        timeSlot: order.timeSlot,
+        scheduledDate: line.schedule?.scheduledDateValue ?? order.scheduledDate,
+        scheduledTimeStart: line.schedule?.scheduledTimeStart ?? order.scheduledTimeStart,
+        scheduledTimeEnd: line.schedule?.scheduledTimeEnd ?? order.scheduledTimeEnd,
+        timeSlot: line.schedule?.timeSlot ?? order.timeSlot,
         flexibility: 'strict',
-        estimatedDuration: line.durationMinutes,
+        estimatedDuration: line.schedule?.durationMinutes ?? line.durationMinutes,
         views: 0,
         isFeatured: false,
         currentRevisionRound: 0,
@@ -571,6 +697,7 @@ export class BookingService {
             slug: line.packageSlug,
             categorySlug: line.categorySlug,
           },
+          ...bookingItemScheduleFields(line),
         });
         await Task.findByIdAndUpdate(task._id, { bookingItemId: String(createdItem._id) });
       }
@@ -713,9 +840,13 @@ export class BookingService {
 
   static async listOrdersForCustomer(customerUid: string, limit = 20, page = 1) {
     const skip = (Math.max(page, 1) - 1) * limit;
+    const query = {
+      customerUid,
+      isDeletedByCustomer: { $ne: true },
+    };
     const [orders, total] = await Promise.all([
-      BookingOrder.find({ customerUid }).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      BookingOrder.countDocuments({ customerUid }),
+      BookingOrder.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      BookingOrder.countDocuments(query),
     ]);
     return {
       orders,

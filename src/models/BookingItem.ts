@@ -18,6 +18,11 @@ export interface IBookingItem extends Document {
     slug: string;
     categorySlug?: string;
   };
+  scheduledDate?: Date;
+  scheduledTimeStart?: string;
+  scheduledTimeEnd?: string;
+  timeSlot?: 'morning' | 'midday' | 'afternoon' | 'evening';
+  durationMinutes?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -45,6 +50,11 @@ const BookingItemSchema = new Schema<IBookingItem>(
       slug: String,
       categorySlug: String,
     },
+    scheduledDate: Date,
+    scheduledTimeStart: String,
+    scheduledTimeEnd: String,
+    timeSlot: { type: String, enum: ['morning', 'midday', 'afternoon', 'evening'] },
+    durationMinutes: { type: Number, min: 1 },
   },
   { timestamps: true }
 );
