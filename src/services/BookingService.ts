@@ -18,6 +18,8 @@ import {
   getOccupiedBookNowSlots,
 } from '../utils/bookNowSlotAvailability';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
+import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+
 
 type BookingAddress = {
   label?: string;
@@ -571,6 +573,20 @@ export class BookingService {
           },
         });
         await Task.findByIdAndUpdate(task._id, { bookingItemId: String(createdItem._id) });
+      }
+
+      try {
+        schedulePostCreateNotifications(task, {
+          uid: order.customerUid,
+          mappedCategory: line.categoryLabel,
+          categorySlug: line.categorySlug,
+          frontendCategory: line.categoryLabel,
+        });
+      } catch (err: any) {
+        logger.error('Failed to trigger post-create notifications for Book Now task', {
+          taskId: task._id,
+          error: err.message,
+        });
       }
     }
 

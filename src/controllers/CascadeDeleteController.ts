@@ -52,6 +52,8 @@ export class CascadeDeleteController {
   static async getAccountDeletionPreview(req: Request, res: Response): Promise<void> {
     const { uid } = req.params;
     const profileId = req.headers['x-profile-id'] as string | undefined;
+    const scopeHeader = String(req.headers['x-deletion-scope'] || 'full').toLowerCase();
+    const scope = scopeHeader === 'role-scoped' ? 'roleScoped' : 'full';
 
     if (!uid) {
       throw new BadRequestError('User ID (uid) is required');
@@ -62,7 +64,7 @@ export class CascadeDeleteController {
 
     logger.info(`🔎 Account deletion preview for user: ${uid}`, { profileId });
 
-    const result = await CascadeDeleteService.getAccountDeletionPreview(profileId);
+    const result = await CascadeDeleteService.getAccountDeletionPreview(profileId, scope);
 
     ApiResponse.success(res, result, 'Account deletion preview retrieved');
   }
@@ -74,6 +76,8 @@ export class CascadeDeleteController {
   static async deleteAccountEligibleData(req: Request, res: Response): Promise<void> {
     const { uid } = req.params;
     const profileId = req.headers['x-profile-id'] as string | undefined;
+    const scopeHeader = String(req.headers['x-deletion-scope'] || 'full').toLowerCase();
+    const scope = scopeHeader === 'role-scoped' ? 'roleScoped' : 'full';
 
     if (!uid) {
       throw new BadRequestError('User ID (uid) is required');
@@ -81,7 +85,7 @@ export class CascadeDeleteController {
 
     logger.info(`🗑️ Account-deletion eligible delete for user: ${uid}, profileId: ${profileId ?? 'not provided'}`);
 
-    const result = await CascadeDeleteService.deleteAccountEligibleData(uid, profileId);
+    const result = await CascadeDeleteService.deleteAccountEligibleData(uid, profileId, scope);
 
     ApiResponse.success(res, result, 'Account deletion eligible data removed');
   }
@@ -93,6 +97,8 @@ export class CascadeDeleteController {
   static async getActiveDeletionBlockers(req: Request, res: Response): Promise<void> {
     const { uid } = req.params;
     const profileId = req.headers['x-profile-id'] as string | undefined;
+    const scopeHeader = String(req.headers['x-deletion-scope'] || 'full').toLowerCase();
+    const scope = scopeHeader === 'role-scoped' ? 'roleScoped' : 'full';
 
     if (!uid) {
       throw new BadRequestError('User ID (uid) is required');
@@ -103,7 +109,7 @@ export class CascadeDeleteController {
 
     logger.info(`🔎 Active deletion blockers check for user: ${uid}`, { profileId });
 
-    const result = await CascadeDeleteService.getActiveDeletionBlockers(profileId);
+    const result = await CascadeDeleteService.getActiveDeletionBlockers(profileId, scope);
 
     ApiResponse.success(res, result, 'Active deletion blockers retrieved');
   }

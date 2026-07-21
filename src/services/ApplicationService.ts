@@ -103,8 +103,36 @@ export class ApplicationService {
         }
       }
 
-      // Prevent taskers with an active task from applying to new ones
-      const hasActiveTask = await taskerHasBlockingActiveTask(applicantProfileId);
+      // Prevent taskers with an active task from applying to new ones unless the schedules do not overlap.
+      const candidateSchedules: Array<{
+        scheduledDate?: Date | string | null;
+        scheduledTimeStart?: string | null;
+        scheduledTimeEnd?: string | null;
+        timeSlot?: string | null;
+      }> = [];
+
+      if (task.recurring?.enabled && !isVisitPlan && selectedDates.length > 0) {
+        for (const date of selectedDates) {
+          candidateSchedules.push({
+            scheduledDate: date,
+            scheduledTimeStart: task.scheduledTimeStart ?? null,
+            scheduledTimeEnd: task.scheduledTimeEnd ?? null,
+            timeSlot: task.timeSlot ?? null,
+          });
+        }
+      } else {
+        candidateSchedules.push({
+          scheduledDate: task.scheduledDate ?? null,
+          scheduledTimeStart: task.scheduledTimeStart ?? null,
+          scheduledTimeEnd: task.scheduledTimeEnd ?? null,
+          timeSlot: task.timeSlot ?? null,
+        });
+      }
+
+      const hasActiveTask = await taskerHasBlockingActiveTask(
+        applicantProfileId,
+        candidateSchedules,
+      );
 
       if (hasActiveTask) {
         throw new BadRequestError(
