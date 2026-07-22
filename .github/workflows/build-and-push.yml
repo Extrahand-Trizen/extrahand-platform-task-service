@@ -36,9 +36,13 @@ jobs:
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci || {
+              echo "::warning::package-lock.json out of sync — falling back to npm install"
+              rm -rf node_modules
+              npm install
+            }
           else
-            echo "WARNING: package-lock.json missing — using npm install"
+            echo "::warning::package-lock.json missing — using npm install"
             npm install
           fi
 
