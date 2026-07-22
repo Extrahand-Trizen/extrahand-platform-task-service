@@ -200,7 +200,7 @@ export class CascadeDeleteService {
   /**
    * Preview counts for account deletion warnings (open/completed/cancelled poster tasks + applications).
    */
-  static async getAccountDeletionPreview(profileIdStr: string, scope: 'full' | 'roleScoped' = 'full'): Promise<{
+  static async getAccountDeletionPreview(profileIdStr: string, deletionScope: string = 'full'): Promise<{
     hasActiveBlockers: boolean;
     openTasksCount: number;
     completedTasksCount: number;
@@ -226,7 +226,7 @@ export class CascadeDeleteService {
       Task.countDocuments({ requesterId: profileId, status: 'completed' }),
       Task.countDocuments({ requesterId: profileId, status: 'cancelled' }),
       TaskApplication.countDocuments({ applicantId: profileId }),
-      this.getActiveDeletionBlockers(profileIdStr, scope),
+      this.getActiveDeletionBlockers(profileIdStr, deletionScope),
     ]);
 
     return {
@@ -241,11 +241,17 @@ export class CascadeDeleteService {
   }
 
   /**
-   * Delete task data eligible for account deletion: poster tasks in open/completed/cancelled,
-   * all user applications/offers, and related reviews/follows/reports/questions.
-   * Does not delete active/ongoing tasks (caller must block on those first).
+   * Delete task data eligible for account deletion.
+   * Scope:
+   * - full: poster tasks + helper applications + shared reviews/follows/reports/questions
+   * - poster-scoped: poster tasks (+ apps on those tasks) only — keep helper applications/reputation
+   * - helper-scoped: helper applications only — keep poster tasks
    */
-  static async deleteAccountEligibleData(uid: string, profileIdStr?: string, scope: 'full' | 'roleScoped' = 'full'): Promise<{
+  static async deleteAccountEligibleData(
+    uid: string,
+    profileIdStr?: string,
+    deletionScope: string = 'full',
+  ): Promise<{
     tasksDeleted: number;
     applicationsDeleted: number;
     reviewsDeleted: number;
@@ -254,11 +260,19 @@ export class CascadeDeleteService {
     questionsDeleted: number;
     totalDeleted: number;
   }> {
+    const scope = String(deletionScope || 'full').trim().toLowerCase();
+    const isPosterScoped = scope === 'poster-scoped' || scope === 'customer-scoped';
+    const isHelperScoped = scope === 'helper-scoped' || scope === 'role-scoped';
+    const isFull = !isPosterScoped && !isHelperScoped;
+
     const profileId = profileIdStr && mongoose.Types.ObjectId.isValid(profileIdStr)
       ? new mongoose.Types.ObjectId(profileIdStr)
       : null;
 
-    logger.info(`🗑️ Starting account-deletion eligible delete for user: ${uid}, profileId: ${profileId?.toString() ?? 'not provided'}`);
+    logger.info(`🗑️ Starting account-deletion eligible delete for user: ${uid}`, {
+      profileId: profileId?.toString() ?? 'not provided',
+      deletionScope: scope,
+    });
 
     try {
       if (profileId) {
@@ -272,9 +286,16 @@ export class CascadeDeleteService {
 
       let taskIds: mongoose.Types.ObjectId[] = [];
       let tasksDeleteResult = { deletedCount: 0 };
+      let applicationsDeleteResult = { deletedCount: 0 };
+      let orphanedApplicationsResult = { deletedCount: 0 };
+      let reviewsDeleteResult = { deletedCount: 0 };
+      let followsDeleteResult = { deletedCount: 0 };
+      let reportsDeleteResult = { deletedCount: 0 };
+      let questionsDeleteResult = { deletedCount: 0 };
+      let assigneeLinksCleared = 0;
 
       if (profileId) {
-        if (scope === 'full') {
+        if (isFull || isPosterScoped) {
           const deletablePosterTasks = await Task.find({
             requesterId: profileId,
             status: { $in: [...ACCOUNT_DELETION_DELETABLE_POSTER_STATUSES] },
@@ -283,11 +304,6 @@ export class CascadeDeleteService {
           taskIds = deletablePosterTasks.map((task) => task._id);
           logger.info(`📋 Found ${taskIds.length} deletable poster tasks for profileId ${profileId}`);
 
-          let applicationsDeleteResult = { deletedCount: 0 };
-          applicationsDeleteResult = await TaskApplication.deleteMany({ applicantId: profileId });
-          logger.info(`✅ Deleted ${applicationsDeleteResult.deletedCount} task applications (by applicantId)`);
-
-          let orphanedApplicationsResult = { deletedCount: 0 };
           if (taskIds.length > 0) {
             orphanedApplicationsResult = await TaskApplication.deleteMany({ taskId: { $in: taskIds } });
             logger.info(`✅ Deleted ${orphanedApplicationsResult.deletedCount} applications on deleted poster tasks`);
@@ -295,86 +311,57 @@ export class CascadeDeleteService {
             tasksDeleteResult = await Task.deleteMany({ _id: { $in: taskIds } });
             logger.info(`✅ Deleted ${tasksDeleteResult.deletedCount} poster tasks (open/completed/cancelled)`);
           }
+        }
 
-          let reviewsDeleteResult = { deletedCount: 0 };
+        if (isFull || isHelperScoped) {
+          applicationsDeleteResult = await TaskApplication.deleteMany({ applicantId: profileId });
+          logger.info(`✅ Deleted ${applicationsDeleteResult.deletedCount} task applications (by applicantId)`);
+
+          const taskAssignmentClearResult = await Task.updateMany(
+            { assigneeId: profileId },
+            { $unset: { assigneeId: '', assignedAt: '' } },
+          );
+          assigneeLinksCleared = taskAssignmentClearResult.modifiedCount || 0;
+          logger.info(`✅ Cleared assignee links from ${assigneeLinksCleared} tasks for helper/partner role`);
+        }
+
+        // Shared reputation/audit records: only wipe on full account delete.
+        if (isFull) {
           reviewsDeleteResult = await Review.deleteMany({
             $or: [{ reviewerId: profileId }, { reviewedId: profileId }],
           });
           logger.info(`✅ Deleted ${reviewsDeleteResult.deletedCount} reviews`);
 
-          const followsDeleteResult = await TaskFollow.deleteMany({ userId: uid });
+          followsDeleteResult = await TaskFollow.deleteMany({ userId: uid });
           logger.info(`✅ Deleted ${followsDeleteResult.deletedCount} task follows`);
 
-          let reportsDeleteResult = { deletedCount: 0 };
           reportsDeleteResult = await TaskReport.deleteMany({ userId: profileId });
           logger.info(`✅ Deleted ${reportsDeleteResult.deletedCount} task reports`);
 
-          let questionsDeleteResult = { deletedCount: 0 };
           questionsDeleteResult = await TaskQuestion.deleteMany({
             $or: [{ askedById: profileId }, { answeredById: profileId }],
           });
           logger.info(`✅ Deleted ${questionsDeleteResult.deletedCount} task questions`);
-
-          const totalDeleted =
-            tasksDeleteResult.deletedCount +
-            applicationsDeleteResult.deletedCount +
-            orphanedApplicationsResult.deletedCount +
-            reviewsDeleteResult.deletedCount +
-            followsDeleteResult.deletedCount +
-            reportsDeleteResult.deletedCount +
-            questionsDeleteResult.deletedCount;
-
-          logger.info(`✅ Account-deletion eligible delete completed for user ${uid}. Total records deleted: ${totalDeleted}`);
-
-          return {
-            tasksDeleted: tasksDeleteResult.deletedCount,
-            applicationsDeleted: applicationsDeleteResult.deletedCount + orphanedApplicationsResult.deletedCount,
-            reviewsDeleted: reviewsDeleteResult.deletedCount,
-            followsDeleted: followsDeleteResult.deletedCount,
-            reportsDeleted: reportsDeleteResult.deletedCount,
-            questionsDeleted: questionsDeleteResult.deletedCount,
-            totalDeleted,
-          };
         }
 
-        const roleScopedApplicationsDeleteResult = await TaskApplication.deleteMany({ applicantId: profileId });
-        logger.info(`✅ Deleted ${roleScopedApplicationsDeleteResult.deletedCount} task applications for helper/partner role`);
-
-        const roleScopedReviewsDeleteResult = await Review.deleteMany({
-          $or: [{ reviewerId: profileId }, { reviewedId: profileId }],
-        });
-        logger.info(`✅ Deleted ${roleScopedReviewsDeleteResult.deletedCount} reviews for helper/partner role`);
-
-        const followsDeleteResult = await TaskFollow.deleteMany({ userId: uid });
-        logger.info(`✅ Deleted ${followsDeleteResult.deletedCount} task follows for helper/partner role`);
-
-        const reportsDeleteResult = await TaskReport.deleteMany({ userId: profileId });
-        logger.info(`✅ Deleted ${reportsDeleteResult.deletedCount} task reports for helper/partner role`);
-
-        const questionsDeleteResult = await TaskQuestion.deleteMany({
-          $or: [{ askedById: profileId }, { answeredById: profileId }],
-        });
-        logger.info(`✅ Deleted ${questionsDeleteResult.deletedCount} task questions for helper/partner role`);
-
-        const taskAssignmentClearResult = await Task.updateMany(
-          { assigneeId: profileId },
-          { $unset: { assigneeId: '', assignedAt: '' } },
-        );
-        logger.info(`✅ Cleared assignee links from ${taskAssignmentClearResult.modifiedCount} tasks for helper/partner role`);
-
         const totalDeleted =
-          roleScopedApplicationsDeleteResult.deletedCount +
-          roleScopedReviewsDeleteResult.deletedCount +
+          tasksDeleteResult.deletedCount +
+          applicationsDeleteResult.deletedCount +
+          orphanedApplicationsResult.deletedCount +
+          reviewsDeleteResult.deletedCount +
           followsDeleteResult.deletedCount +
           reportsDeleteResult.deletedCount +
           questionsDeleteResult.deletedCount;
 
-        logger.info(`✅ Role-scoped helper/partner delete completed for user ${uid}. Total records removed: ${totalDeleted}`);
+        logger.info(`✅ Account-deletion eligible delete completed for user ${uid}. Total records deleted: ${totalDeleted}`, {
+          deletionScope: scope,
+          assigneeLinksCleared,
+        });
 
         return {
-          tasksDeleted: 0,
-          applicationsDeleted: roleScopedApplicationsDeleteResult.deletedCount,
-          reviewsDeleted: roleScopedReviewsDeleteResult.deletedCount,
+          tasksDeleted: tasksDeleteResult.deletedCount,
+          applicationsDeleted: applicationsDeleteResult.deletedCount + orphanedApplicationsResult.deletedCount,
+          reviewsDeleted: reviewsDeleteResult.deletedCount,
           followsDeleted: followsDeleteResult.deletedCount,
           reportsDeleted: reportsDeleteResult.deletedCount,
           questionsDeleted: questionsDeleteResult.deletedCount,
@@ -400,9 +387,12 @@ export class CascadeDeleteService {
 
   /**
    * Returns whether the user has tasks that block account deletion.
-   * Uses requesterId / assigneeId (profile ObjectId) — not posterUid (not stored on Task).
+   * Scope limits which side is checked (poster vs assignee).
    */
-  static async getActiveDeletionBlockers(profileIdStr: string, scope: 'full' | 'roleScoped' = 'full'): Promise<{
+  static async getActiveDeletionBlockers(
+    profileIdStr: string,
+    deletionScope: string = 'full',
+  ): Promise<{
     hasBlockers: boolean;
     asPosterCount: number;
     asAssigneeCount: number;
@@ -412,24 +402,38 @@ export class CascadeDeleteService {
       throw new BadRequestError('Valid profileId is required for deletion blocker check');
     }
 
+    const scope = String(deletionScope || 'full').trim().toLowerCase();
+    const checkPoster =
+      scope === 'full' ||
+      scope === 'poster-scoped' ||
+      scope === 'customer-scoped';
+    const checkAssignee =
+      scope === 'full' ||
+      scope === 'helper-scoped' ||
+      scope === 'role-scoped';
+
     const profileId = new mongoose.Types.ObjectId(profileIdStr);
     const statuses = [...ACTIVE_DELETION_BLOCKER_STATUSES];
 
     const [asPosterCount, asAssigneeCount, posterSample, assigneeSample] = await Promise.all([
-      scope === 'roleScoped'
-        ? Promise.resolve(0)
-        : Task.countDocuments({ requesterId: profileId, status: { $in: statuses } }),
-      Task.countDocuments({ assigneeId: profileId, status: { $in: statuses } }),
-      scope === 'roleScoped'
-        ? Promise.resolve([])
-        : Task.find({ requesterId: profileId, status: { $in: statuses } })
+      checkPoster
+        ? Task.countDocuments({ requesterId: profileId, status: { $in: statuses } })
+        : Promise.resolve(0),
+      checkAssignee
+        ? Task.countDocuments({ assigneeId: profileId, status: { $in: statuses } })
+        : Promise.resolve(0),
+      checkPoster
+        ? Task.find({ requesterId: profileId, status: { $in: statuses } })
             .select('_id title status')
             .limit(3)
-            .lean(),
-      Task.find({ assigneeId: profileId, status: { $in: statuses } })
-        .select('_id title status')
-        .limit(3)
-        .lean(),
+            .lean()
+        : Promise.resolve([] as any[]),
+      checkAssignee
+        ? Task.find({ assigneeId: profileId, status: { $in: statuses } })
+            .select('_id title status')
+            .limit(3)
+            .lean()
+        : Promise.resolve([] as any[]),
     ]);
 
     const sampleTasks = [

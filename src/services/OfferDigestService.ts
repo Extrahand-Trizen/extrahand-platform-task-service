@@ -3,6 +3,7 @@ import Task from '../models/Task';
 import TaskApplication from '../models/TaskApplication';
 import logger from '../config/logger';
 import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
+import { fireDialogWhatsAppForUser } from '../clients/fireDialogWhatsAppForUser';
 import {
   isDigestEligibleTask,
   utcDayKey,
@@ -67,6 +68,28 @@ export class OfferDigestService {
     }
 
     if (pendingActive === 1) {
+      // Dialog Meta template (preferred). Same idempotency family as push→Dialog bridge
+      // so we don't double-send if NotificationClient also triggers Dialog.
+      const minute = Math.floor(Date.now() / 60000);
+      fireDialogWhatsAppForUser({
+        uid: args.requesterUid,
+        eventKey: 'APPLICATION_SUBMITTED',
+        category: 'taskUpdates',
+        payload: {
+          title: `New application for: ${args.taskTitle}`,
+          body: `${args.applicantDisplayName} has applied for ${args.taskTitle}.`,
+          taskTitle: args.taskTitle || 'your task',
+          applicantName: args.applicantDisplayName || 'A helper',
+          taskId: args.taskId,
+          applicationId: args.applicationId,
+        },
+        idempotencyKey: `eh-push:${args.requesterUid}:APPLICATION_SUBMITTED:${args.applicationId}:${minute}`.slice(
+          0,
+          200,
+        ),
+      });
+
+      // Legacy messaging-service (no-op when WHATSAPP_SUPPRESS_LEGACY=true).
       fireWhatsAppNotify({
         uid: args.requesterUid,
         templateKey: 'wa_offer_received',

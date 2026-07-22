@@ -15,6 +15,7 @@ import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { fireDialogWhatsAppForUser } from "../clients/fireDialogWhatsAppForUser";
 import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import { OfferDigestService } from "./OfferDigestService";
 import { PaymentClient } from "./PaymentClient";
@@ -103,36 +104,8 @@ export class ApplicationService {
         }
       }
 
-      // Prevent taskers with an active task from applying to new ones unless the schedules do not overlap.
-      const candidateSchedules: Array<{
-        scheduledDate?: Date | string | null;
-        scheduledTimeStart?: string | null;
-        scheduledTimeEnd?: string | null;
-        timeSlot?: string | null;
-      }> = [];
-
-      if (task.recurring?.enabled && !isVisitPlan && selectedDates.length > 0) {
-        for (const date of selectedDates) {
-          candidateSchedules.push({
-            scheduledDate: date,
-            scheduledTimeStart: task.scheduledTimeStart ?? null,
-            scheduledTimeEnd: task.scheduledTimeEnd ?? null,
-            timeSlot: task.timeSlot ?? null,
-          });
-        }
-      } else {
-        candidateSchedules.push({
-          scheduledDate: task.scheduledDate ?? null,
-          scheduledTimeStart: task.scheduledTimeStart ?? null,
-          scheduledTimeEnd: task.scheduledTimeEnd ?? null,
-          timeSlot: task.timeSlot ?? null,
-        });
-      }
-
-      const hasActiveTask = await taskerHasBlockingActiveTask(
-        applicantProfileId,
-        candidateSchedules,
-      );
+      // Prevent taskers with an active task from applying to new ones
+      const hasActiveTask = await taskerHasBlockingActiveTask(applicantProfileId);
 
       if (hasActiveTask) {
         throw new BadRequestError(
@@ -331,23 +304,27 @@ export class ApplicationService {
           throw conversionError;
         }
         
-        // Try profiles collection
-        logger.info(`[ApplicationService.submitApplication] Querying profiles collection`, {
-          query: { _id: requesterId.toString() }
-        });
-        
         const ProfilesCol = mongoose.connection.collection("profiles");
-        let requesterProfile = await ProfilesCol.findOne({ _id: requesterId });
-        
+        let requesterProfile =
+          (await ProfilesCol.findOne({ _id: requesterId })) ||
+          (task.requesterUid
+            ? await ProfilesCol.findOne({ uid: String(task.requesterUid) })
+            : null);
+
         if (!requesterProfile) {
           logger.warn(`[ApplicationService.submitApplication] Profile not found in 'profiles' collection, trying 'users'`, {
-            requesterId: requesterId.toString()
+            requesterId: requesterId.toString(),
+            requesterUid: task.requesterUid || null,
           });
-          
+
           // Try users collection as fallback
           const UsersCol = mongoose.connection.collection("users");
-          requesterProfile = await UsersCol.findOne({ _id: requesterId });
-          
+          requesterProfile =
+            (await UsersCol.findOne({ _id: requesterId })) ||
+            (task.requesterUid
+              ? await UsersCol.findOne({ uid: String(task.requesterUid) })
+              : null);
+
           if (requesterProfile) {
             logger.info(`[ApplicationService.submitApplication] Found profile in 'users' collection instead`);
           }
@@ -373,7 +350,11 @@ export class ApplicationService {
         });
 
         if (requesterProfile?.uid) {
-          logger.debug(`[ApplicationService.submitApplication] Sending APPLICATION_SUBMITTED notification`);
+          logger.info(`[ApplicationService.submitApplication] Sending APPLICATION_SUBMITTED notification`, {
+            applicationId: application._id.toString(),
+            requesterUid: requesterProfile.uid,
+            taskId,
+          });
           await NotificationClient.send(
             {
               eventKey: 'APPLICATION_SUBMITTED',
@@ -386,7 +367,9 @@ export class ApplicationService {
               data: {
                 taskId,
                 applicationId: application._id.toString(),
-                applicantUid
+                applicantUid,
+                applicantName: applicantProfileSnapshot?.name || 'A helper',
+                taskTitle: task.title || 'your task',
               }
             }
           );
@@ -412,6 +395,14 @@ export class ApplicationService {
             requesterUid: String(requesterProfile.uid),
             applicantDisplayName: applicantProfileSnapshot?.name || 'A tasker',
             taskTitle: task.title || 'your task',
+          });
+        } else {
+          logger.error(`[ApplicationService.submitApplication] Skipping offer notifications — requester has no uid`, {
+            applicationId: application._id.toString(),
+            taskId,
+            requesterId: task.requesterId?.toString?.() || String(task.requesterId),
+            requesterUid: task.requesterUid || null,
+            hasProfile: !!requesterProfile,
           });
         }
         
@@ -1705,5 +1696,89 @@ export class ApplicationService {
       taskId: application.taskId.toString(),
       previousTaskStatus: task.status,
     });
+
+    // Notify customer — helper withdrew after assignment (extrahand_work_cancelled_customer)
+    try {
+      const Profile = mongoose.connection.collection("profiles");
+      const requesterProfile = task.requesterId
+        ? await Profile.findOne({ _id: task.requesterId })
+        : null;
+      const customerUid = requesterProfile?.uid ? String(requesterProfile.uid) : "";
+      if (!customerUid) {
+        logger.warn("[ApplicationService] Skip withdraw WhatsApp — customer uid missing", {
+          applicationId,
+          taskId: application.taskId.toString(),
+        });
+        return;
+      }
+
+      const taskIdStr = application.taskId.toString();
+      const taskTitle = task.title || "your task";
+      const title = "Helper withdrew";
+      const body = `The helper withdrew from "${taskTitle}". Your task is open again for new offers.`;
+      const notificationData = {
+        taskId: taskIdStr,
+        taskTitle,
+        status: "open",
+        eventKey: "TASK_CANCELLED_CUSTOMER",
+        entityType: "task",
+        action: "helper_withdrew",
+      };
+
+      await NotificationClient.send({
+        eventKey: "TASK_CANCELLED_CUSTOMER",
+        category: "taskUpdates",
+        actorId: String(application.applicantUid || applicantProfileId),
+        recipients: [customerUid],
+        entity: { type: "task", id: taskIdStr },
+        title,
+        body,
+        data: notificationData,
+      });
+
+      await InAppNotificationClient.send({
+        userId: customerUid,
+        title,
+        body,
+        type: "warning",
+        category: "taskUpdates",
+        data: notificationData,
+      });
+
+      const waMinute = Math.floor(Date.now() / 60000);
+      fireDialogWhatsAppForUser({
+        uid: customerUid,
+        eventKey: "TASK_CANCELLED_CUSTOMER",
+        category: "taskUpdates",
+        payload: {
+          title,
+          body,
+          taskTitle,
+          taskId: taskIdStr,
+        },
+        idempotencyKey:
+          `eh-push:${customerUid}:TASK_CANCELLED_CUSTOMER:${taskIdStr}:${waMinute}`.slice(0, 200),
+      });
+      fireWhatsAppNotify({
+        uid: customerUid,
+        templateKey: "wa_work_cancelled_customer",
+        category: "taskUpdates",
+        templateBody: { var_1: taskTitle },
+        templateButtons: taskOpenAppButton(taskIdStr),
+        idempotencyKey: `cancel:${taskIdStr}:${customerUid}:helper_withdraw`,
+        metadata: {
+          workId: taskIdStr,
+          recipientRole: "customer",
+          metaTemplateName: "extrahand_work_cancelled_customer",
+          triggerType: "helper_withdraw_after_assigned",
+        },
+      });
+    } catch (notifyErr) {
+      logger.warn("[ApplicationService] Failed to notify customer after helper withdraw", {
+        applicationId,
+        taskId: application.taskId.toString(),
+        error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+      });
+    }
   }
 }
