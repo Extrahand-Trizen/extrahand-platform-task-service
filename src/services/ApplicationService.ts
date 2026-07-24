@@ -152,6 +152,45 @@ export class ApplicationService {
         throw new BadRequestError("You have already applied to this task");
       }
 
+      // ── Cross-task schedule-conflict guard ────────────────────────────────
+      // Prevent a helper from applying to multiple tasks at the exact same
+      // date + time window. Withdrawn / rejected applications do not block.
+      if (task.scheduledDate && (task.scheduledTimeStart || task.timeSlot)) {
+        // Find the helper's active applications on OTHER tasks.
+        const activeApplicationsOnOtherTasks = await TaskApplication.find({
+          applicantUid,
+          taskId: { $ne: new mongoose.Types.ObjectId(taskId) },
+          status: { $nin: ['withdrawn', 'rejected'] },
+        }).select('taskId').lean();
+
+        if (activeApplicationsOnOtherTasks.length > 0) {
+          const otherTaskIds = activeApplicationsOnOtherTasks.map((a) => a.taskId);
+          // Fetch those tasks and check for date+time overlap.
+          const conflictingTask = await Task.findOne({
+            _id: { $in: otherTaskIds },
+            scheduledDate: task.scheduledDate,
+            ...(task.scheduledTimeStart
+              ? {
+                  scheduledTimeStart: task.scheduledTimeStart,
+                  scheduledTimeEnd: task.scheduledTimeEnd ?? { $exists: false },
+                }
+              : { timeSlot: task.timeSlot }),
+          })
+            .select('_id title')
+            .lean();
+
+          if (conflictingTask) {
+            const conflictTitle = (conflictingTask as any).title
+              ? `"${(conflictingTask as any).title}"`
+              : 'another task';
+            throw new BadRequestError(
+              `You already have an application for ${conflictTitle} at the same date and time. Please withdraw that application before applying here.`,
+            );
+          }
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
       // Re-application flow:
       // Because of the unique index on (taskId, applicantUid), creating a new row after
       // withdrawal/rejection can fail with duplicate key. Reuse the latest withdrawn/rejected row.

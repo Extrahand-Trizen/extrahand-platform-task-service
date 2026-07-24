@@ -2502,11 +2502,14 @@ export class TaskService {
           }
 
           if (otherProfile?.uid) {
+            // isRequesterCancelled = true means the poster/partner cancelled → notify helper
+            // isRequesterCancelled = false means the performer/helper cancelled → notify partner
+            const otherRole = isRequesterCancelled ? 'helper' : 'partner';
             logger.info('[TaskService.updateTaskStatus] Sending task cancelled in-app notification', {
               taskId,
               recipientUid: otherProfile.uid,
-              recipientRole: isRequesterCancelled ? 'tasker' : 'poster',
-              cancelledBy: isRequesterCancelled ? 'poster' : 'performer',
+              recipientRole: otherRole,
+              cancelledBy: isRequesterCancelled ? 'partner' : 'helper',
               actionUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
             });
 
@@ -2519,6 +2522,7 @@ export class TaskService {
               data: {
                 taskId: taskId.toString(),
                 actionUrl: `/tasks/${taskId}/track`,
+                recipientRole: otherRole,
               },
             });
 

@@ -79,6 +79,63 @@ export class InAppNotificationClient {
   }
 
   /**
+   * Dynamically resolves the recipient role from the database task document
+   * and attaches it to payload data to ensure correct separation.
+   */
+  private static async resolveAndAttachRole(payload: { data?: Record<string, any>; userId?: string; userIds?: string[] }): Promise<void> {
+    if (!payload.data || !payload.data.taskId) {
+      return;
+    }
+
+    try {
+      const taskId = payload.data.taskId;
+      // Resolve Task model dynamically to prevent circular dependencies at import time
+      const Task = (await import('../models/Task')).default;
+      const task = await Task.findById(taskId)
+        .select('bookingSource requesterUid assigneeUid')
+        .lean();
+
+      if (task) {
+        let resolvedRole = payload.data.recipientRole;
+
+        if (task.bookingSource === 'book_now') {
+          // All Book Now notifications go to Partner/Customer tab
+          resolvedRole = 'partner';
+        } else {
+          // Marketplace / Normal post works
+          if (resolvedRole === 'helper') {
+            resolvedRole = 'tasker';
+          } else if (resolvedRole === 'customer') {
+            resolvedRole = 'customer';
+          } else if (!resolvedRole) {
+            // No role specified; infer it from target userId
+            if (payload.userId) {
+              if (task.assigneeUid === payload.userId) {
+                resolvedRole = 'tasker';
+              } else if (task.requesterUid === payload.userId) {
+                resolvedRole = 'customer';
+              }
+            } else if (payload.userIds && payload.userIds.length > 0) {
+              // Batch matches matching applicants (helpers/taskers)
+              resolvedRole = 'tasker';
+            }
+          }
+        }
+
+        if (resolvedRole) {
+          payload.data.recipientRole = resolvedRole;
+          logger.info(`InAppNotificationClient: Resolved recipientRole to '${resolvedRole}' for task ${taskId}`);
+        }
+      }
+    } catch (err: any) {
+      logger.warn('InAppNotificationClient: Failed to resolve and attach role', {
+        taskId: payload.data?.taskId,
+        error: err?.message,
+      });
+    }
+  }
+
+  /**
    * Send a single in-app notification
    */
   static async send(payload: InAppNotificationPayload): Promise<boolean> {
@@ -90,6 +147,11 @@ export class InAppNotificationClient {
     }
 
     try {
+      // Intercept and resolve the correct recipientRole
+      if (payload.data) {
+        await this.resolveAndAttachRole(payload);
+      }
+
       logger.info('InAppNotificationClient: Sending in-app notification', {
         userId: payload.userId,
         type: payload.type || 'info',
@@ -145,6 +207,11 @@ export class InAppNotificationClient {
     }
 
     try {
+      // Intercept and resolve the correct recipientRole
+      if (payload.data) {
+        await this.resolveAndAttachRole(payload);
+      }
+
       logger.info('InAppNotificationClient: Sending batch in-app notifications', {
         userCount: payload.userIds.length,
         type: payload.type || 'info',

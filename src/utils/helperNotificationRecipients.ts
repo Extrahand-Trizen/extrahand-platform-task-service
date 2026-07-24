@@ -3,6 +3,35 @@
  * never the customer who posted the work.
  */
 
+/**
+ * Resolve the in-app notification recipientRole for the HELPER/PERFORMER side
+ * of a task, based on its bookingSource.
+ *
+ * Rules:
+ *   - book_now tasks  → 'partner'  (helper sees these in the Partner tab,
+ *                                   because Book Now is a partner-mode workflow)
+ *   - marketplace / normal post works → 'tasker' (helper sees these in the
+ *                                   Helper/Tasker tab)
+ *
+ * The NotificationService query maps:
+ *   helper mode  → targetRoles: ['helper', 'tasker']
+ *   partner mode → targetRoles: ['partner', 'customer']
+ */
+export function resolveHelperNotifRole(
+  bookingSource?: string | null,
+): 'partner' | 'tasker' {
+  return bookingSource === 'book_now' ? 'partner' : 'tasker';
+}
+
+/**
+ * Resolve the in-app notification recipientRole for the CUSTOMER/REQUESTER side.
+ * Customers always live in the partner-mode view, so this always returns 'customer'.
+ * Kept as a named helper for symmetry and future flexibility.
+ */
+export function resolveCustomerNotifRole(): 'customer' {
+  return 'customer';
+}
+
 export function resolvePosterUid(
   uid?: string | null,
   requesterProfile?: { uid?: string | null } | null,
@@ -32,13 +61,20 @@ export function excludeTaskPoster(
   return unique.filter((id) => id !== poster);
 }
 
+/**
+ * Attach recipientRole and optional poster context to a notification data object.
+ * Pass bookingSource so the role is automatically resolved:
+ *   - 'book_now'  → recipientRole: 'partner'
+ *   - anything else → recipientRole: 'tasker'
+ */
 export function withHelperAlertData(
   data: Record<string, unknown>,
   posterUid?: string,
+  bookingSource?: string | null,
 ): Record<string, unknown> {
   return {
     ...data,
-    recipientRole: 'helper',
+    recipientRole: resolveHelperNotifRole(bookingSource),
     ...(posterUid ? { posterUid, actorId: posterUid } : {}),
   };
 }
