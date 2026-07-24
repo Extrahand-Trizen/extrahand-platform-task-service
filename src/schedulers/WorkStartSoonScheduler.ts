@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import Task from '../models/Task';
 import logger from '../config/logger';
 import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
+import { fireDialogWhatsAppForUser } from '../clients/fireDialogWhatsAppForUser';
 import { taskOpenAppButton } from '../utils/whatsappTaskButtons';
 import { resolveWorkStartInstant, buildScheduleVersion } from '../utils/workSchedule';
 import {
@@ -27,8 +28,8 @@ const SLOT_CONFIG: Record<
 };
 
 /**
- * Sends wa_work_starting_soon at 2h and 30m before scheduled start.
- * Idempotency: wa_work_starting_soon:{taskId}:{uid}:{slot}:{scheduleVersion}
+ * Sends extrahand_work_starting_soon (legacy key wa_work_starting_soon) at 2h and 30m before scheduled start.
+ * Idempotency: extrahand_work_starting_soon:{taskId}:{uid}:{slot}:{scheduleVersion}
  */
 export class WorkStartSoonScheduler {
   private static isInitialized = false;
@@ -100,8 +101,27 @@ export class WorkStartSoonScheduler {
             if (slot === '30m' && !task.assigneeId) {
               // Customer copy assumes a helper is assigned.
             } else {
+              const customerUid = String(requesterProfile.uid);
+              const waMinute = Math.floor(Date.now() / 60000);
+              fireDialogWhatsAppForUser({
+                uid: customerUid,
+                eventKey: 'HELPER_ON_THE_WAY',
+                category: 'taskReminders',
+                payload: {
+                  title: 'Work starting soon',
+                  body: `Your work "${taskTitle}" starts in ${cfg.label}.`,
+                  taskTitle,
+                  scheduledLabel: cfg.label,
+                  taskId: String(task._id),
+                },
+                idempotencyKey:
+                  `eh-push:${customerUid}:HELPER_ON_THE_WAY:${task._id}:${slot}:${waMinute}`.slice(
+                    0,
+                    200,
+                  ),
+              });
               fireWhatsAppNotify({
-                uid: String(requesterProfile.uid),
+                uid: customerUid,
                 templateKey: 'wa_work_starting_soon',
                 category: 'taskReminders',
                 templateBody: {
@@ -109,11 +129,12 @@ export class WorkStartSoonScheduler {
                   var_2: cfg.label,
                 },
                 templateButtons: taskOpenAppButton(String(task._id)),
-                idempotencyKey: `wa_work_starting_soon:${task._id}:${requesterProfile.uid}:${slot}:${scheduleVersion}`,
+                idempotencyKey: `extrahand_work_starting_soon:${task._id}:${customerUid}:${slot}:${scheduleVersion}`,
                 metadata: {
                   workId: String(task._id),
                   triggerType: slot,
                   recipientRole: 'customer',
+                  metaTemplateName: 'extrahand_work_starting_soon',
                 },
               });
             }
@@ -129,11 +150,12 @@ export class WorkStartSoonScheduler {
                 var_2: cfg.label,
               },
               templateButtons: taskOpenAppButton(String(task._id)),
-              idempotencyKey: `wa_work_starting_soon:${task._id}:${assigneeProfile.uid}:${slot}:${scheduleVersion}`,
+              idempotencyKey: `extrahand_work_starting_soon:${task._id}:${assigneeProfile.uid}:${slot}:${scheduleVersion}`,
               metadata: {
                 workId: String(task._id),
                 triggerType: slot,
                 recipientRole: 'helper',
+                metaTemplateName: 'extrahand_work_starting_soon',
               },
             });
           }

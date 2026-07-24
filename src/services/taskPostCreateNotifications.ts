@@ -262,179 +262,21 @@ export async function runPostCreateNotifications(
     const nearbyTaskerSet = new Set(nearbyTaskers);
     const skillMatchedSet = new Set(skillMatchedTaskers);
 
-    // STEP 1: Emit TASK_CREATED_RECOMMENDED notification
-    // Skill-matched helpers who are NOT nearby (nearby helpers get TASK_NEARBY instead).
+    // Skill-only discovery (TASK_CREATED_RECOMMENDED) is disabled:
+    // helpers get discovery alerts only when BOTH nearby + skill match (STEP 4).
     if (posterUid) {
-      try {
-        const recommendedTaskers = skillMatchedTaskers.filter(
-          (matchedUid) => !nearbyTaskerSet.has(matchedUid),
+      const skillOnlySkipped = skillMatchedTaskers.filter(
+        (matchedUid) => !nearbyTaskerSet.has(matchedUid),
+      ).length;
+      if (skillOnlySkipped > 0) {
+        logger.info(
+          '[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - Skipped skill-only (require nearby + skill)',
+          {
+            taskId: task._id,
+            skillMatchCategory,
+            skillOnlySkipped,
+          },
         );
-
-        logger.info('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - Matched users by category only', {
-          taskId: task._id,
-          skillMatchCategory,
-          category: mappedCategory,
-          matchedCount: recommendedTaskers.length,
-          matchedUsers: recommendedTaskers,
-          excludedRequesterUid: posterUid,
-        });
-
-        if (recommendedTaskers.length > 0) {
-          const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
-          const taskRoute = `/tasks/${task._id}`;
-
-          const recommendedLocationLabel =
-            task.location?.city ||
-            task.location?.address ||
-            'your area';
-
-          await NotificationClient.sendBatch(
-            {
-              eventKey: 'TASK_CREATED_RECOMMENDED',
-              category: 'recommendedTaskAlerts',
-              actorId: posterUid,
-              entity: { type: 'task', id: task._id.toString() },
-              title: `New skill matched nearby: ${task.title}`,
-              body: `A ${skillMatchCategory} task has been posted near ${recommendedLocationLabel} and matches your skills.`,
-              data: withHelperAlertData({
-                eventKey: 'TASK_CREATED_RECOMMENDED',
-                entityType: 'task',
-                skillMatch: true,
-                taskId: task._id.toString(),
-                category: mappedCategory,
-                skillMatchCategory,
-                budget: task.budget.amount,
-                locationLabel: recommendedLocationLabel,
-                taskUrl,
-                route: taskRoute,
-                actionUrl: taskRoute,
-              }, posterUid),
-            },
-            recommendedTaskers
-          );
-
-          // In-app notification must be delivered directly to all matched UIDs.
-          for (const matchedUid of recommendedTaskers) {
-            try {
-              await InAppNotificationClient.send({
-                userId: matchedUid,
-                title: 'New Skill Matched Nearby',
-                body: `A new "${skillMatchCategory}" task "${task.title}" has been posted near ${recommendedLocationLabel}`,
-                category: 'recommendedTaskAlerts',
-                type: 'info',
-                data: {
-                  taskId: task._id.toString(),
-                  taskUrl,
-                  route: taskRoute,
-                  actionUrl: taskRoute,
-                  category: mappedCategory,
-                  skillMatchCategory,
-                  budget: task.budget?.amount,
-                  locationLabel: recommendedLocationLabel,
-                }
-              });
-              logger.info('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - In-app sent (uid-level)', {
-                taskId: task._id,
-                userId: matchedUid,
-                category: mappedCategory,
-                route: taskRoute,
-              });
-            } catch (inAppError) {
-              logger.warn('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - In-app failed (uid-level)', {
-                taskId: task._id,
-                userId: matchedUid,
-                error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
-              });
-            }
-          }
-
-          // Email: task_created_recommended â†’ matched taskers
-          try {
-            const Profile = mongoose.connection.collection('profiles');
-
-            // âœ… FIX: query profiles by uid (string), not _id (ObjectId)
-            const recommendedProfiles = await Profile.find({ uid: { $in: recommendedTaskers } }).toArray();
-            const scheduledDateStr = task.scheduledDate ? new Date(task.scheduledDate).toLocaleDateString() : undefined;
-
-            logger.info('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - Profile lookup for email', {
-              taskId: task._id,
-              matchedUidCount: recommendedTaskers.length,
-              profileCount: recommendedProfiles.length,
-            });
-
-            for (const p of recommendedProfiles) {
-              if (!p?.uid || p.uid === posterUid) {
-                logger.debug('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - Skipping invalid/owner recipient', {
-                  taskId: task._id,
-                  uid: p?.uid,
-                });
-                continue;
-              }
-
-              // Email for category-matched recipient (if email exists and preference enabled).
-              if (p.email) {
-                try {
-                  logger.debug(`[TaskService.postCreateNotifications] Sending task_created_recommended email to ${p.email}`);
-                  const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                    p.uid,
-                    'recommendedTaskAlerts'
-                  );
-
-                  if (emailEnabled) {
-                    await EmailServiceClient.sendTaskCreatedRecommended(p.email, {
-                      taskerName: p.name || p.fullName || 'There',
-                      taskTitle: task.title,
-                      skillCategory: mappedCategory,
-                      taskDescription: task.description?.substring(0, 200),
-                      budget: task.budget?.amount,
-                      location: task.location?.city || task.location?.address,
-                      scheduledDate: scheduledDateStr,
-                      category: mappedCategory,
-                      taskUrl,
-                      userId: p.uid,
-                    });
-                    logger.info('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - Email sent', {
-                      taskId: task._id,
-                      to: p.email,
-                      userId: p.uid,
-                      category: mappedCategory,
-                    });
-                  } else {
-                    logger.info('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - Email skipped by preferences', {
-                      taskId: task._id,
-                      userId: p.uid,
-                      category: 'recommendedTaskAlerts',
-                    });
-                  }
-                } catch (err) {
-                  logger.error('Error sending task_created_recommended email to user', {
-                    taskId: task._id,
-                    email: p.email,
-                    userId: p.uid,
-                    error: err instanceof Error ? err.message : 'Unknown error',
-                    stack: err instanceof Error ? err.stack : undefined
-                  });
-                }
-              } else {
-                logger.info('[TaskService.postCreateNotifications] CATEGORY_SKILL_ALERTS - Email skipped (missing email)', {
-                  taskId: task._id,
-                  userId: p.uid,
-                });
-              }
-            }
-          } catch (emailErr) {
-            logger.error('Error sending task_created_recommended emails', {
-              taskId: task._id,
-              error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
-              stack: emailErr instanceof Error ? emailErr.stack : undefined
-            });
-          }
-        }
-      } catch (error) {
-        logger.error('Error sending TASK_CREATED_RECOMMENDED notification', {
-          taskId: task._id,
-          error: error instanceof Error ? error.message : 'Unknown error'
-        });
       }
 
       // STEP 2: Emit TASK_CREATED_KEYWORD notification
@@ -774,7 +616,7 @@ export async function runPostCreateNotifications(
     }
 
     // STEP 4: Emit TASK_NEARBY notification
-    // One alert per nearby helper (skill wording when applicable).
+    // Requires BOTH location (~10km) AND skill/category match — no location-only blasts.
     try {
       if (nearbyTaskers.length > 0) {
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
@@ -788,10 +630,9 @@ export async function runPostCreateNotifications(
           nearbyTaskers.filter((u) => skillMatchedSet.has(u)),
           posterUid,
         );
-        const nearbyOnly = excludeTaskPoster(
-          nearbyTaskers.filter((u) => !skillMatchedSet.has(u)),
-          posterUid,
-        );
+        const nearbyOnlySkipped = nearbyTaskers.filter(
+          (u) => !skillMatchedSet.has(u) && u !== posterUid,
+        ).length;
 
         if (nearbyAndSkill.length > 0) {
           await NotificationClient.sendBatch(
@@ -821,78 +662,46 @@ export async function runPostCreateNotifications(
           );
         }
 
-        if (nearbyOnly.length > 0) {
-          await NotificationClient.sendBatch(
-            {
-              eventKey: 'TASK_NEARBY',
-              category: 'recommendedTaskAlerts',
-              actorId: posterUid,
-              entity: { type: 'task', id: task._id.toString() },
-              title: `New task nearby: ${task.title}`,
-              body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel}.`,
-              data: withHelperAlertData({
-                eventKey: 'TASK_NEARBY',
-                entityType: 'task',
-                skillMatch: false,
-                taskId: task._id.toString(),
-                category: task.category,
-                categoryLabel: task.categoryLabel || task.category,
-                budget: task.budget?.amount,
-                locationLabel,
-                taskUrl,
-                route: taskRoute,
-                actionUrl: taskRoute,
-              }, posterUid),
-            },
-            nearbyOnly,
-          );
-        }
-
-        // In-app + WhatsApp for skill-matched nearby helpers
-        for (const nearbyUid of excludeTaskPoster(nearbyTaskers, posterUid)) {
+        // In-app + WhatsApp only for nearby ∩ skill helpers
+        for (const nearbyUid of nearbyAndSkill) {
           try {
-            const isNearbyAndSkill = skillMatchedSet.has(nearbyUid);
-            if (isNearbyAndSkill) {
-              // Governance: one WA per work+helper; skip if already applied.
-              const alreadyApplied = await TaskApplication.exists({
-                taskId: task._id,
-                applicantUid: nearbyUid,
-                status: { $in: ['pending', 'accepted'] },
-              });
-              if (alreadyApplied) continue;
+            // Governance: one WA per work+helper; skip if already applied.
+            const alreadyApplied = await TaskApplication.exists({
+              taskId: task._id,
+              applicantUid: nearbyUid,
+              status: { $in: ['pending', 'accepted'] },
+            });
+            if (alreadyApplied) continue;
 
-              const categoryLabel =
-                skillMatchCategory || task.categoryLabel || task.category || 'work';
-              fireWhatsAppNotify({
-                uid: nearbyUid,
-                templateKey: 'wa_nearby_work_skill_match',
-                category: 'recommendedTaskAlerts',
-                templateBody: {
-                  var_1: task.title || 'New work',
-                  var_2: String(categoryLabel),
-                  var_3: String(locationLabel),
-                },
-                templateButtons: taskOpenAppButton(task._id.toString()),
-                idempotencyKey: `wa_nearby_work_skill_match:${task._id.toString()}:${nearbyUid}`,
-                metadata: {
-                  workId: task._id.toString(),
-                  triggerType: 'skill_nearby',
-                  recipientRole: 'helper',
-                },
-              });
-            }
+            const categoryLabel =
+              skillMatchCategory || task.categoryLabel || task.category || 'work';
+            fireWhatsAppNotify({
+              uid: nearbyUid,
+              templateKey: 'wa_nearby_work_skill_match',
+              category: 'recommendedTaskAlerts',
+              templateBody: {
+                var_1: task.title || 'New work',
+                var_2: String(categoryLabel),
+                var_3: String(locationLabel),
+              },
+              templateButtons: taskOpenAppButton(task._id.toString()),
+              idempotencyKey: `wa_nearby_work_skill_match:${task._id.toString()}:${nearbyUid}`,
+              metadata: {
+                workId: task._id.toString(),
+                triggerType: 'skill_nearby',
+                recipientRole: 'helper',
+              },
+            });
             await InAppNotificationClient.send({
               userId: nearbyUid,
-              title: isNearbyAndSkill ? 'New Skill Matched Nearby' : 'New Work Near You',
-              body: isNearbyAndSkill
-                ? `A ${task.categoryLabel || task.category} task "${task.title}" matches your skills near ${locationLabel}`
-                : `"${task.title}" has been posted near ${locationLabel}`,
+              title: 'New Skill Matched Nearby',
+              body: `A ${task.categoryLabel || task.category} task "${task.title}" matches your skills near ${locationLabel}`,
               category: 'recommendedTaskAlerts',
               type: 'info',
               data: withHelperAlertData({
                 eventKey: 'TASK_NEARBY',
                 entityType: 'task',
-                skillMatch: isNearbyAndSkill,
+                skillMatch: true,
                 taskId: task._id.toString(),
                 taskUrl,
                 route: taskRoute,
@@ -917,7 +726,8 @@ export async function runPostCreateNotifications(
           taskId: task._id,
           nearbyCount: nearbyTaskers.length,
           nearbyAndSkillCount: nearbyAndSkill.length,
-          nearbyOnlyCount: nearbyOnly.length,
+          nearbyOnlySkipped,
+          requireBothSkillAndLocation: true,
           locationLabel,
         });
       } else {

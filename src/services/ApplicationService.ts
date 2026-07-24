@@ -15,6 +15,7 @@ import { NotificationPreferenceChecker } from "./NotificationPreferenceChecker";
 import { config } from "../config/env";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { fireDialogWhatsAppForUser } from "../clients/fireDialogWhatsAppForUser";
 import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import { OfferDigestService } from "./OfferDigestService";
 import { PaymentClient } from "./PaymentClient";

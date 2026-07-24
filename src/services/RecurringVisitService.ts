@@ -45,6 +45,9 @@ import {
 import { RecurringVisitRepository } from '../repositories/RecurringVisitRepository';
 import { getRedisClient } from '../config/redis';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
+import { fireDialogWhatsAppForUser } from '../clients/fireDialogWhatsAppForUser';
+import { taskOpenAppButton } from '../utils/whatsappTaskButtons';
 import { NotificationClient } from './NotificationClient';
 import { PaymentClient } from './PaymentClient';
 
@@ -1580,8 +1583,9 @@ export class RecurringVisitService {
     const notificationData = {
       taskId: parentTaskId,
       parentTaskId,
+      taskTitle: String(task.title || 'your task'),
       entityType: 'task',
-      eventKey: 'TASK_UPDATED',
+      eventKey: 'TASK_CANCELLED_CUSTOMER',
       type: 'recurring_tasker_left_plan',
       status: 'open',
       reason: reasonSnippet || undefined,
@@ -1589,7 +1593,7 @@ export class RecurringVisitService {
 
     try {
       await NotificationClient.send({
-        eventKey: 'TASK_UPDATED',
+        eventKey: 'TASK_CANCELLED_CUSTOMER',
         category: 'taskUpdates',
         actorId: String(plan?.taskerUid || task.assigneeUid || ''),
         recipients: [customerUid],
@@ -1622,6 +1626,37 @@ export class RecurringVisitService {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+
+    // WhatsApp → customer: extrahand_work_cancelled_customer
+    const taskTitle = String(task.title || 'your task');
+    const waMinute = Math.floor(Date.now() / 60000);
+    fireDialogWhatsAppForUser({
+      uid: customerUid,
+      eventKey: 'TASK_CANCELLED_CUSTOMER',
+      category: 'taskUpdates',
+      payload: {
+        title,
+        body,
+        taskTitle,
+        taskId: parentTaskId,
+      },
+      idempotencyKey:
+        `eh-push:${customerUid}:TASK_CANCELLED_CUSTOMER:${parentTaskId}:${waMinute}`.slice(0, 200),
+    });
+    fireWhatsAppNotify({
+      uid: customerUid,
+      templateKey: 'wa_work_cancelled_customer',
+      category: 'taskUpdates',
+      templateBody: { var_1: taskTitle },
+      templateButtons: taskOpenAppButton(parentTaskId),
+      idempotencyKey: `cancel:${parentTaskId}:${customerUid}:tasker_left_plan`,
+      metadata: {
+        workId: parentTaskId,
+        recipientRole: 'customer',
+        metaTemplateName: 'extrahand_work_cancelled_customer',
+        triggerType: 'tasker_left_recurring_plan',
+      },
+    });
   }
 
   /** Notify assigned helper when the customer ends the entire recurring plan. */

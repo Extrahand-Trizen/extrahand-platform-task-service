@@ -13,7 +13,9 @@ import { NotificationClient } from "./NotificationClient";
 import { EmailServiceClient } from "../clients/EmailServiceClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
 import { fireWhatsAppNotify } from "../clients/WhatsAppClient";
+import { fireDialogWhatsAppForUser } from "../clients/fireDialogWhatsAppForUser";
 import { buildScheduleVersion } from "../utils/workSchedule";
+import { taskOpenAppButton } from "../utils/whatsappTaskButtons";
 import TaskApplication from "../models/TaskApplication";
 import TaskQuestion from "../models/TaskQuestion";
 import TaskFollow from "../models/TaskFollow";
@@ -2413,14 +2415,15 @@ export class TaskService {
 
           const notifData = {
             taskId,
+            taskTitle: task.title || 'your task',
             status: 'completed',
-            eventKey: 'TASK_UPDATED',
+            eventKey: 'TASK_COMPLETED_TASKER',
             entityType: 'task',
           };
 
           // Push notification
           await NotificationClient.send({
-            eventKey: 'TASK_UPDATED',
+            eventKey: 'TASK_COMPLETED_TASKER',
             category: 'taskUpdates',
             actorId: String(profileId),
             recipients: [taskerUid],
@@ -2438,6 +2441,35 @@ export class TaskService {
             type: 'success',
             category: 'taskUpdates',
             data: notifData,
+          });
+
+          const waMinute = Math.floor(Date.now() / 60000);
+          fireDialogWhatsAppForUser({
+            uid: taskerUid,
+            eventKey: 'TASK_COMPLETED_TASKER',
+            category: 'taskUpdates',
+            payload: {
+              title: 'Work approved',
+              body: `The poster has approved your work on "${task.title}". Payment will be processed shortly.`,
+              taskTitle: task.title || 'your task',
+              taskId,
+              status: 'completed',
+            },
+            idempotencyKey:
+              `eh-push:${taskerUid}:TASK_COMPLETED_TASKER:${taskId}:${waMinute}`.slice(0, 200),
+          });
+          fireWhatsAppNotify({
+            uid: taskerUid,
+            templateKey: 'wa_work_completed_helper',
+            category: 'taskUpdates',
+            templateBody: { var_1: task.title || 'your task' },
+            templateButtons: taskOpenAppButton(String(taskId)),
+            idempotencyKey: `completed-helper:${taskId}`,
+            metadata: {
+              workId: String(taskId),
+              recipientRole: 'helper',
+              metaTemplateName: 'extrahand_work_completed_helper',
+            },
           });
 
           logger.info('[TaskService] Completion notification sent to tasker', { taskId, taskerUid });
@@ -2526,14 +2558,72 @@ export class TaskService {
               },
             });
 
+            // Push → notification-service → Dialog WhatsApp (when Settings WA is on).
+            // eventKey selects customer vs helper Meta cancel template via Dialog rules.
+            const cancelEventKey = isRequesterCancelled
+              ? 'TASK_CANCELLED_HELPER'
+              : 'TASK_CANCELLED_CUSTOMER';
+            const cancelTitle = 'Task cancelled';
+            const cancelBody = `The task "${task.title}" has been cancelled.`;
+            const cancelTaskTitle = task.title || 'your task';
+            try {
+              await NotificationClient.send({
+                eventKey: cancelEventKey,
+                category: 'taskUpdates',
+                actorId: String(cancellerProfile?.uid || profileId),
+                recipients: [otherProfile.uid],
+                entity: { type: 'task', id: taskId.toString() },
+                title: cancelTitle,
+                body: cancelBody,
+                data: {
+                  taskId: taskId.toString(),
+                  taskTitle: cancelTaskTitle,
+                  actionUrl: `/tasks/${taskId}/track`,
+                  eventKey: cancelEventKey,
+                  entityType: 'task',
+                },
+              });
+            } catch (pushErr) {
+              logger.warn('Error sending task cancelled push notification', {
+                taskId,
+                cancelEventKey,
+                error: pushErr instanceof Error ? pushErr.message : 'Unknown error',
+              });
+            }
+
+            // Dialog WhatsApp — customer cancel → helper gets extrahand_work_cancelled_helper
+            const waMinute = Math.floor(Date.now() / 60000);
+            fireDialogWhatsAppForUser({
+              uid: otherProfile.uid,
+              eventKey: cancelEventKey,
+              category: 'taskUpdates',
+              payload: {
+                title: cancelTitle,
+                body: cancelBody,
+                taskTitle: cancelTaskTitle,
+                taskId: taskId.toString(),
+              },
+              idempotencyKey:
+                `eh-push:${otherProfile.uid}:${cancelEventKey}:${taskId}:${waMinute}`.slice(0, 200),
+            });
+
+            // Legacy messaging-service path (no-op when WHATSAPP_SUPPRESS_LEGACY=true).
             fireWhatsAppNotify({
               uid: otherProfile.uid,
               templateKey: isRequesterCancelled
                 ? 'wa_work_cancelled_helper'
                 : 'wa_work_cancelled_customer',
               category: 'taskUpdates',
-              templateBody: { var_1: task.title || 'your task' },
+              templateBody: { var_1: cancelTaskTitle },
+              templateButtons: taskOpenAppButton(taskId.toString()),
               idempotencyKey: `cancel:${taskId.toString()}:${otherProfile.uid}`,
+              metadata: {
+                workId: taskId.toString(),
+                recipientRole: isRequesterCancelled ? 'helper' : 'customer',
+                metaTemplateName: isRequesterCancelled
+                  ? 'extrahand_work_cancelled_helper'
+                  : 'extrahand_work_cancelled_customer',
+              },
             });
           }
         }
@@ -2784,8 +2874,12 @@ export class TaskService {
     const { workTitle: workTitleForOtp, visitNumber } =
       await RecurringVisitService.resolveStartOtpWorkTitle(workTask);
 
-    const otpBody = `Task start OTP for \"${workTitleForOtp}\": ${otp}. Valid for 10 minutes.`;
-    const pushTitle = options?.isResend ? 'Task Start OTP (resent)' : 'Task Start OTP';
+    const journeyTitle = options?.isResend
+      ? 'Helper is on the way'
+      : 'Helper on the way';
+    const journeyBody = options?.isResend
+      ? `Your helper is heading to your location for \"${workTitleForOtp}\".`
+      : `Your helper has started from their location for \"${workTitleForOtp}\".`;
     const notificationData = {
       taskId: effectiveTaskId,
       taskTitle: workTitleForOtp,
@@ -2795,8 +2889,10 @@ export class TaskService {
       otp,
       otpType: 'task_start',
       expiresAt: expiresAt.toISOString(),
-      eventKey: 'TASK_UPDATED',
+      eventKey: 'HELPER_ON_THE_WAY',
       entityType: 'task',
+      executionPhase: 'on_the_way',
+      scheduledLabel: 'soon',
     };
 
     // Send via both email and in-app notifications for redundancy
@@ -2839,16 +2935,16 @@ export class TaskService {
       logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
     }
 
-    // Push notification (FCM) to poster â€” same content as in-app for lock-screen visibility
+    // Push notification (FCM) to poster — journey update (OTP stays in data + Work Progress)
     try {
       await NotificationClient.send({
-        eventKey: 'TASK_UPDATED',
+        eventKey: 'HELPER_ON_THE_WAY',
         category: 'taskUpdates',
         actorId: _uid,
         recipients: [requesterUid],
         entity: { type: 'task', id: taskId },
-        title: pushTitle,
-        body: otpBody,
+        title: journeyTitle,
+        body: journeyBody,
         data: notificationData,
       });
     } catch (pushError) {
@@ -2859,8 +2955,8 @@ export class TaskService {
     try {
       await InAppNotificationClient.send({
         userId: requesterUid,
-        title: pushTitle,
-        body: otpBody,
+        title: journeyTitle,
+        body: journeyBody,
         type: "info",
         category: "taskUpdates",
         data: notificationData,
@@ -2868,6 +2964,42 @@ export class TaskService {
     } catch (inAppError) {
       logger.warn("Failed to send task start OTP via in-app notification", { taskId, error: inAppError });
     }
+
+    // WhatsApp — Meta template extrahand_work_starting_soon (Dialog + legacy)
+    const waMinute = Math.floor(Date.now() / 60000);
+    const waIdempotencyKey =
+      `eh-push:${requesterUid}:HELPER_ON_THE_WAY:${effectiveTaskId}:${waMinute}`.slice(0, 200);
+    fireDialogWhatsAppForUser({
+      uid: requesterUid,
+      eventKey: 'HELPER_ON_THE_WAY',
+      category: 'taskUpdates',
+      payload: {
+        title: journeyTitle,
+        body: journeyBody,
+        taskTitle: workTitleForOtp,
+        scheduledLabel: 'soon',
+        taskId: effectiveTaskId,
+        executionPhase: 'on_the_way',
+      },
+      idempotencyKey: waIdempotencyKey,
+    });
+    fireWhatsAppNotify({
+      uid: requesterUid,
+      templateKey: 'wa_work_starting_soon',
+      category: 'taskUpdates',
+      templateBody: {
+        var_1: workTitleForOtp || 'your work',
+        var_2: 'soon',
+      },
+      templateButtons: taskOpenAppButton(String(effectiveTaskId)),
+      idempotencyKey: `extrahand_work_starting_soon:journey:${effectiveTaskId}:${requesterUid}`,
+      metadata: {
+        workId: String(effectiveTaskId),
+        triggerType: 'helper_start_journey',
+        recipientRole: 'customer',
+        metaTemplateName: 'extrahand_work_starting_soon',
+      },
+    });
 
     logger.info(`[OTP SUCCESS] Generated and successfully dispatched 4-digit start OTP: ${otp} for task: ${effectiveTaskId} to poster: ${requesterName}`);
     TaskService.invalidateTaskCache(taskId);

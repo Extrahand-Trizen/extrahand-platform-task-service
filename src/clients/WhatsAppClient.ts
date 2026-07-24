@@ -74,6 +74,19 @@ export class WhatsAppClient {
       return false;
     }
 
+    // When push→dialog WhatsApp bridge is enabled, skip legacy messaging-service
+    // to avoid duplicate WhatsApp messages for the same event.
+    const suppressLegacy = String(process.env.WHATSAPP_SUPPRESS_LEGACY || '')
+      .trim()
+      .toLowerCase();
+    if (suppressLegacy === '1' || suppressLegacy === 'true' || suppressLegacy === 'yes') {
+      logger.info('WhatsAppClient: skipped (dialog push bridge owns WhatsApp)', {
+        templateKey: payload.templateKey,
+        uid: payload.uid,
+      });
+      return true;
+    }
+
     if (!this.serviceAuthToken) {
       logger.warn('WhatsAppClient: SERVICE_AUTH_TOKEN missing — skipping', {
         templateKey: payload.templateKey,

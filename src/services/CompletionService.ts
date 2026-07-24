@@ -7,6 +7,7 @@ import { NotificationClient } from './NotificationClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
+import { fireDialogWhatsAppForUser } from '../clients/fireDialogWhatsAppForUser';
 import { taskOpenAppButton } from '../utils/whatsappTaskButtons';
 import { UserServiceClient } from '../clients/UserServiceClient';
 import { config } from '../config/env';
@@ -121,7 +122,7 @@ export class CompletionService {
           actorId: performerProfileId,
           recipients: [requesterProfile.uid],
           entity: { type: 'task', id: taskId },
-          title: 'Task ready for your approval',
+          title: 'work ready for your approval',
           body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
           data: {
             taskId,
@@ -135,7 +136,7 @@ export class CompletionService {
 
       await InAppNotificationClient.send({
         userId: task.requesterId.toString(),
-        title: 'Task ready for your approval',
+        title: 'work ready for your approval',
         body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
         type: 'info',
         category: 'taskUpdates',
@@ -255,34 +256,56 @@ export class CompletionService {
         }
       );
 
-      // TASK_COMPLETED_FOR_TASKER - Notify performer that poster approved
+      // TASK_COMPLETED_TASKER - Notify performer that poster approved
       if (assigneeUid) {
+        const helperTitle = 'Task approved';
+        const helperBody = `Your work on "${taskTitle}" was approved. Great job!`;
+        const helperData = {
+          taskId,
+          taskTitle: taskTitle || 'your task',
+          status: 'completed',
+          eventKey: 'TASK_COMPLETED_TASKER',
+          entityType: 'task',
+        };
+
         await NotificationClient.send({
           eventKey: 'TASK_COMPLETED_TASKER',
           category: 'taskUpdates',
           actorId: requesterUid,
           recipients: [assigneeUid],
           entity: { type: 'task', id: taskId },
-          title: 'Task approved',
-          body: `Your work on "${taskTitle}" was approved. Great job!`,
-          data: {
-            taskId,
-            status: 'completed'
-          }
+          title: helperTitle,
+          body: helperBody,
+          data: helperData,
         });
 
         await InAppNotificationClient.send({
           userId: assigneeUid,
-          title: 'Task approved',
-          body: `Your work on "${taskTitle}" was approved. Great job!`,
+          title: helperTitle,
+          body: helperBody,
           category: 'taskUpdates',
           type: 'success',
-          data: {
-            taskId,
-            status: 'completed'
-          }
+          data: helperData,
         });
 
+        // Dialog WhatsApp → Meta template extrahand_work_completed_helper
+        const waMinute = Math.floor(Date.now() / 60000);
+        fireDialogWhatsAppForUser({
+          uid: assigneeUid,
+          eventKey: 'TASK_COMPLETED_TASKER',
+          category: 'taskUpdates',
+          payload: {
+            title: helperTitle,
+            body: helperBody,
+            taskTitle: taskTitle || 'your task',
+            taskId,
+            status: 'completed',
+          },
+          idempotencyKey:
+            `eh-push:${assigneeUid}:TASK_COMPLETED_TASKER:${taskId}:${waMinute}`.slice(0, 200),
+        });
+
+        // Legacy messaging-service path (no-op when WHATSAPP_SUPPRESS_LEGACY=true)
         fireWhatsAppNotify({
           uid: assigneeUid,
           templateKey: 'wa_work_completed_helper',
@@ -290,7 +313,11 @@ export class CompletionService {
           templateBody: { var_1: taskTitle || 'your task' },
           templateButtons: taskOpenAppButton(taskId),
           idempotencyKey: `completed-helper:${taskId}`,
-          metadata: { workId: taskId, recipientRole: 'helper' },
+          metadata: {
+            workId: taskId,
+            recipientRole: 'helper',
+            metaTemplateName: 'extrahand_work_completed_helper',
+          },
         });
       }
 
