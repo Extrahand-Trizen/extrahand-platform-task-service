@@ -31,6 +31,15 @@ import {
 } from '../utils/bookNowScheduleResolution';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+import {
+  assertHourlyInstantOperatingHours,
+  assertHourlySingleVisitCheckout,
+  isHourlyCatalogLineInput,
+  isHourlyResolvedLine,
+  parseBookingFulfillmentType,
+} from '../utils/hourlyBookingGuards';
+import { config } from '../config/env';
+import type { BookingFulfillmentType } from '../models/BookingOrder';
 
 
 type BookingAddress = {
@@ -318,6 +327,10 @@ export class BookingService {
   }
 
   private static async resolveLine(line: BookingLineInput): Promise<ResolvedLine> {
+    // Hourly: always Mongo catalog price authority (never client name+price path).
+    if (isHourlyCatalogLineInput(line)) {
+      return this.resolveLineFromCatalog(line);
+    }
     if (this.hasClientCatalogLine(line)) {
       return this.resolveLineFromClient(line);
     }
@@ -344,6 +357,7 @@ export class BookingService {
     lineTotal?: number;
     useExtraCoins?: boolean;
     requestedCoinDiscountRupees?: number;
+    fulfillmentType?: BookingFulfillmentType | string;
   }) {
     const {
       customerUid,
@@ -360,6 +374,8 @@ export class BookingService {
       useExtraCoins,
       requestedCoinDiscountRupees,
     } = params;
+
+    const fulfillmentType = parseBookingFulfillmentType(params.fulfillmentType);
 
     const serviceable = await CatalogService.isPinCodeServiceable(
       address.pinCode,
@@ -402,7 +418,19 @@ export class BookingService {
       scheduledTimeEnd,
       timeSlot,
     };
-    const perItemScheduling = usesPerItemBookNowScheduling(rawLines, rawLines.length);
+
+    const looksHourlyInput = rawLines.some((line) => isHourlyCatalogLineInput(line));
+    const isInstantHourly = looksHourlyInput && fulfillmentType === 'instant';
+
+    if (isInstantHourly) {
+      assertHourlyInstantOperatingHours({
+        startHour: config.HOURLY_INSTANT_START_HOUR,
+        endHour: config.HOURLY_INSTANT_END_HOUR,
+      });
+    }
+
+    const perItemScheduling =
+      !isInstantHourly && usesPerItemBookNowScheduling(rawLines, rawLines.length);
 
     if (perItemScheduling) {
       rawLines.forEach((line, index) => {
@@ -422,8 +450,42 @@ export class BookingService {
       });
     }
 
+    // Scheduled Hourly: require a complete schedule (order-level or on the single line).
+    if (looksHourlyInput && fulfillmentType === 'scheduled') {
+      const line0 = rawLines[0];
+      const hasLineSchedule = Boolean(
+        line0?.scheduledDate && (line0.scheduledTimeStart || line0.timeSlot),
+      );
+      const hasOrderSchedule = Boolean(scheduledDate && (scheduledTimeStart || timeSlot));
+      if (!hasLineSchedule && !hasOrderSchedule) {
+        throw new BadRequestError(
+          'Scheduled Hourly Helper requires a date and start time or time slot',
+        );
+      }
+    }
+
     const resolvedLines = await Promise.all(rawLines.map((line) => this.resolveLine(line)));
+
+    assertHourlySingleVisitCheckout({
+      lines: resolvedLines,
+      fulfillmentType: looksHourlyInput || resolvedLines.some(isHourlyResolvedLine)
+        ? fulfillmentType
+        : undefined,
+    });
+
+    const isHourlyOrder = resolvedLines.some(isHourlyResolvedLine);
+
+    // After resolve: Instant Hourly still skips slot lead-time checks.
+    const skipSlotChecks = isHourlyOrder && fulfillmentType === 'instant';
+
     const resolvedLinesWithSchedule = resolvedLines.map((line, index) => {
+      if (skipSlotChecks) {
+        return {
+          ...line,
+          schedule: undefined,
+        };
+      }
+
       const schedule = resolveBookNowLineSchedule({
         lineSchedule: rawLines[index],
         legacySchedule,
@@ -443,29 +505,31 @@ export class BookingService {
       };
     });
 
-    const slotChecks = collectDistinctBookNowSlotChecks(
-      resolvedLinesWithSchedule.map((line) => line.schedule),
-    );
-    for (const slotCheck of slotChecks) {
-      try {
-        await assertBookNowSlotAvailable({
-          date: slotCheck.date,
-          city: address.city,
-          scheduledTimeStart: slotCheck.scheduledTimeStart,
-          timeSlot: slotCheck.timeSlot,
-        });
-      } catch (error) {
-        if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
-          throw new BadRequestError(
-            'This time slot is no longer available. Please choose another slot.',
-          );
+    if (!skipSlotChecks) {
+      const slotChecks = collectDistinctBookNowSlotChecks(
+        resolvedLinesWithSchedule.map((line) => line.schedule),
+      );
+      for (const slotCheck of slotChecks) {
+        try {
+          await assertBookNowSlotAvailable({
+            date: slotCheck.date,
+            city: address.city,
+            scheduledTimeStart: slotCheck.scheduledTimeStart,
+            timeSlot: slotCheck.timeSlot,
+          });
+        } catch (error) {
+          if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
+            throw new BadRequestError(
+              'This time slot is no longer available. Please choose another slot.',
+            );
+          }
+          if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
+            throw new BadRequestError(
+              'Book Now requires at least 3 hours notice. Please choose a later time slot.',
+            );
+          }
+          throw error;
         }
-        if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
-          throw new BadRequestError(
-            'Book Now requires at least 3 hours notice. Please choose a later time slot.',
-          );
-        }
-        throw error;
       }
     }
 
@@ -495,6 +559,7 @@ export class BookingService {
       customerProfileId,
       status: 'awaiting_payment',
       address,
+      ...(fulfillmentType ? { fulfillmentType } : {}),
       ...orderSchedule,
       subtotal: pricing.subtotal,
       addonsTotal,
@@ -517,6 +582,7 @@ export class BookingService {
           quantity: line.quantity,
           unitPrice: line.lineTotal / line.quantity,
           lineTotal: line.lineTotal,
+          durationMinutes: line.durationMinutes,
           skuSnapshot: {
             name: line.snapshotName,
             slug: line.packageSlug,
@@ -549,6 +615,8 @@ export class BookingService {
         metadata: {
           bookingOrderId: orderId,
           bookingMode: 'book_now',
+          ...(fulfillmentType ? { fulfillmentType } : {}),
+          ...(isHourlyOrder ? { hourlyHelper: true } : {}),
           itemCount: resolvedLinesWithSchedule.length,
           skuSlugs: resolvedLinesWithSchedule.map((l) => l.packageSlug),
           gstByCategory: pricing.categories,
@@ -567,11 +635,12 @@ export class BookingService {
             lineAmountRupees: line.lineTotal,
             catalogId: line.categorySlug,
             categorySlug: line.categorySlug,
+            pricingUnit: line.pricingUnit,
             scheduledDate: line.schedule?.scheduledDate,
             scheduledTimeStart: line.schedule?.scheduledTimeStart,
             scheduledTimeEnd: line.schedule?.scheduledTimeEnd,
             timeSlot: line.schedule?.timeSlot,
-            durationMinutes: line.schedule?.durationMinutes,
+            durationMinutes: line.schedule?.durationMinutes ?? line.durationMinutes,
           })),
         },
       });

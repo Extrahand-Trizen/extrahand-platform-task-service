@@ -88,6 +88,10 @@ const envSchema = z.object({
       (v) => !v || v.startsWith('redis://') || v.startsWith('rediss://'),
       'REDIS_URL must be redis:// or rediss:// (e.g. redis://:password@host:6379)'
     ),
+
+  /** Instant Hourly Helper window in Asia/Kolkata (hour 0–23). Inclusive start, exclusive end. */
+  HOURLY_INSTANT_START_HOUR: z.string().transform(Number).default('8'),
+  HOURLY_INSTANT_END_HOUR: z.string().transform(Number).default('20'),
 });
 
 // Extend global type for CORS config logging
@@ -298,6 +302,14 @@ export class Config {
 
   static get REDIS_URL(): string | undefined {
     return this.env.REDIS_URL;
+  }
+
+  static get HOURLY_INSTANT_START_HOUR(): number {
+    return this.env.HOURLY_INSTANT_START_HOUR;
+  }
+
+  static get HOURLY_INSTANT_END_HOUR(): number {
+    return this.env.HOURLY_INSTANT_END_HOUR;
   }
 }
 

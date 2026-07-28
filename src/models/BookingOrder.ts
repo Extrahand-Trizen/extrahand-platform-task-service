@@ -9,6 +9,9 @@ export type BookingOrderStatus =
   | 'cancelled'
   | 'refunded';
 
+/** Visit scheduling mode for a single BookingOrder (Instant | Scheduled). Not recurring. */
+export type BookingFulfillmentType = 'instant' | 'scheduled';
+
 export interface IBookingAddress {
   label?: string;
   line1: string;
@@ -25,6 +28,11 @@ export interface IBookingOrder extends Document {
   customerProfileId: Types.ObjectId;
   status: BookingOrderStatus;
   address: IBookingAddress;
+  /**
+   * How this visit starts. Missing on legacy package orders ⇒ treat as `scheduled`.
+   * Recurring is a future RecurringPlan — never a fulfillmentType value.
+   */
+  fulfillmentType?: BookingFulfillmentType;
   scheduledDate?: Date;
   scheduledTimeStart?: string;
   scheduledTimeEnd?: string;
@@ -70,6 +78,11 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
       pinCode: { type: String, required: true },
       coordinates: [Number],
     },
+    fulfillmentType: {
+      type: String,
+      enum: ['instant', 'scheduled'],
+      required: false,
+    },
     scheduledDate: Date,
     scheduledTimeStart: String,
     scheduledTimeEnd: String,
@@ -91,6 +104,11 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     bookingNotes: String,
   },
   { timestamps: true }
+);
+
+BookingOrderSchema.index(
+  { fulfillmentType: 1, status: 1, createdAt: -1 },
+  { sparse: true, name: 'booking_fulfillment_status_created' },
 );
 
 const BookingOrder: Model<IBookingOrder> =

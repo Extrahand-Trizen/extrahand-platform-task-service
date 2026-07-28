@@ -1,3 +1,8 @@
+import {
+  HOURLY_DURATION_SKUS,
+  HOURLY_HELPER_CATEGORY,
+  HOURLY_HELPER_CATEGORY_SLUG,
+} from '../constants/hourlyBooking';
 import fs from 'fs';
 import path from 'path';
 import mongoose from 'mongoose';
@@ -77,6 +82,62 @@ function loadSeedData(): { categories: SeedCategory[]; packages: SeedPackage[] }
 }
 
 export class BookNowCatalogBootstrap {
+  /** Seed Hourly Helper category + duration SKUs (pricingUnit=hourly). Idempotent. */
+  static async seedHourlyHelperCatalog(): Promise<{ categoryId: string; skus: number }> {
+    const category = await ServiceCategory.findOneAndUpdate(
+      { slug: HOURLY_HELPER_CATEGORY.slug },
+      {
+        slug: HOURLY_HELPER_CATEGORY.slug,
+        name: HOURLY_HELPER_CATEGORY.name,
+        description: HOURLY_HELPER_CATEGORY.description,
+        sortOrder: HOURLY_HELPER_CATEGORY.sortOrder,
+        isActive: true,
+      },
+      { upsert: true, new: true },
+    );
+
+    let skus = 0;
+    for (const def of HOURLY_DURATION_SKUS) {
+      const sku = await ServiceSku.findOneAndUpdate(
+        { categoryId: category._id, slug: def.slug },
+        {
+          categoryId: category._id,
+          slug: def.slug,
+          name: def.name,
+          description: def.description,
+          basePrice: def.basePrice,
+          pricingUnit: 'hourly',
+          durationMinutes: def.durationMinutes,
+          taskCategory: 'helper',
+          isActive: true,
+        },
+        { upsert: true, new: true },
+      );
+      skus += 1;
+
+      await ServiceVariant.findOneAndUpdate(
+        { skuId: sku._id, slug: 'default' },
+        {
+          skuId: sku._id,
+          slug: 'default',
+          name: 'Standard',
+          priceDelta: 0,
+          durationDeltaMinutes: 0,
+          isDefault: true,
+          isActive: true,
+        },
+        { upsert: true, new: true },
+      );
+    }
+
+    logger.info('Hourly Helper catalog seed complete', {
+      categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+      skus,
+    });
+
+    return { categoryId: String(category._id), skus };
+  }
+
   static async run(): Promise<{ categories: number; skus: number }> {
     const { categories, packages } = loadSeedData();
     const categoryBySlug = new Map<string, mongoose.Types.ObjectId>();
@@ -174,12 +235,15 @@ export class BookNowCatalogBootstrap {
       { upsert: true, new: true },
     );
 
+    const hourly = await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
+
     logger.info('Book Now catalog bootstrap complete', {
-      categories: categories.length,
-      skus: skuCount,
+      categories: categories.length + 1,
+      skus: skuCount + hourly.skus,
+      hourlyHelperSkus: hourly.skus,
       serviceCities: SERVICE_CITIES.length,
     });
 
-    return { categories: categories.length, skus: skuCount };
+    return { categories: categories.length + 1, skus: skuCount + hourly.skus };
   }
 }
