@@ -107,5 +107,8 @@ export function validateEventKeyCategory(
   eventKey: NotificationEventKey,
   declaredCategory: NotificationCategory
 ): boolean {
-  return EVENT_KEY_TO_CATEGORY[eventKey] === declaredCategory;
+  const mapped = EVENT_KEY_TO_CATEGORY[eventKey];
+  // Unknown / uncatalogued event keys are allowed (logged by NotificationClient).
+  if (mapped == null) return true;
+  return mapped === declaredCategory;
 }

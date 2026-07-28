@@ -25,6 +25,7 @@ import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
+import { notifyPosterOnTaskCompleted, resolveTaskParticipantUids } from "./taskCompletionPosterNotify";
 import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
@@ -931,13 +932,24 @@ export class TaskService {
   }
 
   /**
-   * Invalidate cached task so next getTaskById fetches fresh from DB (call after update/delete)
+   * Invalidate cached task so next getTaskById fetches fresh from DB (call after update/delete).
+   * Fire-and-forget — prefer `await invalidateTaskCacheAsync` when the client may refetch immediately.
    */
   static invalidateTaskCache(taskId: string): void {
+    void TaskService.invalidateTaskCacheAsync(taskId);
+  }
+
+  /** Await Redis delete so a follow-up GET cannot return a stale detail payload. */
+  static async invalidateTaskCacheAsync(taskId: string): Promise<void> {
     const cacheKey = `task:detail:${taskId}`;
-    getRedisClient()?.del(cacheKey).catch((err: any) => {
-      logger.warn("Task detail cache invalidate error", { taskId, error: err instanceof Error ? err.message : String(err) });
-    });
+    try {
+      await getRedisClient()?.del(cacheKey);
+    } catch (err: any) {
+      logger.warn("Task detail cache invalidate error", {
+        taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /** Invalidate cached open-marketplace list pages so new posts appear in browse immediately. */
@@ -2473,6 +2485,21 @@ export class TaskService {
           });
 
           logger.info('[TaskService] Completion notification sent to tasker', { taskId, taskerUid });
+
+          const { posterUid, assigneeUid: helperUid } = await resolveTaskParticipantUids(task);
+          if (posterUid) {
+            await notifyPosterOnTaskCompleted({
+              taskId: String(taskId),
+              taskTitle: task.title || 'your work',
+              posterUid,
+              assigneeUid: helperUid || taskerUid,
+              actorUid: helperUid || taskerUid,
+            });
+            logger.info('[TaskService] Completion notification sent to poster', {
+              taskId,
+              posterUid,
+            });
+          }
         } catch (err) {
           logger.warn('[TaskService] Failed to send completion notification to tasker', {
             taskId,
@@ -2510,6 +2537,24 @@ export class TaskService {
               data: {
                 taskId: taskId.toString(),
                 actionUrl: `/tasks/${taskId}/track`,
+                eventKey: 'REFUND_INITIATED',
+                entityType: 'refund',
+              },
+            });
+
+            await NotificationClient.send({
+              eventKey: 'TASK_CANCELLED_CUSTOMER',
+              category: 'taskUpdates',
+              actorId: 'system',
+              recipients: [requesterProfile.uid],
+              entity: { type: 'task', id: taskId.toString() },
+              title: 'Task cancelled',
+              body: `The task "${task.title}" has been cancelled. Amount will be refunded within 5-7 days.`,
+              data: {
+                taskId: taskId.toString(),
+                actionUrl: `/tasks/${taskId}/track`,
+                eventKey: 'REFUND_INITIATED',
+                entityType: 'refund',
               },
             });
           }
