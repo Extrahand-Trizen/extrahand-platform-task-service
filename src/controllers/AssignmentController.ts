@@ -94,4 +94,36 @@ export class AssignmentController {
 
     res.json({ success: true, data });
   }
+
+  /**
+   * POST /api/v1/admin/assignments/assign-partner-direct
+   * Admin assigns a user as a PARTNER to a Book Now task.
+   * Sets task.partnerId + task.partnerUid (so it shows in partner home screen)
+   * WITHOUT creating a TaskApplication (so it does NOT appear in helper/tasker home).
+   */
+  static async assignPartnerDirect(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+
+    const { taskId, partnerUid, partnerProfileId, partnerName } = req.body;
+    if (!taskId || !partnerUid || !partnerProfileId) {
+      throw new BadRequestError('taskId, partnerUid, and partnerProfileId are required');
+    }
+    if (!mongoose.Types.ObjectId.isValid(partnerProfileId)) {
+      throw new BadRequestError('Invalid partnerProfileId');
+    }
+
+    const data = await AssignmentService.assignPartnerDirect({
+      taskId,
+      partnerUid,
+      partnerProfileId,
+      partnerName,
+      assignedByUid: user.uid,
+    });
+
+    res.json({ success: true, data });
+  }
 }

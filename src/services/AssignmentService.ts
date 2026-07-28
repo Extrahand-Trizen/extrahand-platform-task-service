@@ -583,4 +583,91 @@ export class AssignmentService {
 
     return { task };
   }
+
+  /**
+   * Admin assigns a user as a PARTNER to a Book Now task.
+   * Sets task.partnerId + task.partnerUid so the task shows in the partner's
+   * "my-leads" screen. Does NOT create a TaskApplication, so it will NOT
+   * appear in the helper/tasker home screen.
+   */
+  static async assignPartnerDirect(params: {
+    taskId: string;
+    partnerUid: string;
+    partnerProfileId: string;
+    partnerName?: string;
+    assignedByUid: string;
+  }) {
+    const { taskId, partnerUid, partnerProfileId, assignedByUid } = params;
+
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError('Task not found');
+
+    // Cancel existing active assignments
+    await Assignment.updateMany(
+      { taskId: task._id, status: { $in: ['assigned', 'pending'] } },
+      { $set: { status: 'cancelled' } }
+    );
+
+    // Cancel old helper's TaskApplication so they no longer see this task in helper screen
+    if (task.acceptedApplicationId) {
+      await TaskApplication.findByIdAndUpdate(task.acceptedApplicationId, {
+        $set: { status: 'cancelled' },
+      });
+    }
+
+    const partnerProfileObjId = new mongoose.Types.ObjectId(partnerProfileId);
+
+    // Resolve bookingOrderId and bookingItemId for assignment validation
+    let bookingOrderId = task.bookingOrderId;
+    let bookingItemId = (task as any).bookingItemId;
+
+    if (!bookingItemId) {
+      const resolved = await AssignmentService.findOrderIdForTaskAdmin(task._id.toString());
+      if (resolved) {
+        bookingOrderId = resolved.orderId;
+        bookingItemId = resolved.bookingItemId;
+      }
+    }
+
+    // Create assignment record for audit trail
+    const assignment = await Assignment.create({
+      bookingOrderId: bookingOrderId || 'direct',
+      bookingItemId: bookingItemId ? new mongoose.Types.ObjectId(bookingItemId) : task._id,
+      taskId: task._id,
+      helperUid: partnerUid,
+      helperProfileId: partnerProfileObjId,
+      assignmentMode: 'manual',
+      status: 'assigned',
+      assignedByUid,
+      assignedAt: new Date(),
+    });
+
+    await AssignmentLog.create({
+      assignmentId: assignment._id,
+      action: 'manual_partner_assign_direct',
+      actorUid: assignedByUid,
+      metadata: { partnerUid, partnerProfileId },
+    });
+
+    // Set partnerId/partnerUid so task shows in partner my-leads query
+    // Do NOT set acceptedApplicationId — no TaskApplication is created
+    task.assigneeId = partnerProfileObjId;
+    task.assigneeUid = partnerUid;
+    (task as any).partnerId = partnerProfileObjId;
+    (task as any).partnerUid = partnerUid;
+    (task as any).partnerAcceptedAt = new Date();
+    task.assignedAt = new Date();
+    task.status = 'assigned';
+    task.assignmentStatus = 'assigned';
+    task.acceptedApplicationId = null as any;
+    await task.save();
+
+    logger.info('Direct partner assigned (Book Now)', {
+      taskId: task._id,
+      partnerUid,
+      assignedByUid,
+    });
+
+    return { assignment, task };
+  }
 }
