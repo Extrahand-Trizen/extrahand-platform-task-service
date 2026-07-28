@@ -160,18 +160,42 @@ export class NotificationClient {
   }
 
   /**
+   * Events where the actor must still receive a push (confirmation / receipt).
+   * Without this, in-app is created separately but push is silently dropped when
+   * actorId === recipient (e.g. poster marks work complete → REVIEW_REQUEST).
+   */
+  private static readonly SELF_NOTIFY_ALLOWED_EVENT_KEYS = new Set([
+    'REVIEW_REQUEST',
+    'TASK_COMPLETED',
+    'PAYMENT_RECEIVED',
+    'PAYMENT_CAPTURED',
+    'REFUND_INITIATED',
+    'REFUND_PROCESSED',
+    'PAYOUT_INITIATED',
+    'PAYOUT_COMPLETED',
+    'PAYOUT_PENALTY',
+  ]);
+
+  /**
    * PRIVATE: Apply business logic guardrails to recipients
-   * - Remove actor from recipients (no self-notification)
+   * - Remove actor from recipients (no self-notification), except allow-listed events
    * - Deduplicate
    * - Filter null/undefined
    */
-  private static sanitizeRecipients(recipients: string[], actorId?: string): string[] {
+  private static sanitizeRecipients(
+    recipients: string[],
+    actorId?: string,
+    eventKey?: string,
+  ): string[] {
     let sanitized = Array.from(new Set(recipients)) // Deduplicate
       .filter(Boolean) // Remove null/undefined/empty strings
       .filter(id => id.trim() !== ''); // Remove whitespace-only
 
+    const allowSelfNotify =
+      !!eventKey && this.SELF_NOTIFY_ALLOWED_EVENT_KEYS.has(String(eventKey).toUpperCase());
+
     // Actor suppression: don't notify the person who caused the action
-    if (actorId) {
+    if (actorId && !allowSelfNotify) {
       sanitized = sanitized.filter(id => id !== actorId);
     }
 
@@ -229,14 +253,16 @@ export class NotificationClient {
       // Sanitize recipients (remove actor, deduplicate)
       const sanitizedRecipients = this.sanitizeRecipients(
         payload.recipients || [],
-        payload.actorId
+        payload.actorId,
+        payload.eventKey,
       );
 
       // If no recipients left after sanitization, skip
       if (sanitizedRecipients.length === 0) {
         logger.info('Notification skipped - no recipients after sanitization', {
           eventKey: payload.eventKey,
-          actorId: payload.actorId
+          actorId: payload.actorId,
+          originalRecipients: payload.recipients,
         });
         return;
       }
@@ -341,7 +367,11 @@ export class NotificationClient {
       }
 
       // Sanitize recipients (remove actor, deduplicate, filter empty)
-      const sanitizedUserIds = this.sanitizeRecipients(userIds, payload.actorId);
+      const sanitizedUserIds = this.sanitizeRecipients(
+        userIds,
+        payload.actorId,
+        payload.eventKey,
+      );
 
       // If no users left, short-circuit
       if (sanitizedUserIds.length === 0) {

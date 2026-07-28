@@ -57,6 +57,27 @@ export const NegotiationUtils = {
   },
 
   /**
+   * Returns true when acceptance must be blocked because this application was
+   * tagged for the task's active revision round but the helper has not responded.
+   * New/re-offered applications after a revision (taskCurrentRevisionRound unset)
+   * are not blocked — their offer already reflects the current listed budget.
+   */
+  blocksAcceptancePendingRevisionResponse(input: {
+    taskCurrentRevisionRound: number | null | undefined;
+    applicationTaskRevisionRound: number | null | undefined;
+    applicationRespondedRevisionRound: number | null | undefined;
+  }): boolean {
+    const taskRound = input.taskCurrentRevisionRound ?? 0;
+    const appTaggedRound = input.applicationTaskRevisionRound ?? 0;
+    const respondedRound = input.applicationRespondedRevisionRound ?? 0;
+    return (
+      taskRound > 0 &&
+      appTaggedRound >= taskRound &&
+      respondedRound < taskRound
+    );
+  },
+
+  /**
    * Builds the payload for ApplicationRepository.applyRevisionResponse()
    * based on the tasker's chosen action.
    *

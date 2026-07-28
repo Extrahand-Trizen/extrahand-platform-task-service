@@ -12,6 +12,7 @@ import { NegotiationUtils } from "../utils/NegotiationUtils";
 import { ProfileUtils } from "../utils/ProfileUtils";
 import { NotificationClient } from "./NotificationClient";
 import { InAppNotificationClient } from "../clients/InAppNotificationClient";
+import { TaskService } from "./TaskService";
 import { ITask } from "../models/Task";
 import { ITaskApplication } from "../models/TaskApplication";
 
@@ -99,6 +100,11 @@ export class BudgetRevisionService {
       newAmount,
       actorUid,
     });
+
+    // Drop Redis task detail + browse list cache before returning so poster/helper
+    // refetches cannot overwrite the UI with the pre-revision budget/round.
+    await TaskService.invalidateTaskCacheAsync(taskId);
+    TaskService.invalidateTaskListCache();
 
     // ── DENORMALIZE ROUND onto pending applications ──────────────────────────
     // Bulk write: O(A) one DB op so respond-to-revision doesn't need a task fetch.

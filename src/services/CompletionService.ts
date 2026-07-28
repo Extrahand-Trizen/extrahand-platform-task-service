@@ -17,6 +17,7 @@ import { RecurringVisitService } from './RecurringVisitService';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { ITask } from '../models/Task';
 import { PaymentClient } from './PaymentClient';
+import { notifyPosterOnTaskCompleted } from './taskCompletionPosterNotify';
 
 export class CompletionService {
   /**
@@ -132,22 +133,22 @@ export class CompletionService {
             taskUrl: approvalUrl,
           },
         });
-      }
 
-      await InAppNotificationClient.send({
-        userId: task.requesterId.toString(),
-        title: 'work ready for your approval',
-        body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
-        type: 'info',
-        category: 'taskUpdates',
-        data: {
-          taskId,
-          status: 'review',
-          action: 'approve_completion',
-          actionUrl: approvalPath,
-          taskUrl: approvalUrl,
-        },
-      });
+        await InAppNotificationClient.send({
+          userId: requesterProfile.uid,
+          title: 'work ready for your approval',
+          body: `${assigneeProfile?.name || 'Your tasker'} submitted completion for "${task.title}". Approve or request changes.`,
+          type: 'info',
+          category: 'taskUpdates',
+          data: {
+            taskId,
+            status: 'review',
+            action: 'approve_completion',
+            actionUrl: approvalPath,
+            taskUrl: approvalUrl,
+          },
+        });
+      }
 
       if (requesterProfile?.email) {
         EmailServiceClient.sendCompletionProofSubmitted(requesterProfile.email, {
@@ -239,23 +240,6 @@ export class CompletionService {
       const requesterUid = requesterProfile?.uid || taskOwnerProfileId;
       const taskTitle = updatedTask?.title;
 
-      // TASK_COMPLETED - Notify requester that task is done
-      await NotificationClient.send(
-        {
-          eventKey: 'TASK_COMPLETED',
-          category: 'taskUpdates',
-          actorId: requesterUid,
-          recipients: [requesterUid],
-          entity: { type: 'task', id: taskId },
-          title: `Task Completed: ${taskTitle}`,
-          body: `Your task has been completed successfully. Thank you for using ExtraHand!`,
-          data: {
-            taskId,
-            status: 'completed'
-          }
-        }
-      );
-
       // TASK_COMPLETED_TASKER - Notify performer that poster approved
       if (assigneeUid) {
         const helperTitle = 'Task approved';
@@ -322,13 +306,12 @@ export class CompletionService {
       }
 
       if (requesterUid) {
-        fireWhatsAppNotify({
-          uid: requesterUid,
-          templateKey: 'wa_work_completed_customer',
-          category: 'taskUpdates',
-          templateBody: { var_1: taskTitle || 'your task' },
-          idempotencyKey: `completed-poster:${taskId}`,
-          metadata: { workId: taskId, recipientRole: 'customer' },
+        await notifyPosterOnTaskCompleted({
+          taskId: String(taskId),
+          taskTitle: taskTitle || 'your work',
+          posterUid: requesterUid,
+          assigneeUid: assigneeUid ? String(assigneeUid) : undefined,
+          actorUid: requesterUid,
         });
       }
 
@@ -355,23 +338,6 @@ export class CompletionService {
         }).catch(() => undefined);
       }
 
-      // REVIEW_REQUEST - Prompt requester to review the tasker
-      await NotificationClient.send(
-        {
-          eventKey: 'REVIEW_REQUEST',
-          category: 'taskUpdates',
-          actorId: requesterUid,
-          recipients: [requesterUid],
-          entity: { type: 'task', id: taskId },
-          title: `Please review your tasker`,
-          body: `Share your experience with the tasker who completed "${taskTitle}". Your review helps the community!`,
-          data: {
-            taskId,
-            assigneeUid,
-            actionUrl: `/tasks/${taskId}/review`
-          }
-        }
-      );
     } catch (error) {
       logger.error('Error sending completion notifications', {
         taskId,

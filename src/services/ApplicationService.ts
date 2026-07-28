@@ -25,6 +25,7 @@ import {
 import { RecurringVisitService } from "./RecurringVisitService";
 import { isRecurringVisitPlanTask } from "../utils/recurringVisitMeta";
 import { ApplicantProfileSnapshot, ProfileUtils } from "../utils/ProfileUtils";
+import { NegotiationUtils } from "../utils/NegotiationUtils";
 
 export class ApplicationService {
   /**
@@ -262,6 +263,18 @@ export class ApplicationService {
       const proposedAmount = Number(
         applicationData.proposedBudget?.amount || applicationData.proposedBudget
       );
+      const taskRevisionRound = task.currentRevisionRound ?? 0;
+      const revisionTrackingFields =
+        taskRevisionRound > 0
+          ? {
+              taskCurrentRevisionRound: taskRevisionRound,
+              // A fresh/re-offered bid after a poster revision is an implicit response.
+              respondedToRevisionRound: taskRevisionRound,
+            }
+          : {
+              taskCurrentRevisionRound: 0,
+              respondedToRevisionRound: 0,
+            };
       const baseApplicationPayload = {
         taskId,
         applicantId: applicantProfileId,
@@ -287,6 +300,7 @@ export class ApplicationService {
         portfolio: Array.isArray(applicationData.portfolio)
           ? applicationData.portfolio
           : [],
+        ...revisionTrackingFields,
       };
 
       let application: ITaskApplication;
@@ -799,11 +813,15 @@ export class ApplicationService {
         );
       }
 
-      // Global revision guard: block acceptance if an active revision round
-      // exists and the helper hasn't responded yet (their price may change).
-      const taskRevRound = task.currentRevisionRound ?? 0;
-      const appRespondedRound = application.respondedToRevisionRound ?? 0;
-      if (taskRevRound > 0 && appRespondedRound < taskRevRound) {
+      // Global revision guard: only block bidders who were pending when the
+      // poster revised and have not yet kept/revised/withdrawn their offer.
+      if (
+        NegotiationUtils.blocksAcceptancePendingRevisionResponse({
+          taskCurrentRevisionRound: task.currentRevisionRound,
+          applicationTaskRevisionRound: application.taskCurrentRevisionRound,
+          applicationRespondedRevisionRound: application.respondedToRevisionRound,
+        })
+      ) {
         throw new BadRequestError(
           "This helper hasn't responded to the latest budget revision yet. " +
           "Please wait for their response before accepting."
