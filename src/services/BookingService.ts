@@ -7,6 +7,7 @@ import { CatalogService } from './CatalogService';
 import { PaymentClient } from './PaymentClient';
 import { computeLinePrice } from '../utils/bookingPricing';
 import {
+  normalizeBookNowTaskCategory,
   resolveBookNowCategoryLabel,
   resolveBookNowTaskCategory,
 } from '../utils/bookNowClientCatalog';
@@ -316,7 +317,7 @@ export class BookingService {
       packageSlug: sku.slug,
       categorySlug: category?.slug || normalized.categorySlug!,
       categoryLabel: category?.name || resolveBookNowCategoryLabel(normalized.categorySlug!),
-      taskCategory: sku.taskCategory || 'cleaning',
+      taskCategory: normalizeBookNowTaskCategory(sku.taskCategory || 'cleaning'),
       pricingUnit: (sku.pricingUnit as 'fixed' | 'hourly') || 'fixed',
       quantity,
       lineTotal,
@@ -711,7 +712,7 @@ export class BookingService {
       const task = await Task.create({
         title: line.title,
         description,
-        category: line.taskCategory as any,
+        category: normalizeBookNowTaskCategory(line.taskCategory),
         categorySlug: line.categorySlug,
         categoryLabel: line.categoryLabel,
         subcategory: line.packageSlug,
@@ -936,7 +937,11 @@ export class BookingService {
     }
 
     if (order.status === 'paid' || order.status === 'assigning' || order.status === 'assigned') {
-      if (order.pendingLines?.length) {
+      // Heal capture races: status may flip before Task.create succeeds (e.g. invalid category).
+      const items = await BookingItem.find({ orderId: order.orderId }).select('taskId').lean();
+      const missingTasks =
+        Boolean(order.pendingLines?.length) || items.some((item) => !item.taskId);
+      if (missingTasks) {
         await this.materializeBookingTasks(order);
       }
       let changed = false;
@@ -989,13 +994,16 @@ export class BookingService {
       return { success: true, duplicate: true };
     }
 
-    order.status = 'assigning';
+    // Materialize tasks first — never leave order as `assigning` with no Task rows
+    // (My Orders lists Tasks, not BookingOrders).
     order.paymentEscrowId = params.escrowId;
     order.razorpayOrderId = params.razorpayOrderId;
     order.paidAt = new Date();
+    const tasks = await this.materializeBookingTasks(order);
+
+    order.status = 'assigning';
     await order.save();
 
-    const tasks = await this.materializeBookingTasks(order);
     const primaryTaskId = tasks[0] ? String(tasks[0]._id) : params.taskId;
 
     logger.info('Book Now order marked paid/assigning', {

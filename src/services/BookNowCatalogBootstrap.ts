@@ -108,7 +108,8 @@ export class BookNowCatalogBootstrap {
           basePrice: def.basePrice,
           pricingUnit: 'hourly',
           durationMinutes: def.durationMinutes,
-          taskCategory: 'helper',
+          // Must match Task.category enum — `helper` is invalid and breaks payment-captured.
+          taskCategory: 'other',
           isActive: true,
         },
         { upsert: true, new: true },

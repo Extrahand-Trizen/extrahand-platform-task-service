@@ -105,6 +105,9 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "Roadside Assistance": "repair",
     Maid: "cleaning",
     "Personal Assistance": "other",
+    // Book Now Hourly Helper (catalog slug / mistaken SKU taskCategory)
+    helper: "other",
+    "hourly-helper": "other",
     handyperson: "repair",
     "furniture-assembly": "assembly",
     "security-patrol": "other",

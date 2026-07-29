@@ -47,6 +47,32 @@ function testParseFulfillmentType() {
 }
 
 function testAssertSingleVisit() {
+  // Instant cannot be multi-line
+  assert.throws(() =>
+    assertHourlySingleVisitCheckout({
+      lines: [
+        {
+          pricingUnit: 'hourly',
+          categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+          skuId: 'x',
+          quantity: 1,
+          durationMinutes: 60,
+          lineTotal: 100,
+        },
+        {
+          pricingUnit: 'hourly',
+          categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+          skuId: 'x',
+          quantity: 1,
+          durationMinutes: 60,
+          lineTotal: 100,
+        },
+      ],
+      fulfillmentType: 'instant',
+    }),
+  );
+
+  // Different SKUs cannot share one multi-day order
   assert.throws(() =>
     assertHourlySingleVisitCheckout({
       lines: [
@@ -67,7 +93,7 @@ function testAssertSingleVisit() {
           lineTotal: 100,
         },
       ],
-      fulfillmentType: 'instant',
+      fulfillmentType: 'scheduled',
     }),
   );
 
@@ -81,6 +107,47 @@ function testAssertSingleVisit() {
           quantity: 1,
           durationMinutes: 120,
           lineTotal: 549,
+        },
+      ],
+      fulfillmentType: 'scheduled',
+    }),
+  );
+
+  // Multi-day pack: same SKU + duration, scheduled
+  assert.doesNotThrow(() =>
+    assertHourlySingleVisitCheckout({
+      lines: [
+        {
+          pricingUnit: 'hourly',
+          categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+          skuId: 'sku-90',
+          quantity: 1,
+          durationMinutes: 90,
+          lineTotal: 149,
+        },
+        {
+          pricingUnit: 'hourly',
+          categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+          skuId: 'sku-90',
+          quantity: 1,
+          durationMinutes: 90,
+          lineTotal: 149,
+        },
+        {
+          pricingUnit: 'hourly',
+          categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+          skuId: 'sku-90',
+          quantity: 1,
+          durationMinutes: 90,
+          lineTotal: 149,
+        },
+        {
+          pricingUnit: 'hourly',
+          categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+          skuId: 'sku-90',
+          quantity: 1,
+          durationMinutes: 90,
+          lineTotal: 149,
         },
       ],
       fulfillmentType: 'scheduled',
