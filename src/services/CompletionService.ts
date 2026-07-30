@@ -19,12 +19,12 @@ import { ITask } from '../models/Task';
 import { PaymentClient } from './PaymentClient';
 import { notifyPosterOnTaskCompleted } from './taskCompletionPosterNotify';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
+import { assertBookNowRaiseIssueAllowed } from '../utils/bookNowRaiseIssueWindow';
 
 export class CompletionService {
   /**
    * Submit completion proof.
-   * Book Now: skips customer approval and finalizes to completed (payout + notify).
-   * Marketplace / Post & Compare: stays on review + pending_approval.
+   * Book Now: auto-completes (payout + notify). Marketplace: review + pending_approval.
    */
   static async submitCompletionProof(
     taskId: string,
@@ -41,12 +41,10 @@ export class CompletionService {
       throw new NotFoundError('Task not found');
     }
 
-    // Check if user is the assigned performer - compare using profile IDs (MongoDB ObjectIds)
     const isAssignedPerformer = task.assigneeId?.toString() === performerProfileId;
     let hasAcceptedApplication = false;
 
     if (!isAssignedPerformer) {
-      // Check if user has an accepted application (using profile ID)
       const acceptedApplication = await TaskApplication.findOne({
         taskId: task._id,
         applicantId: performerProfileId,
@@ -73,11 +71,6 @@ export class CompletionService {
       ? proofUrls.map((url) => String(url || '').trim()).filter(Boolean)
       : [];
 
-    // TEMP DISABLED: selfie + work-photo specific requirement.
-    // if (normalizedProofUrls.length < 2) {
-    //   throw new BadRequestError('Please upload both selfie and work photo before submission');
-    // }
-
     if (normalizedProofUrls.length < 1) {
       throw new BadRequestError('Please upload at least one proof image before submission');
     }
@@ -92,19 +85,25 @@ export class CompletionService {
     const bookNow = isBookNowTaskForCompletion(task);
 
     if (bookNow) {
+      const updateFields: Record<string, unknown> = {
+        status: 'completed',
+        completionProof,
+        completionNotes: notes || '',
+        completionStatus: 'approved',
+        reviewAt: submittedAt,
+        completionSubmittedAt: submittedAt,
+        completedAt: submittedAt,
+        completionApprovedAt: submittedAt,
+        updatedAt: submittedAt,
+      };
+      // Persist once — raise-issue 1h window is anchored to first completion.
+      if (!task.firstCompletedAt) {
+        updateFields.firstCompletedAt = submittedAt;
+      }
+
       const updatedTask = await Task.findByIdAndUpdate(
         taskId,
-        {
-          status: 'completed',
-          completionProof,
-          completionNotes: notes || '',
-          completionStatus: 'approved',
-          reviewAt: submittedAt,
-          completionSubmittedAt: submittedAt,
-          completedAt: submittedAt,
-          completionApprovedAt: submittedAt,
-          updatedAt: submittedAt,
-        },
+        updateFields,
         { new: true, runValidators: true }
       ).lean();
 
@@ -138,11 +137,8 @@ export class CompletionService {
     ).lean();
 
     logger.info(`Task ${taskId} completion proof submitted by profile ${performerProfileId}`);
-
-    // Emit real-time proof submission
     emitProofSubmitted(taskId, updatedTask);
 
-    // Email: completion proof submitted → requester
     try {
       const Profile = mongoose.connection.collection('profiles');
       const requesterProfile = await Profile.findOne({ _id: task.requesterId });
@@ -213,7 +209,7 @@ export class CompletionService {
   }
 
   /**
-   * Approve completion (Post & Compare / marketplace — customer confirms).
+   * Approve completion (marketplace). Book Now blocked — auto-completes on proof submit.
    */
   static async approveCompletion(taskId: string, taskOwnerProfileId: string): Promise<any> {
     const task = await Task.findById(taskId);
@@ -221,24 +217,20 @@ export class CompletionService {
       throw new NotFoundError('Task not found');
     }
 
-    // Check if user is the task owner
     if (task.requesterId?.toString() !== taskOwnerProfileId) {
       throw new ForbiddenError('Only the task owner can approve completion');
     }
 
-    // Book Now: payout runs on helper proof submit only — block customer approve to avoid double payout.
     if (isBookNowTaskForCompletion(task)) {
       throw new BadRequestError(
         'Book Now tasks are completed automatically when the helper submits proof. Customer approval is not required.'
       );
     }
 
-    // Check if task is in review status
     if (task.status !== 'review' || task.completionStatus !== 'pending_approval') {
       throw new BadRequestError('Task is not pending approval');
     }
 
-    // Update task status
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
@@ -264,15 +256,11 @@ export class CompletionService {
     return updatedTask;
   }
 
-  /**
-   * Shared side effects after a task reaches completed + approved
-   * (customer approve OR Book Now auto-complete on proof submit).
-   */
   private static async runApprovedCompletionSideEffects(
     taskId: string,
     previousTask: any,
     updatedTask: any,
-    actorProfileId: string
+    _actorProfileId: string
   ): Promise<void> {
     if (updatedTask?.parentTaskId && updatedTask?.recurringVisitId) {
       try {
@@ -290,7 +278,6 @@ export class CompletionService {
       }
     }
 
-    // EMIT: TASK_COMPLETED and REVIEW_REQUEST notifications
     try {
       const Profiles = mongoose.connection.collection('profiles');
       const assigneeProfile = updatedTask?.assigneeId
@@ -301,10 +288,9 @@ export class CompletionService {
         : null;
 
       const assigneeUid = assigneeProfile?.uid;
-      const requesterUid = requesterProfile?.uid || String(previousTask.requesterId || actorProfileId);
+      const requesterUid = requesterProfile?.uid || String(previousTask.requesterId || '');
       const taskTitle = updatedTask?.title;
 
-      // TASK_COMPLETED_TASKER - Notify performer that work is complete
       if (assigneeUid) {
         const helperTitle = 'Task completed';
         const helperBody = `Your work on "${taskTitle}" is complete. Great job!`;
@@ -336,7 +322,6 @@ export class CompletionService {
           data: helperData,
         });
 
-        // Dialog WhatsApp → Meta template extrahand_work_completed_helper
         const waMinute = Math.floor(Date.now() / 60000);
         fireDialogWhatsAppForUser({
           uid: assigneeUid,
@@ -353,7 +338,6 @@ export class CompletionService {
             `eh-push:${assigneeUid}:TASK_COMPLETED_TASKER:${taskId}:${waMinute}`.slice(0, 200),
         });
 
-        // Legacy messaging-service path (no-op when WHATSAPP_SUPPRESS_LEGACY=true)
         fireWhatsAppNotify({
           uid: assigneeUid,
           templateKey: 'wa_work_completed_helper',
@@ -379,12 +363,7 @@ export class CompletionService {
         });
       }
 
-      if (!assigneeUid) {
-        logger.warn('[CompletionService] Skipping TASK_COMPLETED reward event — missing performer Firebase uid', {
-          taskId,
-          assigneeProfileId: updatedTask?.assigneeId?.toString(),
-        });
-      } else if (requesterUid) {
+      if (assigneeUid && requesterUid) {
         const taskAmount =
           typeof updatedTask?.budget === 'number'
             ? updatedTask.budget
@@ -401,7 +380,6 @@ export class CompletionService {
           correlationId: taskId,
         }).catch(() => undefined);
       }
-
     } catch (error) {
       logger.error('Error sending completion notifications', {
         taskId,
@@ -409,7 +387,6 @@ export class CompletionService {
       });
     }
 
-    // Email: task_completed (to requester + assignee), review_request (to requester)
     try {
       const Profile = mongoose.connection.collection('profiles');
       const requesterProfile = previousTask.requesterId
@@ -420,7 +397,7 @@ export class CompletionService {
         : null;
       const completedDateStr = new Date().toLocaleDateString();
       const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
-      const reviewUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
+      const reviewUrl = taskUrl;
 
       if (requesterProfile?.email) {
         EmailServiceClient.sendTaskCompleted(requesterProfile.email, {
@@ -431,12 +408,7 @@ export class CompletionService {
           reviewUrl,
           taskUrl,
           userId: requesterProfile.uid,
-        }).catch((err) =>
-          logger.error('Error sending task_completed email to requester', {
-            taskId,
-            error: err instanceof Error ? err.message : 'Unknown error',
-          })
-        );
+        }).catch(() => undefined);
         EmailServiceClient.sendReviewRequest(requesterProfile.email, {
           reviewerName: requesterProfile.name || 'There',
           revieweeName: assigneeProfile?.name || 'Your tasker',
@@ -445,12 +417,7 @@ export class CompletionService {
           completedDate: completedDateStr,
           reviewUrl,
           userId: requesterProfile.uid,
-        }).catch((err) =>
-          logger.error('Error sending review_request email', {
-            taskId,
-            error: err instanceof Error ? err.message : 'Unknown error',
-          })
-        );
+        }).catch(() => undefined);
       }
       if (assigneeProfile?.email) {
         EmailServiceClient.sendTaskCompleted(assigneeProfile.email, {
@@ -462,12 +429,7 @@ export class CompletionService {
           reviewUrl,
           taskUrl,
           userId: assigneeProfile.uid,
-        }).catch((err) =>
-          logger.error('Error sending task_completed email to assignee', {
-            taskId,
-            error: err instanceof Error ? err.message : 'Unknown error',
-          })
-        );
+        }).catch(() => undefined);
       }
     } catch (error) {
       logger.error('Error sending completion emails', {
@@ -476,7 +438,6 @@ export class CompletionService {
       });
     }
 
-    // Auto-request payout immediately after task completed/approved
     const performerUid = updatedTask?.assigneeUid || previousTask.assigneeUid;
     const hasAssigneeId = !!updatedTask?.assigneeId;
     logger.info('[PAYOUT_DEBUG] Checking auto-payout eligibility', {
@@ -546,10 +507,8 @@ export class CompletionService {
       });
     }
 
-    // Emit real-time proof approval / completion
     emitProofApproved(taskId, updatedTask);
 
-    // Update performer profile stats (increment completedTasks & totalTasks)
     if (updatedTask?.assigneeId) {
       UserServiceClient.updatePerformerStats(updatedTask.assigneeId.toString()).catch(err => {
         logger.error(`Error updating performer stats for task ${taskId}:`, err);
@@ -558,7 +517,8 @@ export class CompletionService {
   }
 
   /**
-   * Reject completion
+   * Reject / raise issue.
+   * Marketplace: from review. Book Now: from completed (or legacy review) → in_progress.
    */
   static async rejectCompletion(
     taskId: string,
@@ -570,23 +530,17 @@ export class CompletionService {
       throw new NotFoundError('Task not found');
     }
 
-    // Check if user is the task owner
     if (task.requesterId?.toString() !== taskOwnerProfileId) {
       throw new ForbiddenError('Only the task owner can reject completion');
     }
 
-    if (isBookNowTaskForCompletion(task)) {
-      throw new BadRequestError(
-        'Book Now tasks do not use customer rejection of completion proof. Contact support if there is an issue.'
-      );
-    }
-
-    // Check if task is in review status
-    if (task.status !== 'review' || task.completionStatus !== 'pending_approval') {
+    const bookNow = isBookNowTaskForCompletion(task);
+    if (bookNow) {
+      assertBookNowRaiseIssueAllowed(task);
+    } else if (task.status !== 'review' || task.completionStatus !== 'pending_approval') {
       throw new BadRequestError('Task is not pending approval');
     }
 
-    // Move to in_progress + revision_requested — performer stays assigned and cannot withdraw.
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       {
@@ -594,6 +548,10 @@ export class CompletionService {
         completionStatus: 'revision_requested',
         completionRejectedReason: reason,
         completionRejectedAt: new Date(),
+        // Clear current completion markers so Work Progress shows Work Started.
+        // Do NOT clear firstCompletedAt — raise-issue window stays anchored.
+        completedAt: null,
+        completionApprovedAt: null,
         $push: {
           feedback: {
             message: reason,
@@ -607,11 +565,8 @@ export class CompletionService {
     ).lean();
 
     logger.warn(`Task ${taskId} completion rejected by poster ${taskOwnerProfileId}. Reason: ${reason}`);
-
-    // Emit real-time proof rejection
     emitProofRejected(taskId, { task: updatedTask, reason });
 
-    // Send notifications to tasker about rejection and request to resubmit
     try {
       await notifyHelperRevisionRequested({
         taskId,
