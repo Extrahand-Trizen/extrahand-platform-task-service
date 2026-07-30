@@ -1,6 +1,8 @@
 import { Server as SocketIOServer, Socket } from "socket.io";
 import logger from "../config/logger";
 import { socketAuthMiddleware } from "../middleware/socketAuth";
+import { getRedisClient } from "../config/redis";
+import Task from "../models/Task";
 
 // Store io instance globally for use in services
 export let io: SocketIOServer;
@@ -14,6 +16,7 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
   // Connection handler
   io.on("connection", (socket: Socket) => {
     const profileId = (socket as any).profileId;
+    const locationUpdateSeen = new Set<string>();
     logger.info(`🔌 User connected to task service: ${profileId} (${socket.id})`);
 
     // Task room subscription
@@ -57,6 +60,99 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
         socket.leave('book-now:all');
       }
       logger.info(`👋 User ${profileId} left book-now rooms`);
+    });
+
+    // Partner live location update — broadcast to task room subscribers
+    socket.on("partner:location-update", async (data: unknown) => {
+      try {
+        // Identity comes from socket auth — never trust payload fields for identity
+        const profileId = (socket as any).profileId as string;
+
+        // --- Payload validation ---
+        if (
+          !data ||
+          typeof data !== "object" ||
+          typeof (data as any).taskId !== "string" ||
+          typeof (data as any).lat !== "number" ||
+          typeof (data as any).lng !== "number" ||
+          typeof (data as any).timestamp !== "number"
+        ) {
+          logger.warn(`⚠️  partner:location-update rejected — invalid payload from profile: ${profileId}`);
+          return;
+        }
+
+        const { taskId, lat, lng, timestamp } = data as {
+          taskId: string;
+          lat: number;
+          lng: number;
+          timestamp: number;
+        };
+
+        // --- Task existence check ---
+        const task = await Task.findById(taskId).select("partnerId assigneeId status").lean();
+        if (!task) {
+          logger.warn(`⚠️  partner:location-update rejected — task ${taskId} not found (profile: ${profileId})`);
+          return;
+        }
+
+        // --- Partner ownership check ---
+        // Accept if profileId matches either partnerId (Book Now flow) or assigneeId (marketplace flow)
+        const taskPartnerId = task.partnerId?.toString() ?? null;
+        const taskAssigneeId = task.assigneeId?.toString() ?? null;
+        if (taskPartnerId !== profileId && taskAssigneeId !== profileId) {
+          logger.warn(
+            `🚫 partner:location-update rejected — profile ${profileId} is not assigned to task ${taskId}`
+          );
+          return;
+        }
+
+        // --- Active status gate ---
+        const activeStatuses = ["assigned", "started", "in_progress"];
+        if (!activeStatuses.includes(task.status)) {
+          logger.warn(
+            `⚠️  partner:location-update ignored — task ${taskId} is in status "${task.status}" (profile: ${profileId})`
+          );
+          return;
+        }
+
+        // --- Redis store (best-effort — app keeps working if Redis is down) ---
+        const redis = getRedisClient();
+        if (!redis) {
+          logger.warn(
+            `⚠️  partner:location-update — Redis not available, skipping cache for profile: ${profileId}`,
+          );
+        } else {
+          const key = `partner:location:${profileId}`;
+          const value = JSON.stringify({ taskId, lat, lng, timestamp });
+
+          if (!locationUpdateSeen.has(key)) {
+            logger.info(`Redis SET starting for key: ${key}`);
+          }
+          logger.debug(`Redis payload for ${key}: ${value}`);
+
+          await redis.set(key, value, "EX", 30);
+
+          if (!locationUpdateSeen.has(key)) {
+            logger.info(`Redis SET completed for key: ${key}`);
+            locationUpdateSeen.add(key);
+          }
+
+          const stored = await redis.get(key);
+          const ttl = await redis.ttl(key);
+
+          logger.debug(`Redis GET for ${key}: ${stored}`);
+          logger.debug(`Redis TTL for ${key}: ${ttl}`);
+        }
+
+        // --- Fan-out to task room ---
+        io.to(`task:${taskId}`).emit("partner:location", { lat, lng, timestamp });
+        if (!locationUpdateSeen.has(`task:${taskId}`)) {
+          logger.info(`📍 partner:location-update — profile ${profileId} → task:${taskId} [${lat}, ${lng}]`);
+          locationUpdateSeen.add(`task:${taskId}`);
+        }
+      } catch (err) {
+        logger.error(`❌ partner:location-update error (profile: ${(socket as any).profileId}):`, err);
+      }
     });
 
     // Disconnection handler

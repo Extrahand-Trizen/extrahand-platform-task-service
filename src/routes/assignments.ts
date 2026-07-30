@@ -11,6 +11,7 @@ router.use(serviceAuthMiddleware, authMiddleware);
 router.get('/pending', asyncHandler(AssignmentController.listPending));
 router.post('/assign', asyncHandler(AssignmentController.assignHelper));
 router.post('/assign-direct', asyncHandler(AssignmentController.assignHelperDirect));
+router.post('/assign-partner-direct', asyncHandler(AssignmentController.assignPartnerDirect));
 router.post('/unassign', asyncHandler(AssignmentController.unassignHelper));
 router.get('/by-task/:taskId', asyncHandler(AssignmentController.getOrderIdForTaskAdmin));
 

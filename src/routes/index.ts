@@ -15,6 +15,7 @@ import catalogRoutes from './catalog';
 import bookingsRoutes from './bookings';
 import assignmentsRoutes from './assignments';
 import partnerBookNowRoutes from './partnerBookNow';
+import partnerLocationRoutes from './partnerLocation';
 import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
 import { BookingController } from '../controllers/BookingController';
@@ -118,6 +119,7 @@ router.use('/catalog', catalogRoutes);
 router.use('/bookings', bookingsRoutes);
 router.use('/admin/assignments', assignmentsRoutes);
 router.use('/book-now', partnerBookNowRoutes);
+router.use('/', partnerLocationRoutes); // /tasks/:id/partner-location
 
 export default router;
 

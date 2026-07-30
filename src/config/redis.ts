@@ -1,91 +1,124 @@
-import Redis from 'ioredis';
-import logger from './logger';
-import { config } from './env';
+import Redis from "ioredis";
+import logger from "./logger";
 
-let client: any | null = null;
+type RedisClient = InstanceType<typeof Redis>;
+
+let client: RedisClient | null = null;
 let isReady = false;
 
-const TASK_LIST_CACHE_TTL_SECONDS = 30;
-const TASK_DETAIL_CACHE_TTL_SECONDS = 60;
 const CONNECT_TIMEOUT_MS = 10000;
 
-export function getRedisClient(): any | null {
+export const REDIS_TTLS = {
+  TASK_LIST_SECONDS: 20,
+  TASK_DETAIL_SECONDS: 60,
+};
+
+export const initRedis = async (): Promise<void> => {
+  if (client) {
+    return;
+  }
+
+  const redisUrl = process.env.REDIS_URL;
+
+  if (!redisUrl) {
+    logger.warn("REDIS_URL is not configured");
+    return;
+  }
+
+  logger.info(`Connecting to Redis: ${redisUrl}`);
+
+  client = new Redis(redisUrl, {
+    connectTimeout: CONNECT_TIMEOUT_MS,
+
+    lazyConnect: false,
+
+    enableOfflineQueue: true,
+
+    maxRetriesPerRequest: null,
+
+    retryStrategy(times: number) {
+      const delay = Math.min(times * 1000, 5000);
+
+      logger.warn(
+        `Redis reconnect attempt ${times}. Retrying in ${delay}ms...`
+      );
+
+      return delay;
+    },
+  });
+
+  client.on("connect", () => {
+    logger.info("Redis TCP connection established");
+  });
+
+  client.on("ready", () => {
+    isReady = true;
+    logger.info("✅ Redis connected");
+  });
+
+  client.on("close", () => {
+    isReady = false;
+    logger.warn("Redis connection closed");
+  });
+
+  client.on("reconnecting", () => {
+    isReady = false;
+    logger.info("Redis reconnecting...");
+  });
+
+  client.on("end", () => {
+    isReady = false;
+    logger.warn("Redis connection ended");
+  });
+
+  client.on("error", (err: Error) => {
+    logger.error(`Redis error: ${err.message}`);
+  });
+
+  // Wait until Redis is actually ready
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("Redis connection timeout"));
+    }, CONNECT_TIMEOUT_MS);
+
+    client!.once("ready", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+
+    client!.once("error", (err: Error) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+
+  // Verify connection
+  const pong = await client.ping();
+
+  logger.info(`Redis Ping: ${pong}`);
+};
+
+export const getRedisClient = (): RedisClient | null => {
   if (!client || !isReady) {
     return null;
   }
+
   return client;
-}
-
-export async function initRedis(): Promise<void> {
-  // Prefer process.env.REDIS_URL so local `.env` overrides match what Upstash gives you,
-  // but fall back to validated config.REDIS_URL if set.
-  const url = process.env.REDIS_URL || config.REDIS_URL;
-
-  if (!url) {
-    logger.info('Redis not configured (REDIS_URL missing); skipping Redis initialization');
-    return;
-  }
-
-  if (!client) {
-    client = new Redis(url, {
-      // Don't buffer commands forever if Redis is down
-      enableOfflineQueue: false,
-      maxRetriesPerRequest: 1,
-      connectTimeout: CONNECT_TIMEOUT_MS,
-    });
-
-    client.on('error', (err: unknown) => {
-      logger.warn('Redis client error (cache disabled for this process):', err instanceof Error ? err.message : err);
-      isReady = false;
-    });
-
-    client.on('ready', () => {
-      logger.info('✅ Redis client connected (ioredis)');
-      isReady = true;
-    });
-  }
-
-  if (!isReady && client) {
-    try {
-      // With ioredis + lazyConnect we could call connect(), but here we rely
-      // on the initial connection attempt and just wait for "ready"/"error".
-      await client.ping();
-    } catch (err) {
-      logger.warn(
-        'Redis unreachable, continuing without cache. Check REDIS_URL and ensure your Upstash Redis instance is reachable.',
-        {
-          error: err instanceof Error ? err.message : String(err),
-        },
-      );
-      isReady = false;
-      try {
-        await client.quit();
-      } catch {
-        // ignore
-      }
-      client = null;
-    }
-  }
-}
-
-export async function disconnectRedis(): Promise<void> {
-  if (!client) {
-    return;
-  }
-
-  try {
-    await client.quit();
-    logger.info('Redis client disconnected');
-  } catch (err) {
-    logger.error('Error while disconnecting Redis:', err);
-  } finally {
-    client = null;
-    isReady = false;
-  }
-}
-
-export const REDIS_TTLS = {
-  TASK_LIST_SECONDS: TASK_LIST_CACHE_TTL_SECONDS,
-  TASK_DETAIL_SECONDS: TASK_DETAIL_CACHE_TTL_SECONDS,
 };
 
+export const isRedisReady = (): boolean => {
+  return isReady;
+};
+
+export const closeRedis = async (): Promise<void> => {
+  if (!client) return;
+
+  await client.quit();
+
+  client = null;
+  isReady = false;
+
+  logger.info("Redis connection closed");
+};
+
+export const disconnectRedis = closeRedis;
