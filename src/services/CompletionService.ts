@@ -18,10 +18,13 @@ import { notifyHelperRevisionRequested } from './revisionRequestedNotifications'
 import { ITask } from '../models/Task';
 import { PaymentClient } from './PaymentClient';
 import { notifyPosterOnTaskCompleted } from './taskCompletionPosterNotify';
+import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 
 export class CompletionService {
   /**
-   * Submit completion proof
+   * Submit completion proof.
+   * Book Now: skips customer approval and finalizes to completed (payout + notify).
+   * Marketplace / Post & Compare: stays on review + pending_approval.
    */
   static async submitCompletionProof(
     taskId: string,
@@ -86,6 +89,39 @@ export class CompletionService {
       uploadedBy: performerProfileId,
     }));
     const submittedAt = new Date();
+    const bookNow = isBookNowTaskForCompletion(task);
+
+    if (bookNow) {
+      const updatedTask = await Task.findByIdAndUpdate(
+        taskId,
+        {
+          status: 'completed',
+          completionProof,
+          completionNotes: notes || '',
+          completionStatus: 'approved',
+          reviewAt: submittedAt,
+          completionSubmittedAt: submittedAt,
+          completedAt: submittedAt,
+          completionApprovedAt: submittedAt,
+          updatedAt: submittedAt,
+        },
+        { new: true, runValidators: true }
+      ).lean();
+
+      logger.info(
+        `Book Now task ${taskId} auto-completed on proof submit by profile ${performerProfileId}`
+      );
+
+      await this.runApprovedCompletionSideEffects(
+        taskId,
+        task,
+        updatedTask,
+        performerProfileId
+      );
+
+      TaskService.invalidateTaskCache(taskId);
+      return updatedTask;
+    }
 
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
@@ -177,7 +213,7 @@ export class CompletionService {
   }
 
   /**
-   * Approve completion
+   * Approve completion (Post & Compare / marketplace — customer confirms).
    */
   static async approveCompletion(taskId: string, taskOwnerProfileId: string): Promise<any> {
     const task = await Task.findById(taskId);
@@ -188,6 +224,13 @@ export class CompletionService {
     // Check if user is the task owner
     if (task.requesterId?.toString() !== taskOwnerProfileId) {
       throw new ForbiddenError('Only the task owner can approve completion');
+    }
+
+    // Book Now: payout runs on helper proof submit only — block customer approve to avoid double payout.
+    if (isBookNowTaskForCompletion(task)) {
+      throw new BadRequestError(
+        'Book Now tasks are completed automatically when the helper submits proof. Customer approval is not required.'
+      );
     }
 
     // Check if task is in review status
@@ -210,6 +253,27 @@ export class CompletionService {
 
     logger.info(`Task ${taskId} completion approved by poster ${taskOwnerProfileId}`);
 
+    await this.runApprovedCompletionSideEffects(
+      taskId,
+      task,
+      updatedTask,
+      taskOwnerProfileId
+    );
+
+    TaskService.invalidateTaskCache(taskId);
+    return updatedTask;
+  }
+
+  /**
+   * Shared side effects after a task reaches completed + approved
+   * (customer approve OR Book Now auto-complete on proof submit).
+   */
+  private static async runApprovedCompletionSideEffects(
+    taskId: string,
+    previousTask: any,
+    updatedTask: any,
+    actorProfileId: string
+  ): Promise<void> {
     if (updatedTask?.parentTaskId && updatedTask?.recurringVisitId) {
       try {
         await RecurringVisitService.onChildVisitCompleted(updatedTask as unknown as ITask);
@@ -237,13 +301,13 @@ export class CompletionService {
         : null;
 
       const assigneeUid = assigneeProfile?.uid;
-      const requesterUid = requesterProfile?.uid || taskOwnerProfileId;
+      const requesterUid = requesterProfile?.uid || String(previousTask.requesterId || actorProfileId);
       const taskTitle = updatedTask?.title;
 
-      // TASK_COMPLETED_TASKER - Notify performer that poster approved
+      // TASK_COMPLETED_TASKER - Notify performer that work is complete
       if (assigneeUid) {
-        const helperTitle = 'Task approved';
-        const helperBody = `Your work on "${taskTitle}" was approved. Great job!`;
+        const helperTitle = 'Task completed';
+        const helperBody = `Your work on "${taskTitle}" is complete. Great job!`;
         const helperData = {
           taskId,
           taskTitle: taskTitle || 'your task',
@@ -348,11 +412,11 @@ export class CompletionService {
     // Email: task_completed (to requester + assignee), review_request (to requester)
     try {
       const Profile = mongoose.connection.collection('profiles');
-      const requesterProfile = task.requesterId
-        ? await Profile.findOne({ _id: task.requesterId })
+      const requesterProfile = previousTask.requesterId
+        ? await Profile.findOne({ _id: previousTask.requesterId })
         : null;
-      const assigneeProfile = task.assigneeId
-        ? await Profile.findOne({ _id: task.assigneeId })
+      const assigneeProfile = previousTask.assigneeId
+        ? await Profile.findOne({ _id: previousTask.assigneeId })
         : null;
       const completedDateStr = new Date().toLocaleDateString();
       const taskUrl = `${config.WEB_APP_URL}/tasks/${taskId}/track`;
@@ -361,7 +425,7 @@ export class CompletionService {
       if (requesterProfile?.email) {
         EmailServiceClient.sendTaskCompleted(requesterProfile.email, {
           recipientName: requesterProfile.name || 'There',
-          taskTitle: updatedTask?.title || task.title,
+          taskTitle: updatedTask?.title || previousTask.title,
           isTasker: false,
           completedDate: completedDateStr,
           reviewUrl,
@@ -376,7 +440,7 @@ export class CompletionService {
         EmailServiceClient.sendReviewRequest(requesterProfile.email, {
           reviewerName: requesterProfile.name || 'There',
           revieweeName: assigneeProfile?.name || 'Your tasker',
-          taskTitle: updatedTask?.title || task.title,
+          taskTitle: updatedTask?.title || previousTask.title,
           isRequester: true,
           completedDate: completedDateStr,
           reviewUrl,
@@ -391,10 +455,10 @@ export class CompletionService {
       if (assigneeProfile?.email) {
         EmailServiceClient.sendTaskCompleted(assigneeProfile.email, {
           recipientName: assigneeProfile.name || 'There',
-          taskTitle: updatedTask?.title || task.title,
+          taskTitle: updatedTask?.title || previousTask.title,
           isTasker: true,
           completedDate: completedDateStr,
-          amount: task.budget?.amount,
+          amount: previousTask.budget?.amount,
           reviewUrl,
           taskUrl,
           userId: assigneeProfile.uid,
@@ -412,27 +476,30 @@ export class CompletionService {
       });
     }
 
-    // Auto-request payout immediately after task approved
-    const performerUid = updatedTask?.assigneeUid || task.assigneeUid;
+    // Auto-request payout immediately after task completed/approved
+    const performerUid = updatedTask?.assigneeUid || previousTask.assigneeUid;
     if (updatedTask?.assigneeId && performerUid) {
       try {
-        const payoutAmount = typeof task.budget === 'object' ? task.budget.amount : Number(task.budget);
+        const payoutAmount =
+          typeof previousTask.budget === 'object'
+            ? previousTask.budget.amount
+            : Number(previousTask.budget);
         logger.info(`[Auto-Payout] Initiating auto-payout for task ${taskId}, performer: ${performerUid}, amount: ${payoutAmount}`);
         const payoutResult = await PaymentClient.processTaskCompletionPayout({
           taskId,
           performerUid,
           amount: payoutAmount,
-          taskTitle: updatedTask.title || task.title,
+          taskTitle: updatedTask.title || previousTask.title,
           visitId: updatedTask.recurringVisitId ? String(updatedTask.recurringVisitId) : undefined,
         });
         logger.info(`[Auto-Payout] Payout result for task ${taskId}:`, payoutResult);
-        
+
         await InAppNotificationClient.send({
           userId: updatedTask.assigneeId.toString(),
           title: payoutResult.success ? 'Payout Initiated' : 'Payout Initiation Failed',
           body: payoutResult.success
-            ? `Task approved. Payout of ₹${payoutAmount} has been initiated automatically.`
-            : `Task approved. Payout initiation failed: ${payoutResult.error || 'Please request manually'}.`,
+            ? `Task completed. Payout of ₹${payoutAmount} has been initiated automatically.`
+            : `Task completed. Payout initiation failed: ${payoutResult.error || 'Please request manually'}.`,
           type: 'info',
           category: 'payments',
           data: {
@@ -450,10 +517,8 @@ export class CompletionService {
       logger.warn('[Auto-Payout] Skipping auto-payout: assignee details missing', { taskId });
     }
 
-    // Emit real-time proof approval
+    // Emit real-time proof approval / completion
     emitProofApproved(taskId, updatedTask);
-
-    TaskService.invalidateTaskCache(taskId);
 
     // Update performer profile stats (increment completedTasks & totalTasks)
     if (updatedTask?.assigneeId) {
@@ -461,8 +526,6 @@ export class CompletionService {
         logger.error(`Error updating performer stats for task ${taskId}:`, err);
       });
     }
-
-    return updatedTask;
   }
 
   /**
@@ -481,6 +544,12 @@ export class CompletionService {
     // Check if user is the task owner
     if (task.requesterId?.toString() !== taskOwnerProfileId) {
       throw new ForbiddenError('Only the task owner can reject completion');
+    }
+
+    if (isBookNowTaskForCompletion(task)) {
+      throw new BadRequestError(
+        'Book Now tasks do not use customer rejection of completion proof. Contact support if there is an issue.'
+      );
     }
 
     // Check if task is in review status
