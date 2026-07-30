@@ -359,6 +359,7 @@ export class BookingService {
     useExtraCoins?: boolean;
     requestedCoinDiscountRupees?: number;
     fulfillmentType?: BookingFulfillmentType | string;
+    couponCode?: string;
   }) {
     const {
       customerUid,
@@ -374,6 +375,7 @@ export class BookingService {
       lineTotal,
       useExtraCoins,
       requestedCoinDiscountRupees,
+      couponCode,
     } = params;
 
     const fulfillmentType = parseBookingFulfillmentType(params.fulfillmentType);
@@ -604,6 +606,7 @@ export class BookingService {
       const coinDiscountRequest = applyCoins
         ? Math.max(0, Math.floor(Number(requestedCoinDiscountRupees) || 0))
         : 0;
+      const normalizedCouponCode = String(couponCode || '').trim().toUpperCase() || undefined;
 
       const escrowResult = await PaymentClient.createBookingEscrow({
         taskId: placeholderTaskId,
@@ -620,9 +623,27 @@ export class BookingService {
           ...(isHourlyOrder ? { hourlyHelper: true } : {}),
           itemCount: resolvedLinesWithSchedule.length,
           skuSlugs: resolvedLinesWithSchedule.map((l) => l.packageSlug),
+          couponServiceIds: resolvedLinesWithSchedule.map((l) => l.categorySlug || l.packageSlug),
+          couponLineItems: (() => {
+            const byService = new Map<string, number>();
+            for (const line of resolvedLinesWithSchedule) {
+              const serviceId = String(line.categorySlug || line.packageSlug || '').trim();
+              if (!serviceId) continue;
+              // Coupon applies on service (pre-GST) amount; GST is recalculated on discounted subtotals at payment.
+              byService.set(
+                serviceId,
+                (byService.get(serviceId) || 0) + (Number(line.lineTotal) || 0),
+              );
+            }
+            return [...byService.entries()].map(([serviceId, amt]) => ({
+              serviceId,
+              amount: Math.round(amt * 100) / 100,
+            }));
+          })(),
           gstByCategory: pricing.categories,
           useExtraCoins: applyCoins && coinDiscountRequest > 0,
           requestedCoinDiscountRupees: coinDiscountRequest,
+          ...(normalizedCouponCode ? { couponCode: normalizedCouponCode } : {}),
           amountBreakdown: {
             taskAmount: pricing.subtotal,
             gst: pricing.gst,
@@ -658,6 +679,26 @@ export class BookingService {
 
       order.paymentEscrowId = escrowResult.escrow.escrowId;
       order.razorpayOrderId = escrowResult.order.id || escrowResult.escrow?.razorpayOrderId;
+
+      const escrowMeta =
+        escrowResult.escrow?.metadata && typeof escrowResult.escrow.metadata === 'object'
+          ? (escrowResult.escrow.metadata as Record<string, unknown>)
+          : {};
+      if (escrowMeta.couponCode) {
+        order.couponCode = String(escrowMeta.couponCode);
+        order.couponId = escrowMeta.couponId ? String(escrowMeta.couponId) : null;
+        order.couponDiscount =
+          escrowMeta.couponDiscount != null ? Number(escrowMeta.couponDiscount) : null;
+        order.totalBeforeCoupon =
+          escrowMeta.totalBeforeCoupon != null
+            ? Number(escrowMeta.totalBeforeCoupon)
+            : pricing.total;
+        order.totalAfterCoupon =
+          escrowMeta.totalAfterCoupon != null
+            ? Number(escrowMeta.totalAfterCoupon)
+            : null;
+      }
+
       await order.save();
 
       logger.info('Book Now booking checkout created (tasks deferred until payment)', {

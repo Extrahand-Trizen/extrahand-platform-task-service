@@ -47,6 +47,12 @@ export interface IBookingOrder extends Document {
   paidAt?: Date;
   cancelledAt?: Date;
   cancellationReason?: string;
+  /** Optional coupon snapshot (nullable for historical orders) */
+  couponId?: string | null;
+  couponCode?: string | null;
+  couponDiscount?: number | null;
+  totalBeforeCoupon?: number | null;
+  totalAfterCoupon?: number | null;
   /** Customer soft-delete — hide from customer booking lists only. */
   isDeletedByCustomer?: boolean;
   deletedByCustomerAt?: Date;
@@ -97,6 +103,11 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     paidAt: Date,
     cancelledAt: Date,
     cancellationReason: String,
+    couponId: { type: String, default: null },
+    couponCode: { type: String, default: null },
+    couponDiscount: { type: Number, default: null, min: 0 },
+    totalBeforeCoupon: { type: Number, default: null, min: 0 },
+    totalAfterCoupon: { type: Number, default: null, min: 0 },
     isDeletedByCustomer: { type: Boolean, default: false, index: true },
     deletedByCustomerAt: Date,
     deletedByCustomerId: { type: String, index: true },
