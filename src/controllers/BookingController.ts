@@ -29,6 +29,7 @@ export class BookingController {
       lineTotal,
       useExtraCoins,
       requestedCoinDiscountRupees,
+      couponCode,
     } = req.body;
 
     const hasItems = Array.isArray(items) && items.length > 0;
@@ -56,6 +57,7 @@ export class BookingController {
       lineTotal,
       useExtraCoins: useExtraCoins === true,
       requestedCoinDiscountRupees: Number(requestedCoinDiscountRupees) || 0,
+      couponCode: couponCode ? String(couponCode) : undefined,
     });
 
     res.status(201).json({
