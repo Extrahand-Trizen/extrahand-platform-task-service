@@ -65,7 +65,7 @@ export class LocalFileStorage extends BaseStorage {
       const filePath = path.join(folderPath, finalFileName);
 
       // Write file to disk
-      fs.writeFileSync(filePath, fileBuffer);
+      fs.writeFileSync(filePath, new Uint8Array(fileBuffer));
 
       // Generate key (relative path from upload dir)
       const key = `${folder}/${finalFileName}`;

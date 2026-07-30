@@ -80,8 +80,8 @@ export async function notifyPosterOnTaskCompleted(
 
 /** Resolve poster + helper Firebase uids from a task document. */
 export async function resolveTaskParticipantUids(task: {
-  requesterId?: mongoose.Types.ObjectId;
-  assigneeId?: mongoose.Types.ObjectId;
+  requesterId?: mongoose.Types.ObjectId | null;
+  assigneeId?: mongoose.Types.ObjectId | null;
 }): Promise<{ posterUid: string; assigneeUid: string }> {
   const Profile = mongoose.connection.collection('profiles');
   const [requesterProfile, assigneeProfile] = await Promise.all([
