@@ -39,6 +39,7 @@ import {
   isHourlyResolvedLine,
   parseBookingFulfillmentType,
 } from '../utils/hourlyBookingGuards';
+import { BookNowCatalogBootstrap } from './BookNowCatalogBootstrap';
 import { config } from '../config/env';
 import type { BookingFulfillmentType } from '../models/BookingOrder';
 
@@ -278,6 +279,26 @@ export class BookingService {
   /** Legacy path: resolve from MongoDB catalog (e.g. API-only checkout). */
   private static async resolveLineFromCatalog(line: BookingLineInput): Promise<ResolvedLine> {
     const normalized = this.normalizeLineInput(line);
+    try {
+      return await this.resolveLineFromCatalogOnce(normalized);
+    } catch (err) {
+      // Hourly always uses catalog pricing; auto-seed if SKUs were never bootstrapped.
+      if (err instanceof NotFoundError && isHourlyCatalogLineInput(normalized)) {
+        logger.warn(
+          'Hourly SKU missing in catalog — seeding Hourly Helper then retrying',
+          {
+            skuSlug: normalized.skuSlug,
+            categorySlug: normalized.categorySlug,
+          },
+        );
+        await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
+        return this.resolveLineFromCatalogOnce(normalized);
+      }
+      throw err;
+    }
+  }
+
+  private static async resolveLineFromCatalogOnce(normalized: BookingLineInput): Promise<ResolvedLine> {
     const { sku, variants, addons, category } = await CatalogService.getSkuDetail(
       normalized.skuSlug!,
       normalized.categorySlug,
@@ -306,7 +327,7 @@ export class BookingService {
 
     const durationMinutes = resolveBookNowLineDurationMinutes(
       sku.durationMinutes + (variant?.durationDeltaMinutes || 0),
-      line.durationMinutes,
+      normalized.durationMinutes,
     );
     const title = `${sku.name}${variant && !variant.isDefault ? ` — ${variant.name}` : ''}`;
 
