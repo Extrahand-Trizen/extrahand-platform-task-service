@@ -1,5 +1,5 @@
 /**
- * Book Now identity for completion auto-finalize.
+ * Book Now identity for completion auto-finalize / raise-issue.
  * Prefer bookingSource / bookingOrderId — not catalog heuristics.
  */
 export function isBookNowTaskForCompletion(task: {

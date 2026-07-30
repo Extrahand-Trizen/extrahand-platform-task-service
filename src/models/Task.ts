@@ -303,6 +303,11 @@ export interface ITask extends Document {
   reviewAt?: Date;
   completionSubmittedAt?: Date;
   completedAt?: Date;
+  /**
+   * First time this task reached completed (Book Now raise-issue clock).
+   * Not cleared on revision reopen so the 1h window does not reset on re-complete.
+   */
+  firstCompletedAt?: Date;
   cancelledAt?: Date;
   cancelledById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   cancellationReason?: string;
@@ -793,6 +798,8 @@ const TaskSchema = new Schema<ITask>(
     reviewAt: Date,
     completionSubmittedAt: Date,
     completedAt: Date,
+    /** Set once on first completion; never cleared on raise-issue reopen. */
+    firstCompletedAt: Date,
     cancelledAt: Date,
     cancelledById: {
       type: Schema.Types.ObjectId,

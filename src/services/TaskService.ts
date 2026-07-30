@@ -33,6 +33,9 @@ import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
+import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
+import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
+import { assertBookNowRaiseIssueAllowed } from '../utils/bookNowRaiseIssueWindow';
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
@@ -840,6 +843,9 @@ export class TaskService {
    * Get a single task by ID (with Redis cache to reduce DB load under concurrency)
    */
   static async getTaskById(taskId: string): Promise<ITask> {
+    // Avoid Mongoose CastError 500s for Book Now escrow placeholders (`booknow-pending-*`).
+    assertMongoObjectIdTaskId(taskId);
+
     const cacheKey = `task:detail:${taskId}`;
     let cachedTask: ITask | null = null;
 
@@ -3224,8 +3230,12 @@ export class TaskService {
       throw new ForbiddenError('Only the task requester can request changes');
     }
 
-    // Can only request changes when task is in review status
-    if (task.status !== 'review') {
+    // Marketplace: only while pending approval (review).
+    // Book Now: from completed within 1 hour of completion (or legacy review).
+    const bookNow = isBookNowTaskForCompletion(task);
+    if (bookNow) {
+      assertBookNowRaiseIssueAllowed(task);
+    } else if (task.status !== 'review') {
       throw new BadRequestError('Can only request changes when task is in review status');
     }
 
@@ -3244,6 +3254,10 @@ export class TaskService {
         completionStatus: 'revision_requested',
         completionRejectedReason: message.trim(),
         completionRejectedAt: new Date(),
+        // Clear current completion markers so Work Progress shows Work Started again.
+        // Do NOT clear firstCompletedAt — raise-issue window stays anchored to first complete.
+        completedAt: null,
+        completionApprovedAt: null,
         updatedAt: new Date(),
       },
       { new: true, runValidators: true }

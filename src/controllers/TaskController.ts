@@ -11,6 +11,7 @@ import { getMeaningfulTextError } from '../utils/textValidation';
 import logger from '../config/logger';
 import { TaskTrackingBundleService } from '../services/TaskTrackingBundleService';
 import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
+import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
 
 export class TaskController {
   /**
@@ -176,6 +177,7 @@ export class TaskController {
    * Get a single task by ID
    */
   static async getTask(req: AuthenticatedRequest, res: Response): Promise<void> {
+    assertMongoObjectIdTaskId(req.params.id);
     const task = await TaskService.getTaskById(req.params.id);
 
     // Increment views in background so response is not blocked
