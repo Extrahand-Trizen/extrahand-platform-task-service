@@ -5,6 +5,7 @@ import { AuthenticatedRequest } from '../types';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { emitBookNowLeadRemoved } from '../socket/socketHandlers';
+import logger from '../config/logger';
 
 /**
  * Maps category aliases to canonical category names so queries are robust
@@ -365,6 +366,8 @@ export class PartnerBookNowController {
     }
     if (newStatus === 'completed') {
       updateFields.completedAt = new Date();
+      updateFields.completionStatus = 'approved';
+      updateFields.completionApprovedAt = new Date();
     }
 
     const task = await Task.findOneAndUpdate(
@@ -383,6 +386,29 @@ export class PartnerBookNowController {
     }
 
     console.log(`[PartnerBookNow] updateLeadStatus: task=${id} uid=${uid} newStatus=${newStatus}`);
+
+    // Auto-payout on Book Now completion
+    if (newStatus === 'completed') {
+      try {
+        const { PaymentClient } = await import('../services/PaymentClient');
+        const payoutAmount =
+          typeof task.budget === 'object'
+            ? task.budget.amount
+            : Number(task.budget);
+        await PaymentClient.processTaskCompletionPayout({
+          taskId: String(task._id),
+          performerUid: uid,
+          amount: payoutAmount,
+          taskTitle: task.title,
+        });
+      } catch (payoutError: any) {
+        logger.error('[PartnerBookNow] Auto-payout failed on completion:', {
+          taskId: id,
+          error: payoutError?.message || payoutError,
+        });
+      }
+    }
+
     ApiResponse.success(res, { id: String(task._id), status: newStatus }, 'Status updated');
   }
 }

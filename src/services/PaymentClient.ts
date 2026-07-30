@@ -610,14 +610,18 @@ export class PaymentClient {
   }): Promise<{ success: boolean; payout?: any; requiresBankAccount?: boolean; error?: string }> {
     try {
       if (!this.baseURL || !this.serviceAuthToken) {
+        logger.info('[PAYOUT_DEBUG] PaymentClient initializing - baseURL and token missing');
         this.initialize();
       }
 
-      logger.info('➡️ Calling payment-service task completion payout', {
+      logger.info('[PAYOUT_DEBUG] Calling payment-service task completion payout', {
         url: `${this.baseURL}/api/v1/payouts/task-completion`,
         taskId: params.taskId,
         performerUid: params.performerUid,
         amount: params.amount,
+        taskTitle: params.taskTitle,
+        hasServiceAuth: !!this.serviceAuthToken,
+        baseURL: this.baseURL,
       });
 
       const response = await axios.post(
@@ -633,35 +637,56 @@ export class PaymentClient {
         }
       );
 
-      logger.info('⬅️ payment-service payout response', {
+      const resBody = response.data || {};
+      logger.info('[PAYOUT_DEBUG] payment-service payout response received', {
         taskId: params.taskId,
         httpStatus: response.status,
-        responseSuccess: response.data?.success,
-        requiresBankAccount: response.data?.requiresBankAccount,
-        payoutId: response.data?.payout?.payoutId,
+        responseSuccess: resBody.success,
+        requiresBankAccount: resBody.requiresBankAccount,
+        payoutId: resBody.payout?.payoutId,
+        payoutStatus: resBody.payout?.status,
+        error: resBody.error,
+        fullResponse: JSON.stringify(resBody).substring(0, 1000),
       });
 
-      if (response.data.success) {
+      if (resBody.success) {
+        logger.info('[PAYOUT_DEBUG] Payout SUCCESS', {
+          taskId: params.taskId,
+          payoutId: resBody.payout?.payoutId,
+          status: resBody.payout?.status,
+        });
         return {
           success: true,
-          payout: response.data.payout,
+          payout: resBody.payout,
         };
       }
 
+      logger.warn('[PAYOUT_DEBUG] Payout FAILED from payment service', {
+        taskId: params.taskId,
+        error: resBody.error,
+        requiresBankAccount: resBody.requiresBankAccount,
+      });
       return {
         success: false,
-        requiresBankAccount: response.data.requiresBankAccount,
-        error: response.data.error || 'Failed to process payout',
+        requiresBankAccount: resBody.requiresBankAccount,
+        error: resBody.error || 'Failed to process payout',
       };
     } catch (error) {
+      logger.error('[PAYOUT_DEBUG] Exception calling payment-service', {
+        taskId: params.taskId,
+        performerUid: params.performerUid,
+        errorType: error?.constructor?.name,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack?.substring(0, 500) : undefined,
+      });
       if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError<any>;
-        logger.error('❌ payment-service payout call failed', {
+        logger.error('[PAYOUT_DEBUG] Axios error details', {
           taskId: params.taskId,
-          performerUid: params.performerUid,
           httpStatus: axiosError.response?.status,
-          responseData: axiosError.response?.data,
+          responseData: JSON.stringify(axiosError.response?.data).substring(0, 1000),
           message: axiosError.message,
+          code: axiosError.code,
         });
         return {
           success: false,

@@ -1,17 +1,10 @@
 import Redis from "ioredis";
 import logger from "./logger";
 
-type RedisClient = InstanceType<typeof Redis>;
-
-let client: RedisClient | null = null;
+let client: Redis | null = null;
 let isReady = false;
 
 const CONNECT_TIMEOUT_MS = 10000;
-
-export const REDIS_TTLS = {
-  TASK_LIST_SECONDS: 20,
-  TASK_DETAIL_SECONDS: 60,
-};
 
 export const initRedis = async (): Promise<void> => {
   if (client) {
@@ -36,7 +29,7 @@ export const initRedis = async (): Promise<void> => {
 
     maxRetriesPerRequest: null,
 
-    retryStrategy(times: number) {
+    retryStrategy(times) {
       const delay = Math.min(times * 1000, 5000);
 
       logger.warn(
@@ -71,7 +64,7 @@ export const initRedis = async (): Promise<void> => {
     logger.warn("Redis connection ended");
   });
 
-  client.on("error", (err: Error) => {
+  client.on("error", (err) => {
     logger.error(`Redis error: ${err.message}`);
   });
 
@@ -86,7 +79,7 @@ export const initRedis = async (): Promise<void> => {
       resolve();
     });
 
-    client!.once("error", (err: Error) => {
+    client!.once("error", (err) => {
       clearTimeout(timeout);
       reject(err);
     });
@@ -98,7 +91,7 @@ export const initRedis = async (): Promise<void> => {
   logger.info(`Redis Ping: ${pong}`);
 };
 
-export const getRedisClient = (): RedisClient | null => {
+export const getRedisClient = (): Redis | null => {
   if (!client || !isReady) {
     return null;
   }
@@ -120,5 +113,3 @@ export const closeRedis = async (): Promise<void> => {
 
   logger.info("Redis connection closed");
 };
-
-export const disconnectRedis = closeRedis;
