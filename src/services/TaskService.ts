@@ -36,6 +36,7 @@ import { notifyHelperRevisionRequested } from './revisionRequestedNotifications'
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
 import { assertBookNowRaiseIssueAllowed } from '../utils/bookNowRaiseIssueWindow';
+import { BOOK_NOW_PARTNER_PAYOUT_COPY } from '../constants/bookNowPartnerPayoutCopy';
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
@@ -419,20 +420,23 @@ export class TaskService {
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
     if (status) {
       if (status === 'overdue') {
-        const now = new Date();
+        // scheduledDate is stored as UTC midnight for a calendar day — compare
+        // against start of today (UTC), not wall-clock now, or "today" is overdue
+        // as soon as the morning starts in IST.
+        const startOfTodayUtc = normalizeDateOnly(new Date());
         andClauses.push({ status: 'open' });
-        andClauses.push({ scheduledDate: { $lt: now } });
+        andClauses.push({ scheduledDate: { $lt: startOfTodayUtc } });
         andClauses.push({ dateOption: { $ne: 'flexible' } });
       } else if (status === 'open' && (excludeOverdue === true || excludeOverdue === 'true')) {
-        const now = new Date();
+        const startOfTodayUtc = normalizeDateOnly(new Date());
         andClauses.push({ status: 'open' });
         andClauses.push({
           $or: [
             { scheduledDate: { $exists: false } },
             { scheduledDate: null },
             { dateOption: 'flexible' },
-            { scheduledDate: { $gte: now } }
-          ]
+            { scheduledDate: { $gte: startOfTodayUtc } },
+          ],
         });
       } else {
         if (Array.isArray(status) && status.length > 1) {
@@ -886,6 +890,27 @@ export class TaskService {
 
     if (!task) {
       throw new NotFoundError("Task not found");
+    }
+
+    // Book Now must never linger in `review` after proof — heal stale rows from older deploys.
+    if (
+      isBookNowTaskForCompletion(task) &&
+      String(task.status) === 'review' &&
+      Array.isArray((task as { completionProof?: unknown[] }).completionProof) &&
+      ((task as { completionProof?: unknown[] }).completionProof?.length || 0) > 0
+    ) {
+      try {
+        const { CompletionService } = await import('./CompletionService');
+        const healed = await CompletionService.healBookNowStuckInReview(taskId);
+        if (healed) {
+          task = healed as unknown as ITask;
+        }
+      } catch (healErr) {
+        logger.warn('Book Now review→completed heal failed', {
+          taskId,
+          error: healErr instanceof Error ? healErr.message : String(healErr),
+        });
+      }
     }
 
     if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
@@ -2837,17 +2862,29 @@ export class TaskService {
           });
           logger.info(`[Auto-Payout] Payout result from updateTaskStatus for task ${taskId}:`, payoutResult);
           
+          const bookNowComplete = isBookNowTaskForCompletion(task);
           await InAppNotificationClient.send({
             userId: updatedTask.assigneeId.toString(),
-            title: payoutResult.success ? 'Payout Initiated' : 'Payout Initiation Failed',
+            title: payoutResult.success
+              ? bookNowComplete
+                ? BOOK_NOW_PARTNER_PAYOUT_COPY.workCompletedTitle
+                : 'Payout Initiated'
+              : 'Payout Initiation Failed',
             body: payoutResult.success
-              ? `Task completed. Payout of ₹${payoutAmount} has been initiated automatically.`
+              ? bookNowComplete
+                ? BOOK_NOW_PARTNER_PAYOUT_COPY.workCompletedSoftBody
+                : `Task completed. Payout of ₹${payoutAmount} has been initiated automatically.`
               : `Task completed. Payout initiation failed: ${payoutResult.error || 'Please request manually'}.`,
             type: 'info',
             category: 'payments',
             data: {
               taskId,
               actionUrl: '/profile?section=payments',
+              eventKey: payoutResult.success
+                ? bookNowComplete
+                  ? BOOK_NOW_PARTNER_PAYOUT_COPY.pendingVisibilityEventKey
+                  : 'PAYOUT_INITIATED'
+                : 'PAYOUT_FAILED',
             },
           });
         } catch (paymentError: any) {
@@ -3268,6 +3305,26 @@ export class TaskService {
     }
 
     logger.info(`Change request submitted for task ${taskId} by requester ${profileId.toString()}`);
+
+    if (bookNow) {
+      try {
+        const holdResult = await PaymentClient.holdBookNowTaskPayouts({
+          taskId,
+          reason: message.trim(),
+        });
+        logger.info('[BookNow] Held payouts after change request / raise-issue', {
+          taskId,
+          success: holdResult.success,
+          heldCount: holdResult.heldCount,
+          error: holdResult.error,
+        });
+      } catch (holdError) {
+        logger.error('[BookNow] Failed to hold payouts after change request', {
+          taskId,
+          error: holdError instanceof Error ? holdError.message : String(holdError),
+        });
+      }
+    }
 
     // Send notification to assignee about the change request
     if (task.assigneeId || task.assigneeUid) {

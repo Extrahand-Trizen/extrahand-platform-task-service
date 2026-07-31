@@ -16,6 +16,13 @@ function testBookingOrderId() {
   );
 }
 
+function testBookingItemId() {
+  assert.strictEqual(
+    isBookNowTaskForCompletion({ bookingSource: 'marketplace', bookingItemId: 'item_1' }),
+    true,
+  );
+}
+
 function testMarketplaceOnly() {
   assert.strictEqual(isBookNowTaskForCompletion({ bookingSource: 'marketplace' }), false);
   assert.strictEqual(isBookNowTaskForCompletion({}), false);
@@ -23,5 +30,6 @@ function testMarketplaceOnly() {
 
 testBookingSourceBookNow();
 testBookingOrderId();
+testBookingItemId();
 testMarketplaceOnly();
 console.log('isBookNowTaskForCompletion.test.ts: all tests passed');

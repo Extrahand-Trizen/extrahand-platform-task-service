@@ -20,6 +20,7 @@ import { PaymentClient } from './PaymentClient';
 import { notifyPosterOnTaskCompleted } from './taskCompletionPosterNotify';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertBookNowRaiseIssueAllowed } from '../utils/bookNowRaiseIssueWindow';
+import { BOOK_NOW_PARTNER_PAYOUT_COPY } from '../constants/bookNowPartnerPayoutCopy';
 
 export class CompletionService {
   /**
@@ -83,6 +84,15 @@ export class CompletionService {
     }));
     const submittedAt = new Date();
     const bookNow = isBookNowTaskForCompletion(task);
+    logger.info('[CompletionService] submitCompletionProof mode', {
+      taskId,
+      bookNow,
+      bookingSource: task.bookingSource || null,
+      bookingOrderId: task.bookingOrderId || null,
+      bookingItemId: (task as { bookingItemId?: unknown }).bookingItemId || null,
+      priorStatus: task.status,
+      priorCompletionStatus: task.completionStatus,
+    });
 
     if (bookNow) {
       const updateFields: Record<string, unknown> = {
@@ -203,6 +213,54 @@ export class CompletionService {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+
+    TaskService.invalidateTaskCache(taskId);
+    return updatedTask;
+  }
+
+  /**
+   * Heal Book Now tasks stuck in `review` after proof upload (e.g. older deploy
+   * without auto-complete). Idempotent: no-op when already completed / no proof.
+   */
+  static async healBookNowStuckInReview(taskId: string): Promise<any | null> {
+    const task = await Task.findById(taskId);
+    if (!task) return null;
+    if (!isBookNowTaskForCompletion(task)) return null;
+    if (String(task.status) !== 'review') return null;
+
+    const proof = Array.isArray(task.completionProof) ? task.completionProof : [];
+    if (proof.length < 1) return null;
+
+    const submittedAt =
+      task.completionSubmittedAt ||
+      task.reviewAt ||
+      new Date();
+    const updateFields: Record<string, unknown> = {
+      status: 'completed',
+      completionStatus: 'approved',
+      completedAt: task.completedAt || submittedAt,
+      completionApprovedAt: task.completionApprovedAt || submittedAt,
+      updatedAt: new Date(),
+    };
+    if (!task.firstCompletedAt) {
+      updateFields.firstCompletedAt = submittedAt;
+    }
+
+    const updatedTask = await Task.findByIdAndUpdate(taskId, updateFields, {
+      new: true,
+      runValidators: true,
+    }).lean();
+
+    logger.info(
+      `Book Now task ${taskId} healed from review → completed (proof already present)`,
+    );
+
+    await this.runApprovedCompletionSideEffects(
+      taskId,
+      task,
+      updatedTask,
+      String(task.assigneeId || ''),
+    );
 
     TaskService.invalidateTaskCache(taskId);
     return updatedTask;
@@ -475,18 +533,29 @@ export class CompletionService {
           fullResult: JSON.stringify(payoutResult).substring(0, 1000),
         });
 
+        const bookNowComplete = isBookNowTaskForCompletion(previousTask);
         await InAppNotificationClient.send({
           userId: updatedTask.assigneeId.toString(),
-          title: payoutResult.success ? 'Payout Initiated' : 'Payout Initiation Failed',
+          title: payoutResult.success
+            ? bookNowComplete
+              ? BOOK_NOW_PARTNER_PAYOUT_COPY.workCompletedTitle
+              : 'Payout Initiated'
+            : 'Payout Initiation Failed',
           body: payoutResult.success
-            ? `Task completed. Payout of ₹${payoutAmount} has been initiated automatically.`
+            ? bookNowComplete
+              ? BOOK_NOW_PARTNER_PAYOUT_COPY.workCompletedSoftBody
+              : `Task completed. Payout of ₹${payoutAmount} has been initiated automatically.`
             : `Task completed. Payout initiation failed: ${payoutResult.error || 'Please request manually'}.`,
           type: 'info',
           category: 'payments',
           data: {
             taskId,
             actionUrl: '/profile?section=payments',
-            eventKey: payoutResult.success ? 'PAYOUT_INITIATED' : 'PAYOUT_FAILED',
+            eventKey: payoutResult.success
+              ? bookNowComplete
+                ? BOOK_NOW_PARTNER_PAYOUT_COPY.pendingVisibilityEventKey
+                : 'PAYOUT_INITIATED'
+              : 'PAYOUT_FAILED',
             entityType: 'payout',
             category: 'payments',
           },
@@ -566,6 +635,26 @@ export class CompletionService {
 
     logger.warn(`Task ${taskId} completion rejected by poster ${taskOwnerProfileId}. Reason: ${reason}`);
     emitProofRejected(taskId, { task: updatedTask, reason });
+
+    if (bookNow) {
+      try {
+        const holdResult = await PaymentClient.holdBookNowTaskPayouts({
+          taskId,
+          reason,
+        });
+        logger.info('[BookNow] Held payouts after raise-issue', {
+          taskId,
+          success: holdResult.success,
+          heldCount: holdResult.heldCount,
+          error: holdResult.error,
+        });
+      } catch (holdError) {
+        logger.error('[BookNow] Failed to hold payouts after raise-issue', {
+          taskId,
+          error: holdError instanceof Error ? holdError.message : String(holdError),
+        });
+      }
+    }
 
     try {
       await notifyHelperRevisionRequested({

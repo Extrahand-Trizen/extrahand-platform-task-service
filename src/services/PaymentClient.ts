@@ -703,6 +703,58 @@ export class PaymentClient {
   }
 
   /**
+   * Hold Book Now payouts when customer raises an issue within the completion window.
+   */
+  static async holdBookNowTaskPayouts(params: {
+    taskId: string;
+    reason?: string;
+  }): Promise<{ success: boolean; heldCount?: number; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payouts/task/${encodeURIComponent(params.taskId)}/hold-book-now`,
+        { reason: params.reason },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        },
+      );
+
+      const resBody = response.data || {};
+      if (resBody.success) {
+        return { success: true, heldCount: Number(resBody.heldCount) || 0 };
+      }
+      return {
+        success: false,
+        error: resBody.error || 'Failed to hold Book Now payouts',
+      };
+    } catch (error) {
+      logger.error('Error holding Book Now payouts after raise-issue', {
+        taskId: params.taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError<any>;
+        return {
+          success: false,
+          error: axiosError.response?.data?.error || axiosError.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to hold Book Now payouts',
+      };
+    }
+  }
+
+  /**
    * Partial refund for one Book Now line item (multi-service checkout).
    */
   static async partialRefundBookNowLineItem(params: {

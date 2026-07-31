@@ -1,16 +1,23 @@
 /**
- * Unit tests for Book Now 1-hour raise-issue window (firstCompletedAt clock).
+ * Unit tests for Book Now raise-issue window (firstCompletedAt clock).
  * Run: npx ts-node src/tests/bookNowRaiseIssueWindow.test.ts
  */
 import assert from 'assert';
+
+// Isolate from shell/dev .env values that may set window to 0 for local unlock testing.
+delete process.env.BOOK_NOW_RAISE_ISSUE_WINDOW_MINUTES;
+delete process.env.BOOK_NOW_PAYOUT_PARTNER_VISIBLE_AFTER_MINUTES;
+delete process.env.BOOK_NOW_PAYOUT_PARTNER_VISIBLE_AFTER_HOURS;
+
 import {
-  BOOK_NOW_RAISE_ISSUE_WINDOW_MS,
+  getBookNowRaiseIssueWindowMs,
   assertBookNowRaiseIssueAllowed,
   canBookNowRaiseIssue,
   getBookNowRaiseIssueRemainingMs,
 } from '../utils/bookNowRaiseIssueWindow';
 
-const HOUR = BOOK_NOW_RAISE_ISSUE_WINDOW_MS;
+const WINDOW = getBookNowRaiseIssueWindowMs();
+assert.ok(WINDOW > 0, 'expected default raise-issue window > 0 in unit tests');
 
 function testWithinWindow() {
   const firstCompletedAt = new Date(Date.now() - 30 * 60 * 1000);
@@ -26,7 +33,7 @@ function testWithinWindow() {
 }
 
 function testOutsideWindow() {
-  const firstCompletedAt = new Date(Date.now() - HOUR - 60_000);
+  const firstCompletedAt = new Date(Date.now() - WINDOW - 60_000);
   const task = {
     bookingSource: 'book_now' as const,
     status: 'completed',
@@ -35,11 +42,11 @@ function testOutsideWindow() {
   };
   assert.strictEqual(canBookNowRaiseIssue(task), false);
   assert.strictEqual(getBookNowRaiseIssueRemainingMs(task), 0);
-  assert.throws(() => assertBookNowRaiseIssueAllowed(task), /1-hour window/);
+  assert.throws(() => assertBookNowRaiseIssueAllowed(task), /window to request changes has ended/);
 }
 
 function testRecompleteDoesNotResetClock() {
-  const firstCompletedAt = new Date(Date.now() - 50 * 60 * 1000);
+  const firstCompletedAt = new Date(Date.now() - WINDOW + 10 * 60 * 1000);
   const task = {
     bookingSource: 'book_now' as const,
     status: 'completed',

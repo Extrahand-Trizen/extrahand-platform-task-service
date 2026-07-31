@@ -451,7 +451,15 @@ export class TaskController {
       { proofUrls, notes }
     );
 
-    ApiResponse.success(res, task, 'Completion proof submitted for review');
+    const isAutoCompleted =
+      task?.status === 'completed' && task?.completionStatus === 'approved';
+    ApiResponse.success(
+      res,
+      task,
+      isAutoCompleted
+        ? 'Task completed successfully.'
+        : 'Completion proof submitted for review',
+    );
   }
 
   /**
