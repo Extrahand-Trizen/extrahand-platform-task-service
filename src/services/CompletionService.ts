@@ -439,18 +439,40 @@ export class CompletionService {
     }
 
     const performerUid = updatedTask?.assigneeUid || previousTask.assigneeUid;
-    if (updatedTask?.assigneeId && performerUid) {
+    const hasAssigneeId = !!updatedTask?.assigneeId;
+    logger.info('[PAYOUT_DEBUG] Checking auto-payout eligibility', {
+      taskId,
+      hasAssigneeId,
+      performerUid,
+      assigneeId_fromUpdated: updatedTask?.assigneeId?.toString(),
+      assigneeUid_fromUpdated: updatedTask?.assigneeUid,
+      assigneeUid_fromPrevious: previousTask?.assigneeUid,
+      taskStatus: updatedTask?.status,
+      completionStatus: updatedTask?.completionStatus,
+      budget: typeof previousTask.budget === 'object' ? previousTask.budget.amount : Number(previousTask.budget),
+      isBookNow: isBookNowTaskForCompletion(previousTask),
+    });
+    if (hasAssigneeId && performerUid) {
       try {
         const payoutAmount =
           typeof previousTask.budget === 'object'
             ? previousTask.budget.amount
             : Number(previousTask.budget);
+        logger.info(`[PAYOUT_DEBUG] Initiating auto-payout for task ${taskId}, performer: ${performerUid}, amount: ${payoutAmount}`);
         const payoutResult = await PaymentClient.processTaskCompletionPayout({
           taskId,
           performerUid,
           amount: payoutAmount,
           taskTitle: updatedTask.title || previousTask.title,
           visitId: updatedTask.recurringVisitId ? String(updatedTask.recurringVisitId) : undefined,
+        });
+        logger.info(`[PAYOUT_DEBUG] Payout result for task ${taskId}:`, {
+          success: payoutResult.success,
+          requiresBankAccount: payoutResult.requiresBankAccount,
+          error: payoutResult.error,
+          payoutId: payoutResult.payout?.payoutId,
+          payoutStatus: payoutResult.payout?.status,
+          fullResult: JSON.stringify(payoutResult).substring(0, 1000),
         });
 
         await InAppNotificationClient.send({
@@ -470,8 +492,19 @@ export class CompletionService {
           },
         });
       } catch (paymentError: any) {
-        logger.error(`[Auto-Payout] Error processing auto-payout for task ${taskId}:`, paymentError);
+        logger.error(`[PAYOUT_DEBUG] Exception processing auto-payout for task ${taskId}:`, {
+          message: paymentError?.message,
+          stack: paymentError?.stack?.substring(0, 500),
+          error: paymentError,
+        });
       }
+    } else {
+      logger.warn('[PAYOUT_DEBUG] Skipping auto-payout: assignee details missing', {
+        taskId,
+        hasAssigneeId,
+        hasPerformerUid: !!performerUid,
+        performerUid,
+      });
     }
 
     emitProofApproved(taskId, updatedTask);

@@ -23,7 +23,12 @@ export class CompletionController {
       req.body
     );
 
-    ApiResponse.success(res, task, 'Completion proof submitted. Waiting for poster approval.');
+    const isAutoCompleted = task?.status === 'completed' && task?.completionStatus === 'approved';
+    const message = isAutoCompleted
+      ? 'Task completed successfully.'
+      : 'Completion proof submitted. Waiting for poster approval.';
+
+    ApiResponse.success(res, task, message);
   }
 
   /**
