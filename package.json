@@ -21,7 +21,7 @@
     "health": "curl -f http://localhost:4002/api/v1/health || exit 1"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19.0"
   },
   "dependencies": {
     "@types/node-cron": "^3.0.11",

@@ -1,5 +1,6 @@
-# Use Node.js 18 LTS Alpine image for smaller size
-FROM node:18-alpine AS base
+# Node 20+: avoids npm ci / engine mismatches (mongoose/mongodb/firebase transitive deps).
+# Same class of failure as API gateway on node:18 (incomplete lock + EBADENGINE).
+FROM node:20-alpine AS base
 
 # Install runtime utilities
 RUN apk add --no-cache dumb-init curl
@@ -17,15 +18,11 @@ FROM base AS build
 # Accept build cache buster argument (pass new value to bust cache: --build-arg CACHE_BUST=$(date +%s))
 ARG CACHE_BUST=1
 
-# Copy package files
-COPY package.json package-lock.json* ./
+# Require both files — never fall back to npm install (that hides lock drift).
+COPY package.json package-lock.json ./
 
 # Install all dependencies (including dev dependencies for TypeScript)
-RUN if [ -f package-lock.json ]; then \
-      npm ci --no-audit --no-fund; \
-    else \
-      npm install --no-audit --no-fund; \
-    fi
+RUN npm ci --no-audit --no-fund
 
 # Copy TypeScript configuration
 COPY tsconfig.json ./
