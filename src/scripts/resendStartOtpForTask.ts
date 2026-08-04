@@ -17,7 +17,6 @@ const TASK_ID = '6a54769e4417fff05c2082b7';
 const HELPER_PROFILE_ID = '6a54770f743cc6f0fc58adb5';
 const HELPER_UID = 'f81kdwayhkPuc039NXNixBmNI7u2';
 const START_OTP_LENGTH = 4;
-const START_OTP_TTL_MS = 10 * 60 * 1000;
 
 function generateStartOtpCode(): string {
   const min = 10 ** (START_OTP_LENGTH - 1);
@@ -40,7 +39,6 @@ async function main() {
           status: before?.status,
           executionPhase: before?.executionPhase,
           hasCodePlain: Boolean((before as any)?.startOtp?.codePlain),
-          expiresAt: (before as any)?.startOtp?.expiresAt || null,
         },
       },
       null,
@@ -64,7 +62,6 @@ async function main() {
         {
           action: 'requestStartOtp_ok',
           sentTo: result.sentTo,
-          expiresAt: result.expiresAt,
           executionPhase: (after as any)?.executionPhase,
           otp: plain,
           hasCodePlain: Boolean(plain),
@@ -82,13 +79,11 @@ async function main() {
 
     const otp = generateStartOtpCode();
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + START_OTP_TTL_MS);
 
     task.startOtp = {
       codeHash: hashStartOtp(TASK_ID, otp),
       codePlain: otp,
       requestedAt: now,
-      expiresAt,
       attempts: 0,
       resendCount: ((task.startOtp as any)?.resendCount || 0) + 1,
       requestedById: new mongoose.Types.ObjectId(HELPER_PROFILE_ID),
@@ -108,7 +103,6 @@ async function main() {
           reason: err?.message || String(err),
           executionPhase: (task as any).executionPhase,
           otp,
-          expiresAt,
           hasCodePlain: true,
         },
         null,

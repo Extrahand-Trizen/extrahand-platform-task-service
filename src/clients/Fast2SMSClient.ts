@@ -163,7 +163,7 @@ export class Fast2SMSClient {
     otp: string,
     taskTitle: string
   ): Promise<boolean> {
-    const message = `Task start OTP for "${taskTitle}": ${otp}. Valid for 10 minutes. - ExtraHand`;
+    const message = `Task start OTP for "${taskTitle}": ${otp}. - ExtraHand`;
     return this.sendSMS(phone, message, { route: 'q' });
   }
 }

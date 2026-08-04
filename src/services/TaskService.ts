@@ -294,7 +294,6 @@ function buildNearbyLocationClause(
   };
 }
 
-const START_OTP_TTL_MS = 10 * 60 * 1000;
 const START_OTP_MAX_ATTEMPTS = 5;
 
 function generateStartOtpCode(): string {
@@ -2094,10 +2093,6 @@ export class TaskService {
       if (!startOtp?.verifiedAt) {
         throw new BadRequestError("Start OTP verification required before starting task");
       }
-
-      if (startOtp.expiresAt && new Date(startOtp.expiresAt).getTime() < Date.now()) {
-        throw new BadRequestError("Start OTP expired. Please resend and verify OTP again");
-      }
     }
 
     // Once work starts, cancellation is not allowed.
@@ -2908,7 +2903,7 @@ export class TaskService {
     profileId: mongoose.Types.ObjectId,
     _uid: string,
     options?: { isResend?: boolean }
-  ): Promise<{ expiresAt: Date; sentTo: string }> {
+  ): Promise<{ sentTo: string }> {
     const task = await Task.findById(taskId);
     if (!task) {
       throw new NotFoundError("Task not found");
@@ -2943,7 +2938,6 @@ export class TaskService {
     const otp = generateStartOtpCode();
     logger.info(`[OTP] Generated 4-digit start OTP: ${otp} for task: ${effectiveTaskId}`);
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + START_OTP_TTL_MS);
 
     const nextResendCount = options?.isResend
       ? (workTask.startOtp?.resendCount || 0) + 1
@@ -2953,7 +2947,6 @@ export class TaskService {
       codeHash: otp,
       codePlain: otp,
       requestedAt: now,
-      expiresAt,
       attempts: 0,
       resendCount: nextResendCount,
       requestedById: profileId,
@@ -2979,7 +2972,6 @@ export class TaskService {
       recurringVisitId: workTask.recurringVisitId ? String(workTask.recurringVisitId) : undefined,
       otp,
       otpType: 'task_start',
-      expiresAt: expiresAt.toISOString(),
       eventKey: 'HELPER_ON_THE_WAY',
       entityType: 'task',
       executionPhase: 'on_the_way',
@@ -3016,7 +3008,6 @@ export class TaskService {
           taskerName,
           taskTitle: workTitleForOtp,
           otp,
-          expiresAt: expiresAt.toISOString(),
           userId: requesterUid,
         });
       } else {
@@ -3096,7 +3087,6 @@ export class TaskService {
     TaskService.invalidateTaskCache(taskId);
 
     return {
-      expiresAt,
       sentTo: requesterName,
     };
   }
@@ -3151,12 +3141,8 @@ export class TaskService {
       });
     }
 
-    if (!workTask.startOtp?.codeHash || !workTask.startOtp?.expiresAt) {
+    if (!workTask.startOtp?.codeHash) {
       throw new BadRequestError("Start OTP not requested. Please request OTP first");
-    }
-
-    if (workTask.startOtp.expiresAt.getTime() < Date.now()) {
-      throw new BadRequestError("OTP expired. Please resend OTP");
     }
 
     if ((workTask.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
@@ -3608,7 +3594,7 @@ export class TaskService {
   static async getStartOtpForPoster(
     taskId: string,
     posterProfileId: mongoose.Types.ObjectId
-  ): Promise<{ otp: string | null; expiresAt: Date | null; executionPhase: string | null }> {
+  ): Promise<{ otp: string | null; executionPhase: string | null }> {
     const task = await Task.findById(taskId);
     if (!task) throw new NotFoundError("Task not found");
 
@@ -3622,7 +3608,6 @@ export class TaskService {
     const startOtp = workTask.startOtp;
     return {
       otp: startOtp?.codePlain || null,
-      expiresAt: startOtp?.expiresAt || null,
       executionPhase: workTask.executionPhase || null,
     };
   }
