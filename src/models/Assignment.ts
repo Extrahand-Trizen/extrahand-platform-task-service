@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
-
+  
 export type AssignmentMode = 'manual' | 'broadcast' | 'auto';
 export type AssignmentStatus = 'pending' | 'assigned' | 'failed' | 'cancelled';
 

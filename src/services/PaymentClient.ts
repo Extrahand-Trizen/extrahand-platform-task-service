@@ -115,10 +115,16 @@ export class PaymentClient {
       );
 
       if (response.data.success) {
+        const order =
+          response.data.order && typeof response.data.order === 'object'
+            ? { ...response.data.order }
+            : response.data.order;
         return {
           success: true,
           escrow: response.data.escrow,
-          order: response.data.order,
+          // Keep keyId from payment-service — Book Now checkout must open with
+          // the same Razorpay account that created this order (not gateway fallback).
+          order,
         };
       }
 
@@ -929,6 +935,97 @@ export class PaymentClient {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to cancel payment',
+      };
+    }
+  }
+
+  /**
+   * Hourly Helper cancel — payment executes CancellationSettlement only (no fee recalculation).
+   * POST /api/v1/payment/cancel with settlement payload.
+   */
+  static async cancelHourlyWithSettlement(params: {
+    bookingOrderId: string;
+    escrowId?: string;
+    taskId?: string;
+    reason?: string;
+    userId: string;
+    /** Maps CUSTOMER/SYSTEM → poster, HELPER → performer for legacy payment enums. */
+    cancelledBy: 'poster' | 'performer';
+    taskStartDate: string;
+    assignedAt?: string | null;
+    settlement: {
+      refundAmountPaise: number;
+      workerCompensationPaise: number;
+      platformRetainedAmountPaise: number;
+    };
+  }): Promise<{
+    success: boolean;
+    cancelled?: boolean;
+    refundRequired?: boolean;
+    refund?: unknown;
+    error?: string;
+  }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      logger.info('[PaymentClient.cancelHourlyWithSettlement] Calling payment cancel API', {
+        bookingOrderId: params.bookingOrderId,
+        refundAmountPaise: params.settlement.refundAmountPaise,
+        workerCompensationPaise: params.settlement.workerCompensationPaise,
+        platformRetainedAmountPaise: params.settlement.platformRetainedAmountPaise,
+      });
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payment/cancel`,
+        {
+          bookingOrderId: params.bookingOrderId,
+          escrowId: params.escrowId,
+          taskId: params.taskId,
+          reason: params.reason,
+          userId: params.userId,
+          cancelledBy: params.cancelledBy,
+          taskStartDate: params.taskStartDate,
+          assignedAt: params.assignedAt ?? undefined,
+          settlement: params.settlement,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 30000,
+        },
+      );
+
+      const data = response.data;
+      if (data?.success) {
+        return {
+          success: true,
+          cancelled: data.cancelled,
+          refundRequired: data.refundRequired,
+          refund: data.refund,
+        };
+      }
+
+      return {
+        success: false,
+        error: data?.error || data?.message || 'Failed to settle hourly cancellation',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string; message?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.response?.data?.message || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error:
+          error instanceof Error ? error.message : 'Failed to settle hourly cancellation',
       };
     }
   }

@@ -6,6 +6,7 @@ import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppErr
 import { ApiResponse } from '../utils/ApiResponse';
 import { emitBookNowLeadRemoved } from '../socket/socketHandlers';
 import logger from '../config/logger';
+import { CatalogService } from '../services/CatalogService';
 
 /**
  * Maps category aliases to canonical category names so queries are robust
@@ -113,6 +114,16 @@ export class PartnerBookNowController {
           // swallow — name enrichment is best-effort
         }
 
+        let serviceContent: { includes?: string[]; excludes?: string[] } | null = null;
+        try {
+          serviceContent = await CatalogService.resolveSkuContent({
+            categorySlug: String(task.categorySlug || task.category || ''),
+            taskTitle: typeof task.title === 'string' ? task.title : undefined,
+          });
+        } catch {
+          serviceContent = null;
+        }
+
         const isOverdue =
           task.status === 'open' &&
           task.scheduledDate &&
@@ -135,6 +146,8 @@ export class PartnerBookNowController {
           distance: task.distance ?? undefined,
           bookingOrderId: task.bookingOrderId,
           bookingItemId: task.bookingItemId,
+          serviceIncludes: serviceContent?.includes || [],
+          serviceNotIncludes: serviceContent?.excludes || [],
           isOverdue,
         };
       }),
@@ -296,6 +309,16 @@ export class PartnerBookNowController {
         } catch {
           // swallow
         }
+        let serviceContent: { includes?: string[]; excludes?: string[] } | null = null;
+        try {
+          serviceContent = await CatalogService.resolveSkuContent({
+            categorySlug: String(task.categorySlug || task.category || ''),
+            taskTitle: typeof task.title === 'string' ? task.title : undefined,
+          });
+        } catch {
+          serviceContent = null;
+        }
+
         return {
           id: String(task._id),
           title: task.title,
@@ -312,6 +335,8 @@ export class PartnerBookNowController {
           requesterName,
           bookingOrderId: task.bookingOrderId,
           bookingItemId: task.bookingItemId,
+          serviceIncludes: serviceContent?.includes || [],
+          serviceNotIncludes: serviceContent?.excludes || [],
         };
       }),
     );

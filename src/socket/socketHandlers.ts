@@ -18,10 +18,36 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
     logger.info(`🔌 User connected to task service: ${profileId} (${socket.id})`);
 
     // Task room subscription
-    socket.on("task:join", (data: { taskId: string }) => {
-      const { taskId } = data;
-      socket.join(`task:${taskId}`);
-      logger.info(`📋 User ${profileId} joined task room: ${taskId}`);
+    socket.on("task:join", async (data: { taskId: string }) => {
+      try {
+        const { taskId } = data;
+        if (!taskId || typeof taskId !== "string") {
+          logger.warn(`⚠️ task:join rejected — invalid taskId from profile: ${profileId}`);
+          return;
+        }
+
+        const task = await Task.findById(taskId).select("requesterId partnerId assigneeId").lean();
+        if (!task) {
+          logger.warn(`⚠️ task:join rejected — task ${taskId} not found (profile: ${profileId})`);
+          return;
+        }
+
+        const allowedProfileIds = [
+          task.requesterId?.toString(),
+          task.partnerId?.toString(),
+          task.assigneeId?.toString(),
+        ].filter(Boolean);
+
+        if (!allowedProfileIds.includes(profileId)) {
+          logger.warn(`🚫 task:join rejected — profile ${profileId} cannot join task ${taskId}`);
+          return;
+        }
+
+        socket.join(`task:${taskId}`);
+        logger.info(`📋 User ${profileId} joined task room: ${taskId}`);
+      } catch (err) {
+        logger.error(`❌ task:join error (profile: ${profileId}):`, err);
+      }
     });
 
     // Task room unsubscription
