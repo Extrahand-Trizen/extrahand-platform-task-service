@@ -1,11 +1,89 @@
 import { Server as SocketIOServer, Socket } from "socket.io";
 import logger from "../config/logger";
 import { socketAuthMiddleware } from "../middleware/socketAuth";
-import { getRedisClient } from "../config/redis";
+import { getRedisClient, REDIS_TTLS } from "../config/redis";
 import Task from "../models/Task";
+import TaskLiveLocation from "../models/TaskLiveLocation";
 
 // Store io instance globally for use in services
 export let io: SocketIOServer;
+
+const LOCATION_DB_WRITE_INTERVAL_MS = 10000;
+const LOCATION_DB_WRITE_DISTANCE_METERS = 50;
+
+type LastPersistedLocation = {
+  lat: number;
+  lng: number;
+  persistedAt: number;
+};
+
+const lastPersistedLocationByTask = new Map<string, LastPersistedLocation>();
+
+function toRadians(value: number): number {
+  return (value * Math.PI) / 180;
+}
+
+function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const earthRadiusMeters = 6371000;
+  const dLat = toRadians(b.lat - a.lat);
+  const dLng = toRadians(b.lng - a.lng);
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+
+  const haversine =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+
+  return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+function isValidCoordinate(lat: number, lng: number): boolean {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return false;
+  return !(Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001);
+}
+
+async function persistPartnerLocationSnapshot(params: {
+  taskId: string;
+  partnerId: string;
+  lat: number;
+  lng: number;
+  timestamp: number;
+}): Promise<void> {
+  const cacheKey = `${params.taskId}:${params.partnerId}`;
+  const previous = lastPersistedLocationByTask.get(cacheKey);
+  const movedEnough = previous
+    ? distanceMeters(previous, { lat: params.lat, lng: params.lng }) >= LOCATION_DB_WRITE_DISTANCE_METERS
+    : true;
+  const waitedEnough = previous
+    ? Date.now() - previous.persistedAt >= LOCATION_DB_WRITE_INTERVAL_MS
+    : true;
+
+  if (!movedEnough && !waitedEnough) {
+    return;
+  }
+
+  await TaskLiveLocation.updateOne(
+    { taskId: params.taskId },
+    {
+      $set: {
+        taskId: params.taskId,
+        partnerId: params.partnerId,
+        lat: params.lat,
+        lng: params.lng,
+        source: "socket",
+        recordedAt: new Date(params.timestamp),
+      },
+    },
+    { upsert: true },
+  );
+
+  lastPersistedLocationByTask.set(cacheKey, {
+    lat: params.lat,
+    lng: params.lng,
+    persistedAt: Date.now(),
+  });
+}
 
 export function initializeSocketHandlers(ioServer: SocketIOServer) {
   io = ioServer;
@@ -114,6 +192,11 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
           timestamp: number;
         };
 
+        if (!isValidCoordinate(lat, lng) || !Number.isFinite(timestamp)) {
+          logger.warn(`⚠️  partner:location-update rejected — invalid coordinates from profile: ${profileId}`);
+          return;
+        }
+
         // --- Task existence check ---
         const task = await Task.findById(taskId).select("partnerId assigneeId status").lean();
         if (!task) {
@@ -149,6 +232,7 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
           );
         } else {
           const key = `partner:location:${profileId}`;
+          const taskKey = `task:partner-location:${taskId}`;
           const value = JSON.stringify({ taskId, lat, lng, timestamp });
 
           if (!locationUpdateSeen.has(key)) {
@@ -156,7 +240,8 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
           }
           logger.debug(`Redis payload for ${key}: ${value}`);
 
-          await redis.set(key, value, "EX", 30);
+          await redis.set(key, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
+          await redis.set(taskKey, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
 
           if (!locationUpdateSeen.has(key)) {
             logger.info(`Redis SET completed for key: ${key}`);
@@ -169,6 +254,20 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
           logger.debug(`Redis GET for ${key}: ${stored}`);
           logger.debug(`Redis TTL for ${key}: ${ttl}`);
         }
+
+        void persistPartnerLocationSnapshot({
+          taskId,
+          partnerId: profileId,
+          lat,
+          lng,
+          timestamp,
+        }).catch((err) => {
+          logger.warn("Partner location snapshot persistence failed", {
+            taskId,
+            partnerId: profileId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
 
         // --- Fan-out to task room ---
         io.to(`task:${taskId}`).emit("partner:location", { lat, lng, timestamp });
