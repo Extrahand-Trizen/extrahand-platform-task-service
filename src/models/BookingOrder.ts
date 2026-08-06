@@ -47,6 +47,11 @@ export interface IBookingOrder extends Document {
   paidAt?: Date;
   cancelledAt?: Date;
   cancellationReason?: string;
+  /**
+   * Snapshot from Hourly Helper cancellation evaluator (idempotency / disputes).
+   * Fixed-price Book Now cancel does not use this field.
+   */
+  cancellationResult?: Record<string, unknown> | null;
   /** Optional coupon snapshot (nullable for historical orders) */
   couponId?: string | null;
   couponCode?: string | null;
@@ -103,6 +108,7 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     paidAt: Date,
     cancelledAt: Date,
     cancellationReason: String,
+    cancellationResult: { type: Schema.Types.Mixed, default: undefined },
     couponId: { type: String, default: null },
     couponCode: { type: String, default: null },
     couponDiscount: { type: Number, default: null, min: 0 },

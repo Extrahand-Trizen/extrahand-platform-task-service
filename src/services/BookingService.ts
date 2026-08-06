@@ -40,8 +40,14 @@ import {
   parseBookingFulfillmentType,
 } from '../utils/hourlyBookingGuards';
 import { BookNowCatalogBootstrap } from './BookNowCatalogBootstrap';
+import { abandonUnpaidBookingOrder } from './bookingAbandonUnpaid';
+import { cancelHourlyBooking } from './cancellation/cancellationOrchestrator';
+import {
+  isHourlyBookingFromHints,
+} from './cancellation/cancellationContext';
 import { config } from '../config/env';
 import type { BookingFulfillmentType } from '../models/BookingOrder';
+import type { HourlyCancellationOrchestratorResult } from './cancellation/cancellationTypes';
 
 
 type BookingAddress = {
@@ -720,14 +726,58 @@ export class BookingService {
             : null;
       }
 
+      // Keep order.total in sync with what Razorpay will charge (after coupon/coins).
+      const breakdown =
+        escrowMeta.amountBreakdown && typeof escrowMeta.amountBreakdown === 'object'
+          ? (escrowMeta.amountBreakdown as Record<string, unknown>)
+          : null;
+      const finalPayableRaw =
+        breakdown?.finalPayableAmount != null
+          ? Number(breakdown.finalPayableAmount)
+          : escrowMeta.totalAfterCoupon != null
+            ? Number(escrowMeta.totalAfterCoupon)
+            : null;
+      if (finalPayableRaw != null && Number.isFinite(finalPayableRaw) && finalPayableRaw >= 0) {
+        order.total = finalPayableRaw;
+        if (breakdown?.gst != null && Number.isFinite(Number(breakdown.gst))) {
+          order.gst = Number(breakdown.gst);
+        }
+        if (breakdown?.taskAmount != null && Number.isFinite(Number(breakdown.taskAmount))) {
+          order.subtotal = Number(breakdown.taskAmount);
+        }
+      }
+
       await order.save();
 
       logger.info('Book Now booking checkout created (tasks deferred until payment)', {
         orderId,
         customerUid,
-        total: pricing.total,
+        total: order.total,
+        totalBeforeCoupon: order.totalBeforeCoupon ?? pricing.total,
+        couponCode: order.couponCode || undefined,
         itemCount: resolvedLinesWithSchedule.length,
       });
+
+      const rawOrder =
+        escrowResult.order && typeof escrowResult.order === 'object'
+          ? (escrowResult.order as Record<string, unknown>)
+          : null;
+      const razorpayOrder = rawOrder
+        ? {
+            ...rawOrder,
+            id: rawOrder.id,
+            amount: rawOrder.amount,
+            currency: rawOrder.currency || 'INR',
+            ...(typeof rawOrder.keyId === 'string' ? { keyId: rawOrder.keyId } : {}),
+          }
+        : escrowResult.order;
+
+      if (!razorpayOrder || typeof (razorpayOrder as { keyId?: string }).keyId !== 'string') {
+        logger.warn('Book Now razorpayOrder missing keyId — client may use divergent checkout key', {
+          orderId,
+          razorpayOrderId: (razorpayOrder as { id?: string } | null)?.id,
+        });
+      }
 
       return {
         order,
@@ -736,7 +786,7 @@ export class BookingService {
         task: null,
         tasks: [],
         escrow: escrowResult.escrow,
-        razorpayOrder: escrowResult.order,
+        razorpayOrder,
       };
     } catch (error) {
       await BookingOrder.findByIdAndDelete(order._id);
@@ -861,29 +911,7 @@ export class BookingService {
   }
 
   static async abandonUnpaidBooking(orderId: string, customerUid: string) {
-    const order = await BookingOrder.findOne({ orderId });
-    if (!order) throw new NotFoundError('Booking not found');
-    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
-    if (order.status !== 'awaiting_payment' || order.paidAt) {
-      return { order, abandoned: false };
-    }
-
-    const items = await BookingItem.find({ orderId });
-    for (const item of items) {
-      if (item.taskId) {
-        await Task.findByIdAndDelete(item.taskId);
-      }
-      await BookingItem.findByIdAndDelete(item._id);
-    }
-
-    order.status = 'cancelled';
-    order.cancelledAt = new Date();
-    order.cancellationReason = 'Payment not completed';
-    order.pendingLines = undefined;
-    await order.save();
-
-    logger.info('Abandoned unpaid Book Now checkout', { orderId, customerUid });
-    return { order, abandoned: true };
+    return abandonUnpaidBookingOrder(orderId, customerUid);
   }
 
   static async getSlotAvailability(date: string, city: string) {
@@ -1077,12 +1105,195 @@ export class BookingService {
     return { success: true, order, tasks };
   }
 
+  /** Detect Hourly Helper order from items / pending lines / linked tasks. */
+  static async isHourlyBookingOrder(orderId: string): Promise<boolean> {
+    const order = await BookingOrder.findOne({ orderId }).select('pendingLines').lean();
+    if (!order) return false;
+    const items = await BookingItem.find({ orderId }).select('skuSnapshot taskId').lean();
+    const taskIds = items.map((i) => i.taskId).filter(Boolean);
+    const tasks = taskIds.length
+      ? await Task.find({ _id: { $in: taskIds } })
+          .select('categorySlug budget.type')
+          .lean()
+      : [];
+
+    return isHourlyBookingFromHints([
+      ...items.map((item) => ({
+        categorySlug: item.skuSnapshot?.categorySlug,
+        skuSlug: item.skuSnapshot?.slug,
+      })),
+      ...((order.pendingLines || []) as Array<Record<string, unknown>>).map((line) => ({
+        categorySlug: (line.categorySlug as string) || undefined,
+        skuSlug: (line.skuSlug as string) || (line.packageId as string) || undefined,
+        pricingUnit: (line.pricingUnit as string) || undefined,
+      })),
+      ...tasks.map((task) => ({
+        categorySlug: task.categorySlug,
+        pricingUnit: task.budget?.type,
+      })),
+    ]);
+  }
+
+  /**
+   * Hourly Helper cancel — evaluate fees, execute CancellationSettlement via payment,
+   * then persist snapshot and cancel booking/tasks.
+   */
+  static async cancelHourlyBookingOrder(
+    orderId: string,
+    customerUid: string,
+    reason?: string,
+  ): Promise<{
+    order: Awaited<ReturnType<typeof BookingOrder.findOne>>;
+    items: Awaited<ReturnType<typeof BookingItem.find>>;
+    hourlyCancellation: HourlyCancellationOrchestratorResult;
+    settlementPending: boolean;
+  }> {
+    const hourlyCancellation = await cancelHourlyBooking({
+      orderId,
+      actorUid: customerUid,
+      cancelledBy: 'CUSTOMER',
+    });
+
+    if (
+      hourlyCancellation.outcome === 'EVALUATED' &&
+      hourlyCancellation.result?.status === 'DENIED'
+    ) {
+      throw new BadRequestError(
+        hourlyCancellation.result.reason || 'Cannot cancel this booking',
+        hourlyCancellation.result.reasonCode,
+      );
+    }
+
+    if (hourlyCancellation.outcome === 'UNPAID_ABANDONED') {
+      const order = await BookingOrder.findOne({ orderId });
+      if (!order) throw new NotFoundError('Booking not found');
+      const items = await BookingItem.find({ orderId });
+      return {
+        order,
+        items,
+        hourlyCancellation,
+        settlementPending: false,
+      };
+    }
+
+    if (hourlyCancellation.outcome === 'IDEMPOTENT') {
+      const order = await BookingOrder.findOne({ orderId });
+      if (!order) throw new NotFoundError('Booking not found');
+      const items = await BookingItem.find({ orderId });
+      return {
+        order,
+        items,
+        hourlyCancellation,
+        settlementPending: false,
+      };
+    }
+
+    const result = hourlyCancellation.result;
+    if (!result || result.status !== 'ALLOWED') {
+      throw new BadRequestError('Hourly cancellation could not be evaluated');
+    }
+
+    const order = await BookingOrder.findOne({ orderId });
+    if (!order) throw new NotFoundError('Booking not found');
+    const items = await BookingItem.find({ orderId });
+    const taskIds = items.map((i) => i.taskId).filter(Boolean);
+    const tasks = taskIds.length
+      ? await Task.find({ _id: { $in: taskIds } })
+      : [];
+    const primaryTask = tasks[0];
+    const primaryItem = items.find((i) => i.status !== 'cancelled') || items[0];
+
+    const taskStartDate = (
+      primaryTask?.scheduledDate ||
+      primaryItem?.scheduledDate ||
+      order.scheduledDate ||
+      order.createdAt
+    ).toISOString();
+    const assignedAtIso = primaryTask?.assignedAt
+      ? new Date(primaryTask.assignedAt).toISOString()
+      : null;
+
+    const cancelReason =
+      reason || result.reason || 'Hourly Helper cancelled by customer';
+
+    // Payment first — settlement only, no fee recalculation.
+    if (order.paidAt) {
+      const payResult = await PaymentClient.cancelHourlyWithSettlement({
+        bookingOrderId: orderId,
+        escrowId: order.paymentEscrowId || undefined,
+        taskId: primaryTask ? String(primaryTask._id) : undefined,
+        reason: cancelReason,
+        userId: customerUid,
+        cancelledBy: 'poster',
+        taskStartDate,
+        assignedAt: assignedAtIso,
+        settlement: result.settlement,
+      });
+      if (!payResult.success) {
+        throw new BadRequestError(
+          payResult.error || 'Failed to settle hourly cancellation payment',
+          'HOURLY_SETTLEMENT_FAILED',
+        );
+      }
+    }
+
+    const evaluatedAt = new Date();
+    order.cancellationResult = {
+      ...result,
+      evaluatedAt: evaluatedAt.toISOString(),
+      cancelledBy: 'CUSTOMER',
+    };
+    order.status = order.paidAt ? 'refunded' : 'cancelled';
+    order.cancelledAt = evaluatedAt;
+    order.cancellationReason = cancelReason;
+
+    for (const task of tasks) {
+      if (task.status === 'cancelled') continue;
+      task.status = 'cancelled';
+      task.cancelledAt = evaluatedAt;
+      task.cancellationReason = cancelReason;
+      await task.save();
+    }
+
+    for (const item of items) {
+      if (item.status === 'cancelled') continue;
+      item.status = 'cancelled';
+      item.cancelledAt = evaluatedAt;
+      item.cancellationReason = cancelReason;
+      await item.save();
+    }
+
+    await order.save();
+
+    logger.info('Hourly cancellation settled and finalized', {
+      orderId,
+      reasonCode: result.reasonCode,
+      refundAmountPaise: result.settlement.refundAmountPaise,
+      workerCompensationPaise: result.settlement.workerCompensationPaise,
+    });
+
+    return {
+      order,
+      items,
+      hourlyCancellation: {
+        ...hourlyCancellation,
+        bookingStatus: order.status,
+      },
+      settlementPending: false,
+    };
+  }
+
   static async cancelBookingItem(
     orderId: string,
     taskId: string,
     customerUid: string,
     reason?: string,
   ) {
+    // Hourly Helper is a single-visit order — cancel the whole booking.
+    if (await BookingService.isHourlyBookingOrder(orderId)) {
+      return BookingService.cancelHourlyBookingOrder(orderId, customerUid, reason);
+    }
+
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
@@ -1177,6 +1388,10 @@ export class BookingService {
   }
 
   static async cancelBooking(orderId: string, customerUid: string, reason?: string) {
+    if (await BookingService.isHourlyBookingOrder(orderId)) {
+      return BookingService.cancelHourlyBookingOrder(orderId, customerUid, reason);
+    }
+
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');

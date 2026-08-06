@@ -22,6 +22,10 @@ export const BOOK_NOW_CATALOG_LABELS: Record<string, string> = {
   'window-glass': 'Window & Glass Cleaning',
   'ac-services': 'AC Services',
   'appliance-repair': 'Appliance Repair',
+  'painting-interior': 'Interior Painting',
+  'painting-exterior': 'Exterior Painting',
+  'painting-rental': 'Rental Painting',
+  'painting-waterproofing': 'Waterproofing',
   'hourly-helper': 'Hourly Helper',
 };
 
@@ -34,6 +38,10 @@ export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
   'window-glass': 'cleaning',
   'ac-services': 'repair',
   'appliance-repair': 'repair',
+  'painting-interior': 'other',
+  'painting-exterior': 'other',
+  'painting-rental': 'other',
+  'painting-waterproofing': 'other',
   /** Hourly Helper is general help — maps to Task enum `other` (not a catalog slug). */
   'hourly-helper': 'other',
 };

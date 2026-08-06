@@ -2,7 +2,7 @@ import { Response } from 'express';
 import mongoose from 'mongoose';
 import Task from '../models/Task';
 import { AuthenticatedRequest } from '../types';
-import { BadRequestError, NotFoundError } from '../errors/AppError';
+import { BadRequestError, ForbiddenError, NotFoundError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { getRedisClient } from '../config/redis';
 
@@ -21,10 +21,24 @@ export class PartnerLocationController {
       throw new BadRequestError('Invalid task ID');
     }
 
-    // Look up task to resolve its assigned partner's profileId
-    const task = await Task.findById(id).select('partnerId assigneeId status').lean();
+    const requesterProfileId = req.user?.profileId?.toString() ?? null;
+    if (!requesterProfileId) {
+      throw new ForbiddenError('Profile context required');
+    }
+
+    // Look up task to resolve its assigned partner's profileId and verify access.
+    const task = await Task.findById(id).select('requesterId partnerId assigneeId status').lean();
     if (!task) {
       throw new NotFoundError('Task not found');
+    }
+
+    const allowedProfileIds = [
+      task.requesterId?.toString(),
+      task.partnerId?.toString(),
+      task.assigneeId?.toString(),
+    ].filter(Boolean);
+    if (!allowedProfileIds.includes(requesterProfileId)) {
+      throw new ForbiddenError('Not authorized to view partner location');
     }
 
     // Prefer partnerId (Book Now flow); fall back to assigneeId (marketplace flow)
