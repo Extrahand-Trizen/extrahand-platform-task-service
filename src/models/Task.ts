@@ -257,7 +257,6 @@ export interface ITask extends Document {
     /** Short-lived plaintext for poster Work Progress display only; never returned on public getTask. */
     codePlain?: string;
     requestedAt: Date;
-    expiresAt: Date;
     verifiedAt?: Date;
     attempts: number;
     resendCount: number;
@@ -733,7 +732,6 @@ const TaskSchema = new Schema<ITask>(
       codeHash: String,
       codePlain: String,
       requestedAt: Date,
-      expiresAt: Date,
       verifiedAt: Date,
       attempts: { type: Number, default: 0 },
       resendCount: { type: Number, default: 0 },

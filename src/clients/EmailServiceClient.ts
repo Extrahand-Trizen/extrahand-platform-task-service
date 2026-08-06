@@ -386,7 +386,6 @@ export class EmailServiceClient {
     taskerName: string;
     taskTitle: string;
     otp: string;
-    expiresAt?: string;
     taskUrl?: string;
     platformName?: string;
     userId?: string;

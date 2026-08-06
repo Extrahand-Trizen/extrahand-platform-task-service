@@ -52,7 +52,7 @@
     "USER_SERVICE_URL": "http://srv-captain--extrahand-user-service:4001",
     "MESSAGING_SERVICE_URL": "http://srv-captain--extrahand-messaging-service:4006",
     "MAIN_ADMIN_SERVICE_URL": "http://srv-captain--extrahand-main-admin-service:4007",
-    "PAYMENT_SERVICE_URL": "https://extrahand-payment-service.apps.extrahand.in"
+    "PAYMENT_SERVICE_URL": "https://payment-service-test.backend.extrahand.in"
   },
   "volumes": [
     {

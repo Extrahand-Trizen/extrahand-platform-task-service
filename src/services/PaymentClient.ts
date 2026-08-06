@@ -14,6 +14,10 @@ export class PaymentClient {
     const env = validateEnv();
     this.baseURL = env.PAYMENT_SERVICE_URL || 'http://localhost:4003';
     this.serviceAuthToken = env.SERVICE_AUTH_TOKEN || '';
+    logger.info(`[PaymentClient] initialized with PAYMENT_SERVICE_URL = ${this.baseURL}`, {
+      paymentServiceUrl: this.baseURL,
+      serviceAuthConfigured: !!this.serviceAuthToken,
+    });
   }
 
   /**

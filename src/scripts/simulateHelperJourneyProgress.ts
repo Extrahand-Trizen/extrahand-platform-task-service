@@ -304,7 +304,7 @@ async function main() {
     console.log(`   executionPhase: ${otpPayload?.executionPhase}`);
     console.log('Open Work Progress in the customer app and refresh the screen.');
   } else {
-    console.log('\n⚠️ No OTP in response. Check status/phase/expiry above.');
+    console.log('\n⚠️ No OTP in response. Check status/phase above.');
   }
   }
 
@@ -318,7 +318,6 @@ async function main() {
     startedAt: after?.startedAt || null,
     reviewAt: after?.reviewAt || null,
     proofCount: Array.isArray(after?.completionProof) ? after.completionProof.length : 0,
-    otpExpiresAt: after?.startOtp?.expiresAt || null,
     hasCodePlain: Boolean(after?.startOtp?.codePlain),
   });
 }
