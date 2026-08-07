@@ -3112,7 +3112,12 @@ export class TaskService {
       throw new ForbiddenError("Only assigned performer can verify start OTP");
     }
 
-    if (workTask.status !== "assigned") {
+    const currentStatus = String(workTask.status || "").toLowerCase();
+    if (currentStatus === "started" || currentStatus === "in_progress") {
+      return workTask;
+    }
+
+    if (currentStatus !== "assigned") {
       throw new BadRequestError("Task is not in assigned state");
     }
 

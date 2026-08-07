@@ -1,92 +1,19 @@
 import { Server as SocketIOServer, Socket } from "socket.io";
+import Task from "../models/Task";
 import logger from "../config/logger";
 import { socketAuthMiddleware } from "../middleware/socketAuth";
-import { getRedisClient, REDIS_TTLS } from "../config/redis";
-import Task from "../models/Task";
-import TaskLiveLocation from "../models/TaskLiveLocation";
+import { processPartnerLocationUpdate } from "../services/PartnerLocationService";
+import {
+  getTaskSocketServer,
+  setTaskSocketServer,
+} from "./taskSocketEmitter";
 
 // Store io instance globally for use in services
-export let io: SocketIOServer;
-
-const LOCATION_DB_WRITE_INTERVAL_MS = 10000;
-const LOCATION_DB_WRITE_DISTANCE_METERS = 50;
-
-type LastPersistedLocation = {
-  lat: number;
-  lng: number;
-  persistedAt: number;
-};
-
-const lastPersistedLocationByTask = new Map<string, LastPersistedLocation>();
-
-function toRadians(value: number): number {
-  return (value * Math.PI) / 180;
-}
-
-function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
-  const earthRadiusMeters = 6371000;
-  const dLat = toRadians(b.lat - a.lat);
-  const dLng = toRadians(b.lng - a.lng);
-  const lat1 = toRadians(a.lat);
-  const lat2 = toRadians(b.lat);
-
-  const haversine =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-
-  return 2 * earthRadiusMeters * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
-}
-
-function isValidCoordinate(lat: number, lng: number): boolean {
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return false;
-  return !(Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001);
-}
-
-async function persistPartnerLocationSnapshot(params: {
-  taskId: string;
-  partnerId: string;
-  lat: number;
-  lng: number;
-  timestamp: number;
-}): Promise<void> {
-  const cacheKey = `${params.taskId}:${params.partnerId}`;
-  const previous = lastPersistedLocationByTask.get(cacheKey);
-  const movedEnough = previous
-    ? distanceMeters(previous, { lat: params.lat, lng: params.lng }) >= LOCATION_DB_WRITE_DISTANCE_METERS
-    : true;
-  const waitedEnough = previous
-    ? Date.now() - previous.persistedAt >= LOCATION_DB_WRITE_INTERVAL_MS
-    : true;
-
-  if (!movedEnough && !waitedEnough) {
-    return;
-  }
-
-  await TaskLiveLocation.updateOne(
-    { taskId: params.taskId },
-    {
-      $set: {
-        taskId: params.taskId,
-        partnerId: params.partnerId,
-        lat: params.lat,
-        lng: params.lng,
-        source: "socket",
-        recordedAt: new Date(params.timestamp),
-      },
-    },
-    { upsert: true },
-  );
-
-  lastPersistedLocationByTask.set(cacheKey, {
-    lat: params.lat,
-    lng: params.lng,
-    persistedAt: Date.now(),
-  });
-}
+export { emitPartnerLocation } from "./taskSocketEmitter";
 
 export function initializeSocketHandlers(ioServer: SocketIOServer) {
-  io = ioServer;
+  setTaskSocketServer(ioServer);
+  const io = ioServer;
 
   // Apply authentication middleware
   io.use(socketAuthMiddleware);
@@ -94,7 +21,6 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
   // Connection handler
   io.on("connection", (socket: Socket) => {
     const profileId = (socket as any).profileId;
-    const locationUpdateSeen = new Set<string>();
     logger.info(`🔌 User connected to task service: ${profileId} (${socket.id})`);
 
     // Task room subscription
@@ -167,113 +93,16 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
     });
 
     // Partner live location update — broadcast to task room subscribers
+    // (shared pipeline also used by POST /api/v1/tasks/:id/helper-location).
     socket.on("partner:location-update", async (data: unknown) => {
       try {
-        // Identity comes from socket auth — never trust payload fields for identity
         const profileId = (socket as any).profileId as string;
-
-        // --- Payload validation ---
-        if (
-          !data ||
-          typeof data !== "object" ||
-          typeof (data as any).taskId !== "string" ||
-          typeof (data as any).lat !== "number" ||
-          typeof (data as any).lng !== "number" ||
-          typeof (data as any).timestamp !== "number"
-        ) {
-          logger.warn(`⚠️  partner:location-update rejected — invalid payload from profile: ${profileId}`);
-          return;
-        }
-
-        const { taskId, lat, lng, timestamp } = data as {
-          taskId: string;
-          lat: number;
-          lng: number;
-          timestamp: number;
-        };
-
-        if (!isValidCoordinate(lat, lng) || !Number.isFinite(timestamp)) {
-          logger.warn(`⚠️  partner:location-update rejected — invalid coordinates from profile: ${profileId}`);
-          return;
-        }
-
-        // --- Task existence check ---
-        const task = await Task.findById(taskId).select("partnerId assigneeId status").lean();
-        if (!task) {
-          logger.warn(`⚠️  partner:location-update rejected — task ${taskId} not found (profile: ${profileId})`);
-          return;
-        }
-
-        // --- Partner ownership check ---
-        // Accept if profileId matches either partnerId (Book Now flow) or assigneeId (marketplace flow)
-        const taskPartnerId = task.partnerId?.toString() ?? null;
-        const taskAssigneeId = task.assigneeId?.toString() ?? null;
-        if (taskPartnerId !== profileId && taskAssigneeId !== profileId) {
-          logger.warn(
-            `🚫 partner:location-update rejected — profile ${profileId} is not assigned to task ${taskId}`
-          );
-          return;
-        }
-
-        // --- Active status gate ---
-        const activeStatuses = ["assigned", "started", "in_progress"];
-        if (!activeStatuses.includes(task.status)) {
-          logger.warn(
-            `⚠️  partner:location-update ignored — task ${taskId} is in status "${task.status}" (profile: ${profileId})`
-          );
-          return;
-        }
-
-        // --- Redis store (best-effort — app keeps working if Redis is down) ---
-        const redis = getRedisClient();
-        if (!redis) {
-          logger.warn(
-            `⚠️  partner:location-update — Redis not available, skipping cache for profile: ${profileId}`,
-          );
-        } else {
-          const key = `partner:location:${profileId}`;
-          const taskKey = `task:partner-location:${taskId}`;
-          const value = JSON.stringify({ taskId, lat, lng, timestamp });
-
-          if (!locationUpdateSeen.has(key)) {
-            logger.info(`Redis SET starting for key: ${key}`);
-          }
-          logger.debug(`Redis payload for ${key}: ${value}`);
-
-          await redis.set(key, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
-          await redis.set(taskKey, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
-
-          if (!locationUpdateSeen.has(key)) {
-            logger.info(`Redis SET completed for key: ${key}`);
-            locationUpdateSeen.add(key);
-          }
-
-          const stored = await redis.get(key);
-          const ttl = await redis.ttl(key);
-
-          logger.debug(`Redis GET for ${key}: ${stored}`);
-          logger.debug(`Redis TTL for ${key}: ${ttl}`);
-        }
-
-        void persistPartnerLocationSnapshot({
-          taskId,
-          partnerId: profileId,
-          lat,
-          lng,
-          timestamp,
-        }).catch((err) => {
-          logger.warn("Partner location snapshot persistence failed", {
-            taskId,
-            partnerId: profileId,
-            error: err instanceof Error ? err.message : String(err),
+        const result = await processPartnerLocationUpdate(profileId, data as any);
+        if (!result.ok) {
+          logger.warn("partner:location-update rejected", {
+            profileId,
+            reason: result.reason,
           });
-        });
-
-        // --- Fan-out to task room ---
-        io.to(`task:${taskId}`).emit("partner:location", { lat, lng, timestamp });
-        if (!locationUpdateSeen.has(`task:${taskId}`)) {
-          logger.info(`📍 partner:location-update — profile ${profileId} → task:${taskId} [${lat}, ${lng}]`);
-          locationUpdateSeen.add(`task:${taskId}`);
         }
       } catch (err) {
         logger.error(`❌ partner:location-update error (profile: ${(socket as any).profileId}):`, err);
@@ -303,6 +132,7 @@ export function emitBookNowLeadRemoved(
   category: string,
   acceptedByProfileId?: string,
 ): void {
+  const io = getTaskSocketServer();
   if (!io) {
     logger.error('Socket.IO not initialized');
     return;
@@ -322,6 +152,7 @@ export function emitBookNowLeadRemoved(
 
 // Helper function to emit task status change
 export function emitTaskStatusChanged(taskId: string, task: any) {
+  const io = getTaskSocketServer();
   if (!io) {
     logger.error("Socket.IO not initialized");
     return;
@@ -333,6 +164,7 @@ export function emitTaskStatusChanged(taskId: string, task: any) {
 
 // Helper function to emit completion proof submitted
 export function emitProofSubmitted(taskId: string, data: any) {
+  const io = getTaskSocketServer();
   if (!io) {
     logger.error("Socket.IO not initialized");
     return;
@@ -344,6 +176,7 @@ export function emitProofSubmitted(taskId: string, data: any) {
 
 // Helper function to emit completion proof approved
 export function emitProofApproved(taskId: string, data: any) {
+  const io = getTaskSocketServer();
   if (!io) {
     logger.error("Socket.IO not initialized");
     return;
@@ -355,6 +188,7 @@ export function emitProofApproved(taskId: string, data: any) {
 
 // Helper function to emit completion proof rejected
 export function emitProofRejected(taskId: string, data: any) {
+  const io = getTaskSocketServer();
   if (!io) {
     logger.error("Socket.IO not initialized");
     return;
@@ -366,6 +200,7 @@ export function emitProofRejected(taskId: string, data: any) {
 
 // Helper function to emit task assigned
 export function emitTaskAssigned(taskId: string, task: any) {
+  const io = getTaskSocketServer();
   if (!io) {
     logger.error("Socket.IO not initialized");
     return;

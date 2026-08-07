@@ -6,6 +6,8 @@ import { AuthenticatedRequest } from '../types';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { getRedisClient } from '../config/redis';
+import { processPartnerLocationUpdate } from '../services/PartnerLocationService';
+import logger from '../config/logger';
 
 const PARTNER_LOCATION_STALE_AFTER_MS = 2 * 60 * 1000;
 
@@ -43,6 +45,60 @@ function buildLocationResponse(params: {
 
 export class PartnerLocationController {
   /**
+   * POST /api/v1/tasks/:id/helper-location
+   *
+   * REST fallback for the helper's live location updates (used when the app is
+   * backgrounded and the socket channel is unavailable). Shares the same
+   * pipeline as the Socket.IO `partner:location-update` event:
+   * validation → ownership check → active-status gate → Redis cache → Socket.IO
+   * fan-out to the customer's task room.
+   *
+   * Identity comes from the gateway-verified X-User-Id / X-Profile-Id headers
+   * (authMiddleware) — never from the payload.
+   */
+  static async postHelperLocation(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const profileId = req.user?.profileId?.toString() ?? null;
+
+    if (!profileId) {
+      throw new BadRequestError('Profile identity missing — authentication required');
+    }
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw new BadRequestError('Invalid task ID');
+    }
+
+    const { lat, lng, timestamp, forcePersist } = (req.body ?? {}) as {
+      lat?: unknown;
+      lng?: unknown;
+      timestamp?: unknown;
+      forcePersist?: unknown;
+    };
+
+    const result = await processPartnerLocationUpdate(profileId, {
+      taskId: id,
+      lat: typeof lat === 'number' ? lat : NaN,
+      lng: typeof lng === 'number' ? lng : NaN,
+      timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+      forcePersist: forcePersist === true,
+    });
+
+    if (result.ok) {
+      ApiResponse.success(res, { taskId: id, lat, lng, timestamp }, 'Helper location recorded');
+      return;
+    }
+    if (result.reason === 'task-not-found') {
+      throw new NotFoundError('Task not found');
+    }
+    if (result.reason === 'not-assigned') {
+      throw new BadRequestError('Helper is not assigned to this task');
+    }
+    if (result.reason === 'inactive-status') {
+      throw new BadRequestError('Task is not in an active tracking status');
+    }
+    throw new BadRequestError('Invalid location payload');
+  }
+
+  /**
    * GET /api/v1/tasks/:id/partner-location
    *
    * Returns the last known location of the partner assigned to the given task.
@@ -79,6 +135,10 @@ export class PartnerLocationController {
     // Prefer partnerId (Book Now flow); fall back to assigneeId (marketplace flow)
     const partnerId = task.partnerId?.toString() ?? task.assigneeId?.toString() ?? null;
     if (!partnerId) {
+      logger.warn('Partner location lookup missed — task has no assigned partner', {
+        taskId: id,
+        requesterProfileId,
+      });
       throw new NotFoundError('Partner location not available');
     }
 
@@ -108,6 +168,10 @@ export class PartnerLocationController {
           }),
           'Partner location retrieved',
         );
+        logger.info('Partner location lookup hit Redis', {
+          taskId: id,
+          partnerId,
+        });
         return;
       }
     }
@@ -117,6 +181,11 @@ export class PartnerLocationController {
       .lean();
 
     if (!stored) {
+      logger.warn('Partner location lookup missed — no Redis/DB snapshot', {
+        taskId: id,
+        partnerId,
+        redisReady: Boolean(redis),
+      });
       throw new NotFoundError('Partner location not available');
     }
 
@@ -132,5 +201,9 @@ export class PartnerLocationController {
       }),
       'Partner location retrieved',
     );
+    logger.info('Partner location lookup hit database', {
+      taskId: id,
+      partnerId,
+    });
   }
 }

@@ -7,6 +7,10 @@ function cdnImage(name: string): string {
   return `${CDN_IMAGE_BASE}/${name}.webp`;
 }
 
+function uploadedCategoryImage(fileName: string): string {
+  return `${CDN_IMAGE_BASE}/${encodeURIComponent(fileName)}`;
+}
+
 function slugify(value: string): string {
   return String(value || '')
     .normalize('NFKD')
@@ -16,6 +20,19 @@ function slugify(value: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .replace(/-{2,}/g, '-');
+}
+
+function imageIdentity(value: string): string {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '')
+    .replace(/&/g, ' and ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function carpentryPackageImageFileName(packageName: string): string {
+  return `${String(packageName || '').replace(/\//g, '').trim()}.png`;
 }
 
 function parseCsv(text: string): string[][] {
@@ -115,7 +132,11 @@ function parseDurationMinutes(label: string): number {
       ? Number(single[1])
       : 0;
 
-  if (normalized.includes('hr')) {
+  if (normalized.includes('day')) {
+    return Math.max(15, Math.round(base * 480));
+  }
+
+  if (normalized.includes('hr') || normalized.includes('hour')) {
     return Math.max(15, Math.round(base * 60));
   }
 
@@ -143,7 +164,352 @@ type RawSection = {
   items: CsvItem[];
 };
 
+type BeautyCsvItem = CsvItem & {
+  serviceLabel: string;
+};
+
 const PAINTING_PLACEHOLDER_IMAGE = cdnImage('general-home-cleaning');
+
+const PEST_CONTROL_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'pest-control-ant-control::ant-control-kitchen-only': [
+    uploadedCategoryImage('AntControl–KitchenOnly.png'),
+  ],
+  'pest-control-ant-control::ant-control-kitchen-1-bedroom': [
+    uploadedCategoryImage('AntControl–Kitchen+1Bedroom.png'),
+  ],
+  'pest-control-ant-control::ant-control-kitchen-2-bedrooms': [
+    uploadedCategoryImage('AntControl–Kitchen+2Bedrooms.png'),
+  ],
+  'pest-control-ant-control::ant-control-kitchen-3-bedrooms': [
+    uploadedCategoryImage('AntControl–Kitchen+3Bedrooms.png'),
+  ],
+  'pest-control-ant-control::ant-control-1-bhk': [
+    uploadedCategoryImage('AntControl–1BHK.png'),
+  ],
+  'pest-control-ant-control::ant-control-2-bhk': [
+    uploadedCategoryImage('AntControl–2BHK.png'),
+  ],
+  'pest-control-ant-control::ant-control-3-bhk-villa': [
+    uploadedCategoryImage('AntControl–3+BHKVilla.png'),
+  ],
+  'pest-control-bed-bug-control::bed-bug-control-1-bhk': [
+    uploadedCategoryImage('BedBugControl–1BHK.png'),
+  ],
+  'pest-control-bed-bug-control::bed-bug-control-2-bhk': [
+    uploadedCategoryImage('BedBugControl–2BHK.png'),
+  ],
+  'pest-control-bed-bug-control::bed-bug-control-3-bhk-villa': [
+    uploadedCategoryImage('BedBugControl–3+BHK-Villa.png'),
+  ],
+  'pest-control-cockroach-control::cockroach-control-kitchen-only': [
+    uploadedCategoryImage('CockroachControl–KitchenOnly.png'),
+  ],
+  'pest-control-cockroach-control::cockroach-control-kitchen-1-bedroom': [
+    uploadedCategoryImage('CockroachControl–Kitchen-1Bedroom.png'),
+  ],
+  'pest-control-cockroach-control::cockroach-control-kitchen-2-bedrooms': [
+    uploadedCategoryImage('CockroachControl–Kitchen-2Bedrooms.png'),
+  ],
+  'pest-control-cockroach-control::cockroach-control-kitchen-3-bedrooms': [
+    uploadedCategoryImage('CockroachControl–Kitchen-3Bedrooms.png'),
+  ],
+  'pest-control-cockroach-control::cockroach-control-1-bhk': [
+    uploadedCategoryImage('CockroachControl–1BHK.png'),
+  ],
+  'pest-control-cockroach-control::cockroach-control-2-bhk': [
+    uploadedCategoryImage('CockroachControl–2BHK.png'),
+  ],
+  'pest-control-cockroach-control::cockroach-control-3-bhk-villa': [
+    uploadedCategoryImage('CockroachControl–3+BHK-Villa.png'),
+  ],
+};
+
+const ELECTRICIAN_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'electrician-switch-and-socket::switch-and-socket-switch-replacement': [uploadedCategoryImage('Switch&Socket–SwitchReplacement.png')],
+  'electrician-switch-and-socket::switch-and-socket-socket-replacement': [uploadedCategoryImage('Switch&Socket–SocketReplacement.png')],
+  'electrician-switch-and-socket::switch-and-socket-2-pin-plug-replacement': [uploadedCategoryImage('Switch&Socket–2-PinPlugReplacement.png')],
+  'electrician-switch-and-socket::switch-and-socket-3-pin-plug-replacement': [uploadedCategoryImage('Switch&Socket–3-PinPlugReplacement.png')],
+  'electrician-switchboard::switchboard-repair': [uploadedCategoryImage('Switchboard–Repair.png')],
+  'electrician-switchboard::switchboard-replacement': [uploadedCategoryImage('Switchboard–Replacement.png')],
+  'electrician-switchboard::switchboard-installation': [uploadedCategoryImage('Switchboard–Installation.png')],
+  'electrician-switchboard::switchboard-ac-switchboard-installation': [uploadedCategoryImage('Switchboard–AC-SwitchboardInstallation.png')],
+  'electrician-fan::fan-repair': [uploadedCategoryImage('Fan–Repair.png')],
+  'electrician-fan::fan-regulator-replacement': [uploadedCategoryImage('Fan–RegulatorReplacement.png')],
+  'electrician-fan::fan-regular-ceiling-fan-installation': [uploadedCategoryImage('Fan–RegularCeilingFanInstallation.png')],
+  'electrician-fan::fan-wall-fan-installation': [uploadedCategoryImage('Fan–WallFanInstallation.png')],
+  'electrician-fan::fan-exhaust-fan-installation': [uploadedCategoryImage('Fan–ExhaustFanInstallation.png')],
+  'electrician-fan::fan-decorative-ceiling-fan-installation': [uploadedCategoryImage('Fan–DecorativeCeilingFanInstallation.png')],
+  'electrician-fan::fan-ceiling-fan-replacement': [uploadedCategoryImage('Fan–CeilingFanReplacement.png')],
+  'electrician-light::light-bulb-replacement': [uploadedCategoryImage('Light–BulbReplacement.png')],
+  'electrician-light::light-bulb-holder-installation': [uploadedCategoryImage('Light–BulbHolderInstallation.png')],
+  'electrician-light::light-tube-light-installation-replacement': [uploadedCategoryImage('Light–TubeLightInstallation-Replacement.png')],
+  'electrician-light::light-ceiling-panel-light-installation': [uploadedCategoryImage('Light–CeilingPanellightInstallation.png')],
+  'electrician-light::light-wall-light-installation': [uploadedCategoryImage('Light–WallLightInstallation.png')],
+  'electrician-light::light-fancy-light-installation': [uploadedCategoryImage('Light–FancyLightInstallation.png')],
+  'electrician-light::light-hanging-light-installation': [uploadedCategoryImage('Light–HangingLightInstallation.png')],
+  'electrician-wiring::wiring-internal-wiring-up-to-5-m': [uploadedCategoryImage('Wiring–InternalWiring(upto5m).png')],
+  'electrician-wiring::wiring-external-wiring-without-casing-up-to-5-m': [uploadedCategoryImage('Wiring–ExternalWiringwithoutCasing(upto5m).png')],
+  'electrician-wiring::wiring-external-wiring-with-casing-up-to-5-m': [uploadedCategoryImage('Wiring–ExternalWiringwithCasing(upto5m).png')],
+  'electrician-doorbell::doorbell-installation': [uploadedCategoryImage('Doorbell–Installation.png')],
+  'electrician-doorbell::doorbell-replacement': [uploadedCategoryImage('Doorbell – Replacement.png')],
+  'electrician-mcb-and-fuse::mcb-and-fuse-mcb-replacement-1-pole': [uploadedCategoryImage('MCB&Fuse–MCBReplacement(1Pole).png')],
+  'electrician-mcb-and-fuse::mcb-and-fuse-mcb-replacement-2-pole': [uploadedCategoryImage('MCB & Fuse – MCB Replacement (2 Pole).png')],
+  'electrician-mcb-and-fuse::mcb-and-fuse-mcb-replacement-4-pole': [uploadedCategoryImage('MCB & Fuse – MCB Replacement (4 Pole).png')],
+  'electrician-mcb-and-fuse::mcb-and-fuse-mcb-installation-1-pole': [uploadedCategoryImage('MCB & Fuse – MCB Installation (1 Pole).png')],
+  'electrician-mcb-and-fuse::mcb-and-fuse-mcb-installation-2-pole': [uploadedCategoryImage('MCB & Fuse – MCB Installation (2 Pole).png')],
+  'electrician-mcb-and-fuse::mcb-and-fuse-fuse-replacement': [uploadedCategoryImage('MCB & Fuse – Fuse Replacement.png')],
+  'electrician-submeter-installation::submeter-installation': [uploadedCategoryImage('Submeter Installation.png')],
+  'electrician-tv-installation::tv-installation-up-to-48-inches': [uploadedCategoryImage('TV Installation – Up to 48 inches.png')],
+  'electrician-tv-installation::tv-installation-above-48-inches': [uploadedCategoryImage('TV Installation – Above 48 inches.png')],
+  'electrician-tv-uninstallation::tv-uninstallation-up-to-48-inches': [uploadedCategoryImage('TV Uninstallation – Up to 48 inches.png')],
+  'electrician-tv-uninstallation::tv-uninstallation-above-48-inches': [uploadedCategoryImage('TV Uninstallation – Above 48 inches.png')],
+  'electrician-home-theatre-installation::home-theatre-installation': [uploadedCategoryImage('HomeTheatreInstallation.png')],
+  'electrician-soundbar-installation::soundbar-installation': [uploadedCategoryImage('Soundbar Installation.png')],
+  'electrician-inverter::inverter-checkup': [uploadedCategoryImage('Inverter – Checkup.png')],
+  'electrician-inverter::inverter-service': [uploadedCategoryImage('Inverter – Service.png')],
+  'electrician-inverter::inverter-fuse-replacement': [uploadedCategoryImage('Inverter – Fuse Replacement.png')],
+  'electrician-inverter::inverter-single-battery-installation': [uploadedCategoryImage('Inverter – Single Battery Installation.png')],
+  'electrician-inverter::inverter-double-battery-installation': [uploadedCategoryImage('Inverter – Double Battery Installation.png')],
+  'electrician-inverter::inverter-uninstallation': [uploadedCategoryImage('Inverter – Uninstallation.png')],
+  'electrician-stabilizer-installation::stabilizer-installation': [uploadedCategoryImage('Stabilizer Installation.png')],
+};
+
+const BEAUTY_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'womens-beauty::d-tan-face-and-neck': [uploadedCategoryImage('D-Tan – Face & Neck.png')],
+  'womens-beauty::gold-facial': [uploadedCategoryImage('Gold Facial.png')],
+  'womens-beauty::o3-shine-and-glow-facial': [uploadedCategoryImage('O3 Shine & Glow Facial.png')],
+  'womens-beauty::full-face-threading': [uploadedCategoryImage('Full Face Threading.png')],
+  'womens-beauty::half-leg-waxing': [uploadedCategoryImage('Half Leg Waxing.png')],
+  'womens-beauty::full-arms-waxing': [uploadedCategoryImage('Full Arms Waxing.png')],
+  'womens-beauty::basic-manicure': [uploadedCategoryImage('Basic Manicure.png')],
+  'womens-beauty::basic-pedicure': [uploadedCategoryImage('Basic Pedicure.png')],
+  'womens-hair::haircut': [uploadedCategoryImage('Haircut for women.png')],
+  'womens-hair::hair-trim': [uploadedCategoryImage('Hair Trim for women.png')],
+  'womens-hair::basic-hair-spa': [uploadedCategoryImage('Basic Hair Spafor women.png')],
+  'womens-hair::hair-color-application': [uploadedCategoryImage('Hair Color Application for womne.png')],
+  'mens-grooming::haircut': [uploadedCategoryImage('Haircut for men.png')],
+  'mens-grooming::beard-trim-and-styling': [uploadedCategoryImage('Beard Trim & Styling for men.png')],
+  'mens-grooming::clean-shave': [uploadedCategoryImage('Clean Shave for men.png')],
+  'mens-grooming::mens-facial': [uploadedCategoryImage('Men’s Facial.png')],
+  'mens-grooming::mens-d-tan-face-and-neck': [uploadedCategoryImage('Men’s D-Tan – Face & Neck.png')],
+  'mens-grooming::mens-manicure': [uploadedCategoryImage('Men’s Manicure.png')],
+  'mens-grooming::mens-pedicure': [uploadedCategoryImage('Men’s Pedicure.png')],
+  'massage::head-massage': [uploadedCategoryImage('Head Massage.png')],
+  'massage::foot-massage': [uploadedCategoryImage('Foot Massage.png')],
+  'massage::neck-and-shoulder-massage': [uploadedCategoryImage('Neck & Shoulder Massage.png')],
+  'massage::full-body-massage': [uploadedCategoryImage('Full Body Massage.png')],
+};
+
+const PAINTING_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'painting-interior::1-room-painting': [uploadedCategoryImage('1 Room Painting.png')],
+  'painting-interior::2-rooms-painting': [uploadedCategoryImage('2 Rooms Painting.png')],
+  'painting-interior::full-1-bhk-painting': [uploadedCategoryImage('Full 1 BHK Painting.png')],
+  'painting-interior::full-2-bhk-painting': [uploadedCategoryImage('Full 2 BHK Painting.png')],
+  'painting-interior::full-3-bhk-painting': [uploadedCategoryImage('Full 3 BHK Painting.png')],
+  'painting-interior::full-4-bhk-painting': [uploadedCategoryImage('Full 4 BHK Painting.png')],
+  'painting-exterior::balcony-small-exterior-area': [uploadedCategoryImage('Balcony  Small Exterior Area.png')],
+  'painting-exterior::exterior-wall-painting': [uploadedCategoryImage('Exterior Wall Painting.png')],
+  'painting-rental::1-bhk-rental-painting': [uploadedCategoryImage('1 BHK Rental Painting.png')],
+  'painting-rental::2-bhk-rental-painting': [uploadedCategoryImage('2 BHK Rental Painting.png')],
+  'painting-rental::3-bhk-rental-painting': [uploadedCategoryImage('3 BHK Rental Painting.png')],
+  'painting-waterproofing::wall-waterproofing': [uploadedCategoryImage('Wall Waterproofing.png')],
+  'painting-waterproofing::terrace-waterproofing': [uploadedCategoryImage('Terrace Waterproofing.png')],
+  'painting-waterproofing::bathroom-kitchen-grouting': [uploadedCategoryImage('Bathroom  Kitchen Grouting.png')],
+};
+
+const CARPENTRY_PACKAGE_IMAGE_MISSING_NAMES = new Set([
+  imageIdentity('Glass Floating Shelf Installation'),
+  imageIdentity('Sliding Wardrobe Assembly'),
+]);
+
+function resolveCarpentryPackageImageUrls(categorySlug: string, packageName?: string): string[] | null {
+  if (!categorySlug.startsWith('carpenter-') || !packageName) return null;
+  if (CARPENTRY_PACKAGE_IMAGE_MISSING_NAMES.has(imageIdentity(packageName))) return null;
+  return [uploadedCategoryImage(carpentryPackageImageFileName(packageName))];
+}
+
+const BOOK_NOW_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  ...PEST_CONTROL_PACKAGE_IMAGE_URLS,
+  ...ELECTRICIAN_PACKAGE_IMAGE_URLS,
+  ...BEAUTY_PACKAGE_IMAGE_URLS,
+  ...PAINTING_PACKAGE_IMAGE_URLS,
+};
+
+const BOOK_NOW_SERVICE_IMAGE_URLS: Record<string, string> = {
+  'electrician-switch-and-socket': uploadedCategoryImage('Switch&Socket–SwitchReplacement.png'),
+  'electrician-switchboard': uploadedCategoryImage('Switchboard–Repair.png'),
+  'electrician-fan': uploadedCategoryImage('Fan–Repair.png'),
+  'electrician-light': uploadedCategoryImage('Light–BulbReplacement.png'),
+  'electrician-wiring': uploadedCategoryImage('Wiring–InternalWiring(upto5m).png'),
+  'electrician-doorbell': uploadedCategoryImage('Doorbell–Installation.png'),
+  'electrician-mcb-and-fuse': uploadedCategoryImage('MCB&Fuse–MCBReplacement(1Pole).png'),
+  'electrician-submeter-installation': uploadedCategoryImage('Submeter Installation.png'),
+  'electrician-tv-installation': uploadedCategoryImage('TV Installation – Up to 48 inches.png'),
+  'electrician-tv-uninstallation': uploadedCategoryImage('TV Uninstallation – Up to 48 inches.png'),
+  'electrician-home-theatre-installation': uploadedCategoryImage('HomeTheatreInstallation.png'),
+  'electrician-soundbar-installation': uploadedCategoryImage('Soundbar Installation.png'),
+  'electrician-inverter': uploadedCategoryImage('Inverter – Checkup.png'),
+  'electrician-stabilizer-installation': uploadedCategoryImage('Stabilizer Installation.png'),
+  'womens-beauty': uploadedCategoryImage('Gold Facial.png'),
+  'womens-hair': uploadedCategoryImage('Haircut for women.png'),
+  'mens-grooming': uploadedCategoryImage('Haircut for men.png'),
+  massage: uploadedCategoryImage('Full Body Massage.png'),
+  'painting-interior': uploadedCategoryImage('1 Room Painting.png'),
+  'painting-exterior': uploadedCategoryImage('Exterior Wall Painting.png'),
+  'painting-rental': uploadedCategoryImage('1 BHK Rental Painting.png'),
+  'painting-waterproofing': uploadedCategoryImage('Wall Waterproofing.png'),
+  'carpenter-cupboard-drawer': uploadedCategoryImage('Cupboard Hinge Repair  Replacement.png'),
+  'carpenter-kitchen-fittings': uploadedCategoryImage('Cabinet Hinge Repair  Replacement.png'),
+  'carpenter-shelves-wall-decor': uploadedCategoryImage('Wooden Shelf Installation.png'),
+  'carpenter-door': uploadedCategoryImage('Wooden Door Minor Repair.png'),
+  'carpenter-windows-curtain': uploadedCategoryImage('Window Hinge Repair  Replacement.png'),
+  'carpenter-furniture-repair': uploadedCategoryImage('Bed Support Repair.png'),
+  'carpenter-furniture-assembly': uploadedCategoryImage('Single Bed Assembly.png'),
+  'carpenter-wardrobe': uploadedCategoryImage('Wardrobe Assembly – Single Door.png'),
+  'carpenter-clothes-hangers': uploadedCategoryImage('Ceiling-Mounted Clothes Hanger – Fixed.png'),
+};
+
+function resolveBookNowServiceImageUrl(categorySlug: string, fallbackImageUrl: string): string {
+  return BOOK_NOW_SERVICE_IMAGE_URLS[categorySlug] || fallbackImageUrl;
+}
+
+function resolveBookNowPackageImageUrls(
+  categorySlug: string,
+  skuSlug: string,
+  fallbackImageUrl: string,
+  packageName?: string,
+): string[] {
+  const carpentryImageUrls = resolveCarpentryPackageImageUrls(categorySlug, packageName);
+  if (carpentryImageUrls) return carpentryImageUrls;
+
+  return (
+    BOOK_NOW_PACKAGE_IMAGE_URLS[`${categorySlug}::${skuSlug}`] ||
+    (fallbackImageUrl ? [fallbackImageUrl] : [])
+  );
+}
+
+type DurationOverride = {
+  durationLabel: string;
+  durationMinutes: number;
+};
+
+let durationOverridesCache: Map<string, DurationOverride> | null = null;
+
+function normalizeKey(value: string): string {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '')
+    .replace(/[–—]/g, '-')
+    .replace(/['’]/g, '')
+    .replace(/&/g, ' and ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function buildOverrideKey(section: string, service: string): string {
+  return `${normalizeKey(section)}::${normalizeKey(service)}`;
+}
+
+function resolveDurationOverrideCsvPath(): string | null {
+  const candidates = [
+    path.resolve(process.cwd(), '../Booknow services and prices(New Durations).csv'),
+    path.resolve(process.cwd(), '../../Booknow services and prices(New Durations).csv'),
+    path.resolve(__dirname, '../../../Booknow services and prices(New Durations).csv'),
+    path.resolve(__dirname, '../../../../Booknow services and prices(New Durations).csv'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function loadDurationOverrides(): Map<string, DurationOverride> {
+  if (durationOverridesCache) return durationOverridesCache;
+
+  const overrides = new Map<string, DurationOverride>();
+  const csvPath = resolveDurationOverrideCsvPath();
+  if (!csvPath) {
+    durationOverridesCache = overrides;
+    return overrides;
+  }
+
+  const rows = parseCsv(fs.readFileSync(csvPath, 'utf8'));
+  let currentSection = '';
+
+  rows.forEach((row) => {
+    const first = String(row[0] || '').replace(/\u00a0/g, ' ').trim();
+    const second = String(row[1] || '').replace(/\u00a0/g, ' ').trim();
+    const third = String(row[2] || '').replace(/\u00a0/g, ' ').trim();
+    if (!first) return;
+
+    const normalizedFirst = normalizeKey(first);
+    const normalizedSecond = normalizeKey(second);
+    if (
+      normalizedFirst === 'service' ||
+      normalizedFirst === 'category' ||
+      normalizedFirst === 'main category'
+    ) {
+      return;
+    }
+
+    if (!second && !third) {
+      currentSection = first;
+      return;
+    }
+
+    const serviceName = third ? second : first;
+    const categoryName = third ? second ? first : currentSection : currentSection;
+    const durationLabel = third || second;
+    if (!serviceName || !durationLabel || normalizeKey(durationLabel) === 'new duration') {
+      return;
+    }
+
+    const override = {
+      durationLabel,
+      durationMinutes: parseDurationMinutes(durationLabel),
+    };
+    overrides.set(buildOverrideKey(currentSection, serviceName), override);
+    if (categoryName) {
+      overrides.set(buildOverrideKey(categoryName, serviceName), override);
+    }
+    if (!overrides.has(buildOverrideKey('', serviceName))) {
+      overrides.set(buildOverrideKey('', serviceName), override);
+    }
+
+    if (!normalizedSecond && !third) {
+      currentSection = first;
+    }
+  });
+
+  durationOverridesCache = overrides;
+  return overrides;
+}
+
+function applyDurationOverride(
+  item: CsvItem,
+  sectionTitle: string,
+  serviceLabel?: string,
+): CsvItem {
+  const overrides = loadDurationOverrides();
+  const override =
+    overrides.get(buildOverrideKey(serviceLabel || '', item.name)) ||
+    overrides.get(buildOverrideKey(sectionTitle, item.name)) ||
+    overrides.get(buildOverrideKey('', item.name));
+
+  if (!override) return item;
+
+  return {
+    ...item,
+    durationLabel: override.durationLabel,
+    durationMinutes: override.durationMinutes,
+  };
+}
 
 const PAINTING_SERVICE_SEEDS: Array<{
   serviceId: string;
@@ -157,50 +523,50 @@ const PAINTING_SERVICE_SEEDS: Array<{
     serviceId: 'interior-painting',
     label: 'Interior Painting',
     categorySlug: 'painting-interior',
-    imageUrl: PAINTING_PLACEHOLDER_IMAGE,
+    imageUrl: resolveBookNowServiceImageUrl('painting-interior', PAINTING_PLACEHOLDER_IMAGE),
     serviceSortOrder: 1,
     packages: [
       { name: '1 Room Painting', offerPrice: 4999, originalPrice: 5999, durationLabel: '1 Day', durationMinutes: 480 },
-      { name: '2 Rooms Painting', offerPrice: 8999, originalPrice: 10999, durationLabel: '1-2 Days', durationMinutes: 720 },
-      { name: 'Full 1 BHK Painting', offerPrice: 8999, originalPrice: 10999, durationLabel: '1-2 Days', durationMinutes: 720 },
+      { name: '2 Rooms Painting', offerPrice: 8999, originalPrice: 10999, durationLabel: '2 Days', durationMinutes: 960 },
+      { name: 'Full 1 BHK Painting', offerPrice: 8999, originalPrice: 10999, durationLabel: '2 Days', durationMinutes: 960 },
       { name: 'Full 2 BHK Painting', offerPrice: 11999, originalPrice: 14999, durationLabel: '2 Days', durationMinutes: 960 },
-      { name: 'Full 3 BHK Painting', offerPrice: 15999, originalPrice: 19999, durationLabel: '2-3 Days', durationMinutes: 1200 },
-      { name: 'Full 4 BHK Painting', offerPrice: 19999, originalPrice: 24999, durationLabel: '3-4 Days', durationMinutes: 1680 },
+      { name: 'Full 3 BHK Painting', offerPrice: 15999, originalPrice: 19999, durationLabel: '3 Days', durationMinutes: 1440 },
+      { name: 'Full 4 BHK Painting', offerPrice: 19999, originalPrice: 24999, durationLabel: '4 Days', durationMinutes: 1920 },
     ],
   },
   {
     serviceId: 'exterior-painting',
     label: 'Exterior Painting',
     categorySlug: 'painting-exterior',
-    imageUrl: PAINTING_PLACEHOLDER_IMAGE,
+    imageUrl: resolveBookNowServiceImageUrl('painting-exterior', PAINTING_PLACEHOLDER_IMAGE),
     serviceSortOrder: 2,
     packages: [
       { name: 'Balcony / Small Exterior Area', offerPrice: 2999, originalPrice: 3999, durationLabel: '1 Day', durationMinutes: 480 },
-      { name: 'Exterior Wall Painting', offerPrice: 4999, originalPrice: 6499, durationLabel: '1-2 Days', durationMinutes: 720 },
+      { name: 'Exterior Wall Painting', offerPrice: 4999, originalPrice: 6499, durationLabel: '2 Days', durationMinutes: 960 },
     ],
   },
   {
     serviceId: 'rental-painting',
     label: 'Rental Painting',
     categorySlug: 'painting-rental',
-    imageUrl: PAINTING_PLACEHOLDER_IMAGE,
+    imageUrl: resolveBookNowServiceImageUrl('painting-rental', PAINTING_PLACEHOLDER_IMAGE),
     serviceSortOrder: 3,
     packages: [
-      { name: '1 BHK Rental Painting', offerPrice: 8999, originalPrice: 10999, durationLabel: '1-2 Days', durationMinutes: 720 },
+      { name: '1 BHK Rental Painting', offerPrice: 8999, originalPrice: 10999, durationLabel: '2 Days', durationMinutes: 960 },
       { name: '2 BHK Rental Painting', offerPrice: 11999, originalPrice: 14999, durationLabel: '2 Days', durationMinutes: 960 },
-      { name: '3 BHK Rental Painting', offerPrice: 15999, originalPrice: 19999, durationLabel: '2-3 Days', durationMinutes: 1200 },
+      { name: '3 BHK Rental Painting', offerPrice: 15999, originalPrice: 19999, durationLabel: '3 Days', durationMinutes: 1440 },
     ],
   },
   {
     serviceId: 'waterproofing',
     label: 'Waterproofing',
     categorySlug: 'painting-waterproofing',
-    imageUrl: PAINTING_PLACEHOLDER_IMAGE,
+    imageUrl: resolveBookNowServiceImageUrl('painting-waterproofing', PAINTING_PLACEHOLDER_IMAGE),
     serviceSortOrder: 4,
     packages: [
       { name: 'Wall Waterproofing', offerPrice: 4999, originalPrice: 5999, durationLabel: '1 Day', durationMinutes: 480 },
-      { name: 'Terrace Waterproofing', offerPrice: 5499, originalPrice: 6999, durationLabel: '1-2 Days', durationMinutes: 720 },
-      { name: 'Bathroom / Kitchen Grouting', offerPrice: 2399, originalPrice: 2999, durationLabel: '3-5 Hours', durationMinutes: 300 },
+      { name: 'Terrace Waterproofing', offerPrice: 5499, originalPrice: 6999, durationLabel: '2 Days', durationMinutes: 960 },
+      { name: 'Bathroom / Kitchen Grouting', offerPrice: 2399, originalPrice: 2999, durationLabel: '4 Hours', durationMinutes: 240 },
     ],
   },
 ];
@@ -285,13 +651,13 @@ function loadRawSections(): RawSection[] {
         const offerPrice = parsePrice(row[1] || '');
         const originalPrice = parsePrice(row[2] || '') || offerPrice;
         const durationLabel = String(row[3] || '').trim();
-        items.push({
+        items.push(applyDurationOverride({
           name,
           offerPrice,
           originalPrice,
           durationLabel,
           durationMinutes: parseDurationMinutes(durationLabel),
-        });
+        }, title));
       }
       i += 1;
     }
@@ -300,6 +666,53 @@ function loadRawSections(): RawSection[] {
   }
 
   return sections;
+}
+
+function loadBeautyCsvItems(): BeautyCsvItem[] {
+  const rows = parseCsv(fs.readFileSync(resolveCsvPath(), 'utf8'));
+  const items: BeautyCsvItem[] = [];
+  let inBeautySection = false;
+  let currentServiceLabel = '';
+
+  for (const row of rows) {
+    const first = String(row?.[0] || '').replace(/\u00a0/g, ' ').trim();
+    const second = String(row?.[1] || '').replace(/\u00a0/g, ' ').trim();
+
+    if (!inBeautySection) {
+      inBeautySection = normalizeKey(first) === 'beauty services';
+      continue;
+    }
+
+    if (first && first.toUpperCase() === first && !second) {
+      break;
+    }
+
+    if (normalizeKey(first) === 'category' && normalizeKey(second) === 'service') {
+      continue;
+    }
+
+    if (first) {
+      currentServiceLabel = first;
+    }
+
+    if (!currentServiceLabel || !second) {
+      continue;
+    }
+
+    const durationLabel = String(row?.[4] || '').replace(/\u00a0/g, ' ').trim();
+    items.push({
+      ...applyDurationOverride({
+        name: second,
+        offerPrice: parsePrice(row?.[2] || ''),
+        originalPrice: parsePrice(row?.[3] || '') || parsePrice(row?.[2] || ''),
+        durationLabel,
+        durationMinutes: parseDurationMinutes(durationLabel),
+      }, 'BEAUTY SERVICES', currentServiceLabel),
+      serviceLabel: currentServiceLabel,
+    });
+  }
+
+  return items;
 }
 
 function buildHomeCleaningServices(
@@ -448,11 +861,12 @@ function buildElectricianServices(section: RawSection): BookNowCsvHubSectionSeed
         : item.name.trim();
     const serviceId = slugify(label);
     if (!buckets.has(serviceId)) {
+      const categorySlug = `electrician-${serviceId}`;
       buckets.set(serviceId, {
         serviceId,
         label,
-        categorySlug: `electrician-${serviceId}`,
-        imageUrl: serviceImageUrl,
+        categorySlug,
+        imageUrl: resolveBookNowServiceImageUrl(categorySlug, serviceImageUrl),
         serviceSortOrder: index + 1,
         packages: [],
       });
@@ -641,7 +1055,7 @@ function buildCarpentryServices(sectionMap: Map<string, RawSection>): BookNowCsv
           serviceId: entry.serviceId,
           label: entry.label,
           categorySlug: entry.categorySlug,
-          imageUrl: entry.imageUrl,
+          imageUrl: resolveBookNowServiceImageUrl(entry.categorySlug, entry.imageUrl),
           serviceSortOrder: index + 1,
           packages: section.items,
         } satisfies BookNowCsvServiceSeed;
@@ -651,45 +1065,64 @@ function buildCarpentryServices(sectionMap: Map<string, RawSection>): BookNowCsv
 }
 
 function buildBeautyServices(): BookNowCsvHubSectionSeed {
+  const packagesByService = new Map<string, CsvItem[]>();
+  loadBeautyCsvItems().forEach(({ serviceLabel, ...item }) => {
+    const serviceKey = normalizeKey(serviceLabel);
+    const current = packagesByService.get(serviceKey) || [];
+    current.push(item);
+    packagesByService.set(serviceKey, current);
+  });
+
+  const services = [
+    {
+      serviceId: 'womens-beauty',
+      label: "Women's Beauty",
+      csvLabel: 'Women’s Beauty',
+      categorySlug: 'womens-beauty',
+      imageUrl: cdnImage('beauty-services'),
+      serviceSortOrder: 1,
+    },
+    {
+      serviceId: 'womens-hair',
+      label: "Women's Hair",
+      csvLabel: 'Women’s Hair',
+      categorySlug: 'womens-hair',
+      imageUrl: cdnImage('beauty-services'),
+      serviceSortOrder: 2,
+    },
+    {
+      serviceId: 'mens-grooming',
+      label: "Men's Grooming",
+      csvLabel: 'Men’s Grooming',
+      categorySlug: 'mens-grooming',
+      imageUrl: cdnImage('beauty-services'),
+      serviceSortOrder: 3,
+    },
+    {
+      serviceId: 'massage',
+      label: 'Massage',
+      csvLabel: 'Massage',
+      categorySlug: 'massage',
+      imageUrl: cdnImage('massage-spa'),
+      serviceSortOrder: 4,
+    },
+  ];
+
   return {
     slug: 'beauty-services',
     title: 'Beauty Services',
     iconKey: 'Sparkles',
     sortOrder: 80,
-    services: [
-      {
-        serviceId: 'womens-beauty',
-        label: "Women's Beauty",
-        categorySlug: 'womens-beauty',
-        imageUrl: cdnImage('beauty-services'),
-        serviceSortOrder: 1,
-        packages: [],
-      },
-      {
-        serviceId: 'womens-hair',
-        label: "Women's Hair",
-        categorySlug: 'womens-hair',
-        imageUrl: cdnImage('beauty-services'),
-        serviceSortOrder: 2,
-        packages: [],
-      },
-      {
-        serviceId: 'mens-grooming',
-        label: "Men's Grooming",
-        categorySlug: 'mens-grooming',
-        imageUrl: cdnImage('beauty-services'),
-        serviceSortOrder: 3,
-        packages: [],
-      },
-      {
-        serviceId: 'massage',
-        label: 'Massage',
-        categorySlug: 'massage',
-        imageUrl: cdnImage('massage-spa'),
-        serviceSortOrder: 4,
-        packages: [],
-      },
-    ],
+    services: services
+      .map((service) => ({
+        serviceId: service.serviceId,
+        label: service.label,
+        categorySlug: service.categorySlug,
+        imageUrl: resolveBookNowServiceImageUrl(service.categorySlug, service.imageUrl),
+        serviceSortOrder: service.serviceSortOrder,
+        packages: packagesByService.get(normalizeKey(service.csvLabel)) || [],
+      }))
+      .filter((service) => service.packages.length > 0),
   };
 }
 
@@ -705,7 +1138,7 @@ function buildPaintingServices(): BookNowCsvHubSectionSeed {
       categorySlug: service.categorySlug,
       imageUrl: service.imageUrl,
       serviceSortOrder: service.serviceSortOrder,
-      packages: service.packages,
+      packages: service.packages.map((pkg) => applyDurationOverride(pkg, 'painting', service.label)),
     })),
   };
 }
@@ -732,7 +1165,7 @@ export function buildBookNowCsvSeed(): BookNowCsvSeed {
       categoryTask: 'repair',
       serviceMap: [
         { match: /^AC Repair/i, serviceId: 'ac-repair', label: 'AC Repair', categorySlug: 'ac-services', imageUrl: cdnImage('acrepair-booknow'), sectionId: 'repair', sortOrder: 1 },
-        { match: /^Foam Jet AC Service/i, serviceId: 'ac-servicing', label: 'AC Servicing', categorySlug: 'ac-services', imageUrl: cdnImage('acservicing-booknow'), sectionId: 'servicing', sortOrder: 2 },
+        { match: /^Foam Jet AC Service/i, serviceId: 'ac-servicing', label: 'AC Servicing', categorySlug: 'ac-services', imageUrl: cdnImage('foanjetacservice-booknow'), sectionId: 'servicing', sortOrder: 2 },
         { match: /^AC Gas Refill/i, serviceId: 'gas-refill', label: 'Gas Refill', categorySlug: 'ac-services', imageUrl: cdnImage('gasrefill-booknow'), sectionId: 'gas-refill', sortOrder: 3 },
         { match: /^AC Installation/i, serviceId: 'install', label: 'Install', categorySlug: 'ac-services', imageUrl: cdnImage('acinstall-booknow'), sectionId: 'install', sortOrder: 4 },
         { match: /^AC Uninstallation/i, serviceId: 'uninstall', label: 'Uninstall', categorySlug: 'ac-services', imageUrl: cdnImage('acuninstall-booknow'), sectionId: 'uninstall', sortOrder: 5 },
@@ -758,9 +1191,9 @@ export function buildBookNowCsvSeed(): BookNowCsvSeed {
       sortOrder: 40,
       categoryTask: 'cleaning',
       serviceMap: [
-        { match: /^Cockroach Control/i, serviceId: 'cockroach-control', label: 'Cockroach Control', categorySlug: 'pest-control-cockroach-control', imageUrl: cdnImage('pest-control'), sortOrder: 1 },
-        { match: /^Ant Control/i, serviceId: 'ant-control', label: 'Ant Control', categorySlug: 'pest-control-ant-control', imageUrl: cdnImage('ant-control'), sortOrder: 2 },
-        { match: /^Bed Bug Control/i, serviceId: 'bed-bug-control', label: 'Bed Bug Control', categorySlug: 'pest-control-bed-bug-control', imageUrl: cdnImage('bed-bug-control'), sortOrder: 3 },
+        { match: /^Cockroach Control/i, serviceId: 'cockroach-control', label: 'Cockroach Control', categorySlug: 'pest-control-cockroach-control', imageUrl: uploadedCategoryImage('cockroach-control-main.png'), sortOrder: 1 },
+        { match: /^Ant Control/i, serviceId: 'ant-control', label: 'Ant Control', categorySlug: 'pest-control-ant-control', imageUrl: uploadedCategoryImage('ant-control-main.png'), sortOrder: 2 },
+        { match: /^Bed Bug Control/i, serviceId: 'bed-bug-control', label: 'Bed Bug Control', categorySlug: 'pest-control-bed-bug-control', imageUrl: uploadedCategoryImage('bedbug-control-main.png'), sortOrder: 3 },
       ],
     }),
     buildElectricianServices(sectionMap.get('ELECTRICIAN') || { title: 'ELECTRICIAN', items: [] }),
@@ -806,7 +1239,7 @@ export function buildBookNowCsvSeed(): BookNowCsvSeed {
           durationLabel: item.durationLabel,
           durationMinutes: item.durationMinutes,
           description: `${item.durationLabel} • Offer ₹${item.offerPrice}${item.originalPrice ? ` from ₹${item.originalPrice}` : ''}`,
-          imageUrls: service.imageUrl ? [service.imageUrl] : [],
+          imageUrls: resolveBookNowPackageImageUrls(service.categorySlug, skuSlug, service.imageUrl, item.name),
           sortOrder: index,
         });
       });

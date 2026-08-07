@@ -45,6 +45,15 @@ function normalizeCatalogLookup(value: string): string {
   return value.toLowerCase().replace(/[-_\s]+/g, '-').trim();
 }
 
+function normalizeContentIdentity(value: string): string {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '')
+    .replace(/&/g, ' and ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
 function resolveCategoryAlias(slug: string): string {
   return BOOK_NOW_CATEGORY_ALIASES[slug] || slug;
 }
@@ -156,6 +165,25 @@ function comparePackageListItems(a: BookNowPackageListItem, b: BookNowPackageLis
   if (priceA !== priceB) return priceA - priceB;
 
   return a.name.localeCompare(b.name);
+}
+
+function shouldPreferPackageListItem(
+  candidate: BookNowPackageListItem,
+  current: BookNowPackageListItem,
+): boolean {
+  const candidateHasImage = Boolean(candidate.primaryImageUrl);
+  const currentHasImage = Boolean(current.primaryImageUrl);
+  if (candidateHasImage !== currentHasImage) return candidateHasImage;
+
+  const candidateHasContent = Boolean(candidate.content);
+  const currentHasContent = Boolean(current.content);
+  if (candidateHasContent !== currentHasContent) return candidateHasContent;
+
+  const candidateSortOrder = candidate.content?.sortOrder ?? Number.MAX_SAFE_INTEGER;
+  const currentSortOrder = current.content?.sortOrder ?? Number.MAX_SAFE_INTEGER;
+  if (candidateSortOrder !== currentSortOrder) return candidateSortOrder < currentSortOrder;
+
+  return candidate.name.length >= current.name.length;
 }
 
 export type BookNowAreaCheckResult = {
@@ -349,10 +377,15 @@ export class CatalogService {
   }): BookNowPackageListItem[] {
     const { category, skus, contentBySkuSlug } = args;
 
-    return skus
+    const items = skus
       .map((sku) => {
         const normalizedSkuSlug = normalizeCatalogLookup(String(sku.slug || ''));
-        const content = contentBySkuSlug.get(normalizedSkuSlug) ?? null;
+        const content =
+          contentBySkuSlug.get(normalizedSkuSlug) ??
+          contentBySkuSlug.get(normalizeContentIdentity(String(sku.slug || ''))) ??
+          contentBySkuSlug.get(normalizeCatalogLookup(String(sku.name || ''))) ??
+          contentBySkuSlug.get(normalizeContentIdentity(String(sku.name || ''))) ??
+          null;
         const enriched = enrichSkuPricing(sku);
         const shortDescription = String(content?.shortDescription || '').trim();
         const fallbackDescription = String(sku.description || '').trim();
@@ -382,7 +415,20 @@ export class CatalogService {
           primaryImageUrl: Array.isArray(content?.imageUrls) ? String(content?.imageUrls?.[0] || '').trim() : '',
         };
       })
-      .sort(comparePackageListItems);
+      .filter((item) => item.name.trim().length > 0);
+
+    const dedupedByName = new Map<string, BookNowPackageListItem>();
+    items.forEach((item) => {
+      const key =
+        normalizeContentIdentity(item.content?.displayName || item.name) ||
+        normalizeCatalogLookup(item.skuSlug);
+      const current = dedupedByName.get(key);
+      if (!current || shouldPreferPackageListItem(item, current)) {
+        dedupedByName.set(key, item);
+      }
+    });
+
+    return Array.from(dedupedByName.values()).sort(comparePackageListItems);
   }
 
   static async getBookNowHubCatalog(previewLimit = 5) {
@@ -397,12 +443,20 @@ export class CatalogService {
 
     const categoryIds = categories.map((category) => category._id);
     const skus = await ServiceSku.find({ categoryId: { $in: categoryIds }, isActive: true }).lean();
-    const contentBySkuKey = new Map(
-      skuContents.map((content) => [
-        `${normalizeCatalogLookup(content.categorySlug)}::${normalizeCatalogLookup(content.skuSlug)}`,
-        content,
-      ] as const),
-    );
+    const contentBySkuKey = new Map<string, (typeof skuContents)[number]>();
+    skuContents.forEach((content) => {
+      const normalizedCategory = normalizeCatalogLookup(content.categorySlug);
+      const keys = [
+        normalizeCatalogLookup(content.skuSlug),
+        normalizeContentIdentity(content.skuSlug),
+        normalizeCatalogLookup(content.displayName),
+        normalizeContentIdentity(content.displayName),
+      ].filter(Boolean);
+
+      keys.forEach((key) => {
+        contentBySkuKey.set(`${normalizedCategory}::${key}`, content);
+      });
+    });
     const categoryContentBySlug = new Map(
       categoryContents.map((content) => [normalizeCatalogLookup(content.categorySlug), content] as const),
     );
@@ -423,10 +477,20 @@ export class CatalogService {
       const contentBySkuSlug = new Map<string, (typeof skuContents)[number]>();
 
       categorySkus.forEach((sku) => {
-        const key = `${normalizedCategorySlug}::${normalizeCatalogLookup(String(sku.slug || ''))}`;
-        const content = contentBySkuKey.get(key as `${string}::${string}`);
+        const candidateKeys = [
+          normalizeCatalogLookup(String(sku.slug || '')),
+          normalizeContentIdentity(String(sku.slug || '')),
+          normalizeCatalogLookup(String(sku.name || '')),
+          normalizeContentIdentity(String(sku.name || '')),
+        ].filter(Boolean);
+        const content = candidateKeys
+          .map((key) => contentBySkuKey.get(`${normalizedCategorySlug}::${key}`))
+          .find(Boolean);
         if (content) {
           contentBySkuSlug.set(normalizeCatalogLookup(String(sku.slug || '')), content);
+          contentBySkuSlug.set(normalizeContentIdentity(String(sku.slug || '')), content);
+          contentBySkuSlug.set(normalizeCatalogLookup(String(sku.name || '')), content);
+          contentBySkuSlug.set(normalizeContentIdentity(String(sku.name || '')), content);
         }
       });
 
@@ -497,13 +561,13 @@ export class CatalogService {
 
             return {
               id: service.id,
-              label: categoryContent?.title || service.label,
+              label: service.label,
               categorySlug: service.categorySlug,
               categoryName: category?.name || categoryContent?.title || service.label,
               sectionId: service.sectionId || '',
               imageUrl:
-                categoryContent?.heroImageUrl ||
                 service.imageUrl ||
+                categoryContent?.heroImageUrl ||
                 packages[0]?.primaryImageUrl ||
                 '',
               previewPackages: packages.slice(0, limit),
@@ -566,9 +630,17 @@ export class CatalogService {
       throw new NotFoundError('Book Now service not found');
     }
 
-    const contentBySkuSlug = new Map(
-      skuContents.map((content) => [normalizeCatalogLookup(content.skuSlug), content] as const),
-    );
+    const contentBySkuSlug = new Map<string, (typeof skuContents)[number]>();
+    skuContents.forEach((content) => {
+      [
+        normalizeCatalogLookup(content.skuSlug),
+        normalizeContentIdentity(content.skuSlug),
+        normalizeCatalogLookup(content.displayName),
+        normalizeContentIdentity(content.displayName),
+      ]
+        .filter(Boolean)
+        .forEach((key) => contentBySkuSlug.set(key, content));
+    });
 
     return {
       category: {
