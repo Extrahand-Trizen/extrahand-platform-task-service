@@ -37,6 +37,9 @@ router.get(
 // PATCH /api/v1/book-now/tasks/:id/status
 // Partner updates the status of their active Book Now task.
 // Body: { status: 'started' | 'in_progress' | 'review' | 'completed' }
+// Cancellation: { status: 'cancelled', cancellationReason } — allowed only while
+// the task is still 'assigned' (before starting the journey). Applies the
+// performer penalty, unassigns the partner and reopens the lead to the pool.
 router.patch(
   '/tasks/:id/status',
   serviceAuthMiddleware,

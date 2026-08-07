@@ -940,6 +940,94 @@ export class PaymentClient {
   }
 
   /**
+   * Penalty-only for a partner-cancelled Book Now task.
+   * POST /api/v1/payment/book-now/partner-penalty
+   * Applies the performer cancellation policy and deducts from the partner's
+   * future payout — no customer refund is issued.
+   */
+  static async createPerformerPenalty(params: {
+    performerUid: string;
+    taskId: string;
+    taskStartDate: string;
+    feeBaseAmount: number;
+    reason?: string;
+    taskTitle?: string;
+    escrowId?: string | null;
+  }): Promise<{
+    success: boolean;
+    skipped?: boolean;
+    penalty?: { penaltyId?: string; amount?: string } | null;
+    error?: string;
+  }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.post(
+        `${this.baseURL}/api/v1/payment/book-now/partner-penalty`,
+        {
+          performerUid: params.performerUid,
+          taskId: params.taskId,
+          taskStartDate: params.taskStartDate,
+          feeBaseAmount: params.feeBaseAmount,
+          reason: params.reason,
+          taskTitle: params.taskTitle,
+          escrowId: params.escrowId ?? null,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 30000,
+        },
+      );
+
+      const data = response.data;
+      logger.info('[PaymentClient.createPerformerPenalty] Response received', {
+        taskId: params.taskId,
+        success: Boolean(data?.success),
+        skipped: data?.skipped,
+        penalty: data?.penalty,
+        error: data?.error || data?.message,
+      });
+
+      if (data?.success) {
+        return { success: true, skipped: Boolean(data.skipped), penalty: data.penalty ?? null };
+      }
+
+      return {
+        success: false,
+        error: data?.error || data?.message || 'Failed to create performer penalty',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string; message?: string }>;
+        logger.error('[PaymentClient.createPerformerPenalty] API call failed', {
+          taskId: params.taskId,
+          httpStatus: ax.response?.status,
+          responseData: ax.response?.data,
+          message: ax.message,
+        });
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.response?.data?.message || ax.message,
+        };
+      }
+      logger.error('[PaymentClient.createPerformerPenalty] API call failed (non-axios)', {
+        taskId: params.taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to create performer penalty',
+      };
+    }
+  }
+
+  /**
    * Hourly Helper cancel — payment executes CancellationSettlement only (no fee recalculation).
    * POST /api/v1/payment/cancel with settlement payload.
    */

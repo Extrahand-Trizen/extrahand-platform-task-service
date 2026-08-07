@@ -351,9 +351,12 @@ export class PartnerBookNowController {
    */
   static async updateLeadStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { id } = req.params;
-    const { status: newStatus } = req.body as { status?: string };
+    const { status: newStatus, cancellationReason } = req.body as {
+      status?: string;
+      cancellationReason?: string;
+    };
 
-    const ALLOWED_STATUSES = ['started', 'in_progress', 'review', 'completed'];
+    const ALLOWED_STATUSES = ['started', 'in_progress', 'review', 'completed', 'cancelled'];
     if (!newStatus || !ALLOWED_STATUSES.includes(newStatus)) {
       throw new BadRequestError(`status must be one of: ${ALLOWED_STATUSES.join(', ')}`);
     }
@@ -380,6 +383,91 @@ export class PartnerBookNowController {
       profileId instanceof mongoose.Types.ObjectId
         ? profileId
         : new mongoose.Types.ObjectId(profileId as string);
+
+    // Partner-initiated cancellation — only allowed before the journey starts
+    // (task still in 'assigned'). The customer's payment stays untouched; the
+    // partner is unassigned and the task returns to the pool for anyone to accept.
+    if (newStatus === 'cancelled') {
+      const task = await Task.findOne({
+        _id: new mongoose.Types.ObjectId(String(id)),
+        bookingSource: 'book_now',
+        partnerId: partnerOid,
+        status: 'assigned',
+      }).lean();
+
+      if (!task) {
+        throw new BadRequestError('Task can only be cancelled before the journey is started');
+      }
+
+      // Apply the performer cancellation penalty via the payment service
+      // (best-effort, non-blocking — the lead must return to the pool regardless).
+      // No customer refund is issued; the penalty is recovered from the partner's
+      // future payout.
+      try {
+        const { PaymentClient } = await import('../services/PaymentClient');
+        const taskStartIso = (task.scheduledDate || task.createdAt).toISOString();
+        const feeBaseAmount =
+          typeof task.budget === 'object' && task.budget
+            ? Number(task.budget.amount)
+            : Number(task.budget);
+        const penaltyResult = await PaymentClient.createPerformerPenalty({
+          performerUid: uid,
+          taskId: String(task._id),
+          taskStartDate: taskStartIso,
+          feeBaseAmount,
+          reason: cancellationReason || 'Partner cancelled before starting the journey',
+          taskTitle: task.title,
+        });
+        if (!penaltyResult.success) {
+          logger.error('[PartnerBookNow] Cancellation penalty failed:', {
+            taskId: id,
+            error: penaltyResult.error,
+          });
+        }
+      } catch (penaltyError: any) {
+        logger.error('[PartnerBookNow] Cancellation penalty threw:', {
+          taskId: id,
+          error: penaltyError?.message || penaltyError,
+        });
+      }
+
+      const reopened = await Task.findOneAndUpdate(
+        {
+          _id: new mongoose.Types.ObjectId(String(id)),
+          bookingSource: 'book_now',
+          partnerId: partnerOid,
+          status: 'assigned',
+        },
+        {
+          $set: {
+            status: 'open',
+            partnerId: null,
+            partnerUid: null,
+            assigneeId: null,
+            assigneeUid: null,
+            partnerAcceptedAt: null,
+            assignedAt: null,
+            cancelledAt: new Date(),
+            cancelledById: partnerOid,
+            cancellationReason: cancellationReason || null,
+            updatedAt: new Date(),
+          },
+        },
+        { new: true },
+      );
+
+      if (!reopened) {
+        throw new NotFoundError('Task not found or you are not the assigned partner');
+      }
+
+      console.log(`[PartnerBookNow] updateLeadStatus: task=${id} uid=${uid} CANCELLED → returned to pool`);
+      ApiResponse.success(
+        res,
+        { id: String(reopened._id), status: 'open', cancelled: true },
+        'Job cancelled and returned to the pool',
+      );
+      return;
+    }
 
     // Build update payload
     const updateFields: Record<string, any> = {
