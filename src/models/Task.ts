@@ -172,6 +172,8 @@ export interface ITask extends Document {
     lastMaterializedDate?: Date;
     materializedBufferSize?: number;
     nextVisitIndex?: number;
+    /** Total planned occurrences for end_on_date plans (max 366). */
+    totalPlanned?: number;
     completedVisitCount?: number;
     consecutiveUnpaidCount?: number;
     nextVisitDate?: Date;
@@ -590,6 +592,7 @@ const TaskSchema = new Schema<ITask>(
       lastMaterializedDate: Date,
       materializedBufferSize: { type: Number, default: 2 },
       nextVisitIndex: Number,
+      totalPlanned: Number,
       completedVisitCount: { type: Number, default: 0 },
       consecutiveUnpaidCount: { type: Number, default: 0 },
       nextVisitDate: Date,

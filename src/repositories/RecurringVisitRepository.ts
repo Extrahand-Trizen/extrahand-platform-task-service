@@ -103,6 +103,111 @@ export class RecurringVisitRepository {
       .lean() as Promise<RecurringVisitLean[]>;
   }
 
+  /**
+   * Work Details carousel: previous + current + upcoming only.
+   * Uses indexed parentTaskId / status / visitIndex queries instead of loading the full plan.
+   */
+  static async listWorkDetailsPreview(
+    parentTaskId: string | mongoose.Types.ObjectId,
+    activeVisitId?: string | null,
+  ): Promise<{
+    previewVisits: RecurringVisitLean[];
+    totalListed: number;
+    hiddenCount: number;
+  }> {
+    const parentOid = toObjectId(parentTaskId);
+    const totalListed = await RecurringVisit.countDocuments({ parentTaskId: parentOid });
+    if (totalListed === 0) {
+      return { previewVisits: [], totalListed: 0, hiddenCount: 0 };
+    }
+
+    const terminalStatuses = [
+      'completed',
+      'cancelled',
+      'skipped',
+      'skipped_unpaid',
+      'cancelled_late',
+    ];
+
+    let current: RecurringVisitLean | null = null;
+    const activeId = String(activeVisitId || '').trim();
+    if (activeId) {
+      current = await RecurringVisitRepository.findByParentAndVisitId(parentOid, activeId);
+    }
+    if (!current) {
+      current = (await RecurringVisit.findOne({
+        parentTaskId: parentOid,
+        status: { $nin: terminalStatuses },
+      })
+        .select(DEFAULT_LIST_SELECT)
+        .sort({ visitIndex: 1, date: 1 })
+        .lean()) as RecurringVisitLean | null;
+    }
+    if (!current) {
+      current = (await RecurringVisit.findOne({ parentTaskId: parentOid })
+        .select(DEFAULT_LIST_SELECT)
+        .sort({ visitIndex: -1, date: -1 })
+        .lean()) as RecurringVisitLean | null;
+    }
+    if (!current) {
+      return { previewVisits: [], totalListed, hiddenCount: totalListed };
+    }
+
+    let previous = (await RecurringVisit.findOne({
+      parentTaskId: parentOid,
+      status: 'completed',
+    })
+      .select(DEFAULT_LIST_SELECT)
+      .sort({ visitIndex: -1, date: -1 })
+      .lean()) as RecurringVisitLean | null;
+
+    if (!previous && current.visitIndex > 1) {
+      previous = (await RecurringVisit.findOne({
+        parentTaskId: parentOid,
+        visitIndex: { $lt: current.visitIndex },
+      })
+        .select(DEFAULT_LIST_SELECT)
+        .sort({ visitIndex: -1 })
+        .lean()) as RecurringVisitLean | null;
+    }
+
+    if (previous && previous.visitId === current.visitId) {
+      previous = null;
+    }
+
+    const upcoming = (await RecurringVisit.findOne({
+      parentTaskId: parentOid,
+      visitIndex: { $gt: current.visitIndex },
+      status: { $nin: terminalStatuses },
+    })
+      .select(DEFAULT_LIST_SELECT)
+      .sort({ visitIndex: 1, date: 1 })
+      .lean()) as RecurringVisitLean | null;
+
+    const selected: RecurringVisitLean[] = [];
+    const seen = new Set<string>();
+    for (const row of [previous, current, upcoming]) {
+      if (!row) continue;
+      const key = String(row.visitId || '');
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      selected.push(row);
+    }
+
+    selected.sort((a, b) => {
+      const ai = Number(a.visitIndex) || 0;
+      const bi = Number(b.visitIndex) || 0;
+      if (ai !== bi) return ai - bi;
+      return new Date(a.date).getTime() - new Date(b.date).getTime();
+    });
+
+    return {
+      previewVisits: selected,
+      totalListed,
+      hiddenCount: Math.max(0, totalListed - selected.length),
+    };
+  }
+
   static async listUpcoming(
     parentTaskId: string | mongoose.Types.ObjectId,
     limit?: number,

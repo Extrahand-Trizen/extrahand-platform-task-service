@@ -920,17 +920,24 @@ export class TaskService {
       void RecurringVisitService.scheduleReconcilePlanState(taskId);
 
       const taskRecord = task as unknown as Record<string, unknown>;
-      const embeddedSchedule = Array.isArray(task.schedule) ? task.schedule : [];
-      const hasEmbeddedVisitRows = embeddedSchedule.some(
-        (entry) =>
-          entry &&
-          typeof entry === 'object' &&
-          typeof (entry as { visitId?: string }).visitId === 'string',
-      );
-      if (!hasEmbeddedVisitRows) {
-        const visits = await getVisitsForPlan(task);
-        if (visits.length > 0) {
-          taskRecord.schedule = visits;
+      const plan = (task as { recurringPlan?: { visitStorage?: string } }).recurringPlan;
+      // Collection-backed plans: visit details come from GET /recurring/visits.
+      // Avoid attaching hundreds of schedule rows on the initial task payload.
+      if (plan?.visitStorage === 'collection') {
+        taskRecord.schedule = [];
+      } else {
+        const embeddedSchedule = Array.isArray(task.schedule) ? task.schedule : [];
+        const hasEmbeddedVisitRows = embeddedSchedule.some(
+          (entry) =>
+            entry &&
+            typeof entry === 'object' &&
+            typeof (entry as { visitId?: string }).visitId === 'string',
+        );
+        if (!hasEmbeddedVisitRows) {
+          const visits = await getVisitsForPlan(task);
+          if (visits.length > 0) {
+            taskRecord.schedule = visits;
+          }
         }
       }
     }

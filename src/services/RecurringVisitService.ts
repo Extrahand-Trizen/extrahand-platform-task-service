@@ -19,7 +19,6 @@ import {
   validateRecurringPlanOccurrences,
   type RecurringScheduleBuildConfig,
 } from '../utils/recurringVisitScheduleBuilder';
-import { selectWorkDetailsPreviewVisits } from '../utils/recurringWorkDetailsPreview';
 import {
   canTaskerStartVisit,
   DEFAULT_CONSECUTIVE_UNPAID_PAUSE_THRESHOLD,
@@ -34,6 +33,7 @@ import {
 import { DEFAULT_RECURRING_VISIT_BUFFER_SIZE, recurringVisitConfig } from '../config/recurringVisitConfig';
 import {
   getVisitsForPlan,
+  getWorkDetailsVisitsForPlan,
   hydrateTaskVisitsOntoSchedule,
   markPlanCollectionStorage,
   mapDocToScheduleRow,
@@ -3147,6 +3147,7 @@ export class RecurringVisitService {
 
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
     const syncPayments = options?.syncPayments === true;
+    let paymentSyncScheduled = false;
 
     if (syncPayments) {
       await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(taskId);
@@ -3164,7 +3165,84 @@ export class RecurringVisitService {
         : false;
       if (pendingExists && Date.now() - lastSync > cooldown) {
         RecurringVisitService.schedulePaymentSyncAndRebalance(taskId);
+        paymentSyncScheduled = true;
       }
+    }
+
+    const activeVisitId =
+      (task as unknown as { activeVisitId?: string }).activeVisitId ?? null;
+    const totalPlanned =
+      typeof plan.totalPlanned === 'number' && plan.totalPlanned > 0
+        ? Number(plan.totalPlanned)
+        : undefined;
+    const planEnded =
+      String(plan.status || '').toLowerCase() === 'ended' ||
+      String(taskLean.status || '').toLowerCase() === 'cancelled';
+
+    if (options?.scope === 'work_details') {
+      const preview = await getWorkDetailsVisitsForPlan(task, activeVisitId);
+      const visits = preview.previewVisits;
+
+      const visitIds = visits
+        .map((visit) => String(visit.visitId || '').trim())
+        .filter(Boolean);
+      if (visitIds.length > 0) {
+        const completedChildren = await Task.find({
+          parentTaskId: task._id,
+          status: 'completed',
+          recurringVisitId: { $in: visitIds },
+        })
+          .select('_id recurringVisitId')
+          .lean();
+
+        const childIdByVisitId = new Map<string, mongoose.Types.ObjectId>();
+        for (const child of completedChildren) {
+          const visitId = String(child.recurringVisitId || '').trim();
+          if (visitId && child._id) {
+            childIdByVisitId.set(visitId, child._id as mongoose.Types.ObjectId);
+          }
+        }
+
+        for (const visit of visits) {
+          if (visit.childTaskId || !visit.visitId) continue;
+          const childId = childIdByVisitId.get(visit.visitId);
+          if (childId) {
+            visit.childTaskId = childId;
+          }
+        }
+      }
+
+      const pendingPaymentRows = shouldWriteCollection(task)
+        ? (await RecurringVisitRepository.listPaymentPending(task._id)).map(mapDocToScheduleRow)
+        : visits.filter((visit) => String(visit.status || '') === 'payment_pending');
+      const pendingPayment = planEnded
+        ? null
+        : resolvePendingPaymentVisitRow(
+            pendingPaymentRows.length > 0 ? pendingPaymentRows : visits,
+          );
+
+      return {
+        planStatus: plan.status,
+        visits,
+        preview: {
+          scope: 'work_details',
+          totalListedVisits: preview.totalListed,
+          hiddenVisitCount: preview.hiddenCount,
+          ...(totalPlanned != null ? { totalPlanned } : {}),
+        },
+        pendingPayment: pendingPayment
+          ? {
+              visitId: pendingPayment.visitId,
+              amount: pendingPayment.amount ?? plan.budgetPerVisit,
+              paymentDeadline: pendingPayment.paymentDeadline,
+              visitIndex: pendingPayment.visitIndex,
+              date: pendingPayment.date,
+            }
+          : null,
+        activeVisitId,
+        ...(totalPlanned != null ? { totalPlanned } : {}),
+        paymentSyncScheduled,
+      };
     }
 
     const visits = await getVisitsForPlan(task);
@@ -3193,37 +3271,7 @@ export class RecurringVisitService {
       }
     }
 
-    const pendingPayment =
-      String(plan.status || '').toLowerCase() === 'ended' ||
-      String(taskLean.status || '').toLowerCase() === 'cancelled'
-        ? null
-        : resolvePendingPaymentVisitRow(visits);
-
-    const activeVisitId =
-      (task as unknown as { activeVisitId?: string }).activeVisitId ?? null;
-
-    if (options?.scope === 'work_details') {
-      const preview = selectWorkDetailsPreviewVisits(visits, activeVisitId);
-      return {
-        planStatus: plan.status,
-        visits: preview.previewVisits,
-        preview: {
-          scope: 'work_details',
-          totalListedVisits: preview.totalListed,
-          hiddenVisitCount: preview.hiddenCount,
-        },
-        pendingPayment: pendingPayment
-          ? {
-              visitId: pendingPayment.visitId,
-              amount: pendingPayment.amount ?? plan.budgetPerVisit,
-              paymentDeadline: pendingPayment.paymentDeadline,
-              visitIndex: pendingPayment.visitIndex,
-              date: pendingPayment.date,
-            }
-          : null,
-        activeVisitId,
-      };
-    }
+    const pendingPayment = planEnded ? null : resolvePendingPaymentVisitRow(visits);
 
     return {
       planStatus: plan.status,
@@ -3237,7 +3285,9 @@ export class RecurringVisitService {
             date: pendingPayment.date,
           }
         : null,
-      activeVisitId: (task as unknown as { activeVisitId?: string }).activeVisitId ?? null,
+      activeVisitId,
+      ...(totalPlanned != null ? { totalPlanned } : {}),
+      paymentSyncScheduled,
     };
   }
 

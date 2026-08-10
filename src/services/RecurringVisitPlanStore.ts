@@ -11,6 +11,7 @@ import {
 import { RecurringVisitRepository } from '../repositories/RecurringVisitRepository';
 import type { ScheduleVisitRow } from '../types/recurringVisitSchedule';
 import type { VisitPaymentStatus } from '../types/recurringVisitSchedule';
+import { selectWorkDetailsPreviewVisits } from '../utils/recurringWorkDetailsPreview';
 
 export type VisitStorageMode = 'embedded' | 'collection';
 
@@ -200,6 +201,48 @@ export async function getVisitsForPlan(
   }
 
   return [];
+}
+
+/**
+ * Work Details only: previous + current + upcoming visits via indexed queries.
+ * Falls back to full load + in-memory trim for embedded / legacy plans.
+ */
+export async function getWorkDetailsVisitsForPlan(
+  task: ITask,
+  activeVisitId?: string | null,
+): Promise<{
+  previewVisits: ScheduleVisitRow[];
+  totalListed: number;
+  hiddenCount: number;
+}> {
+  const parentId = task._id;
+  const storage = getPlanVisitStorage(task);
+
+  if (
+    (storage === 'collection' || storage === 'embedded') &&
+    recurringVisitConfig.collectionReads
+  ) {
+    const hasCollection =
+      storage === 'collection'
+        ? true
+        : await RecurringVisitRepository.hasCollectionVisits(parentId);
+    if (hasCollection || storage === 'collection') {
+      const fromDb = await RecurringVisitRepository.listWorkDetailsPreview(
+        parentId,
+        activeVisitId,
+      );
+      if (fromDb.totalListed > 0 || storage === 'collection') {
+        return {
+          previewVisits: fromDb.previewVisits.map(mapDocToScheduleRow),
+          totalListed: fromDb.totalListed,
+          hiddenCount: fromDb.hiddenCount,
+        };
+      }
+    }
+  }
+
+  const visits = await getVisitsForPlan(task);
+  return selectWorkDetailsPreviewVisits(visits, activeVisitId);
 }
 
 /** Hydrate task.schedule in memory from collection for legacy service code paths. */
