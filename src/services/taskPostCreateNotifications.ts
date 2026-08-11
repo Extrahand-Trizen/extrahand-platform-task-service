@@ -259,6 +259,62 @@ export async function runPostCreateNotifications(
       }
     }
 
+    // Dedicated logging for Book Now tasks ONLY: Rank all matching partners by distance, work area, and category
+    if (task.bookingSource === 'book_now') {
+      try {
+        const Profile = mongoose.connection.collection('profiles');
+        const profiles = await Profile.find({ isActive: true }).toArray();
+        const taskCoords = Array.isArray(task.location?.coordinates) && task.location.coordinates.length === 2
+          ? { lng: task.location.coordinates[0], lat: task.location.coordinates[1] }
+          : null;
+
+        const taskAreaLabel = task.location?.taskArea || task.location?.city || task.location?.address || 'N/A';
+
+        logger.info(`📋 [BookNowTaskCreated] New Book Now Task: "${task.title}" (${task._id}) | Category: ${task.categoryLabel || task.category} | Area: "${taskAreaLabel}"`);
+
+        const helperMatches: any[] = [];
+        profiles.forEach((p) => {
+          const pp = p.partnerProfile || {};
+          const categories = Array.isArray(pp.categories) ? pp.categories : [];
+          const workAreas = Array.isArray(pp.workAreas) ? pp.workAreas : [];
+          if (!categories.length || !workAreas.length) return;
+
+          let distKm: number | null = null;
+          const pCoords = p.location?.coordinates || p.homeLocation?.coordinates;
+          if (taskCoords && Array.isArray(pCoords) && pCoords.length === 2 && typeof pCoords[1] === 'number') {
+            const dLat = (pCoords[1] - taskCoords.lat) * (Math.PI / 180);
+            const dLon = (pCoords[0] - taskCoords.lng) * (Math.PI / 180);
+            const a = Math.sin(dLat / 2) ** 2 + Math.cos(taskCoords.lat * Math.PI / 180) * Math.cos(pCoords[1] * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+            distKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+          }
+
+          helperMatches.push({
+            name: p.name || p.fullName || 'Partner',
+            uid: p.uid,
+            id: String(p._id),
+            categories,
+            workAreas,
+            distKm,
+          });
+        });
+
+        helperMatches.sort((a, b) => {
+          if (a.distKm === null && b.distKm === null) return 0;
+          if (a.distKm === null) return 1;
+          if (b.distKm === null) return -1;
+          return a.distKm - b.distKm;
+        });
+
+        logger.info(`   [BookNowTaskCreated] Matching & Ranked Helpers for Book Now Task ${task._id} (Total: ${helperMatches.length}):`);
+        helperMatches.slice(0, 15).forEach((h, idx) => {
+          const distStr = h.distKm !== null ? `${h.distKm.toFixed(2)} km` : 'N/A';
+          logger.info(`      Rank #${idx + 1} | Name: ${h.name} | UID: ${h.uid} | Distance: ${distStr} | Work Areas: [${h.workAreas.join(', ')}] | Categories: [${h.categories.join(', ')}]`);
+        });
+      } catch (logErr) {
+        // best-effort logging
+      }
+    }
+
     const nearbyTaskerSet = new Set(nearbyTaskers);
     const skillMatchedSet = new Set(skillMatchedTaskers);
 

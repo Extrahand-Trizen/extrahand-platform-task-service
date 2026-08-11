@@ -7,42 +7,38 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { emitBookNowLeadRemoved } from '../socket/socketHandlers';
 import logger from '../config/logger';
 import { CatalogService } from '../services/CatalogService';
+import { resolvePartnerMatchConditions, normalizeCategory } from '../services/partnerVisibility';
 
 /**
- * Maps category aliases to canonical category names so queries are robust
- * even when the task was created with a different slug variant.
+ * Server-side visibility guard for the Book Now partner feed.
+ *
+ * A Book Now job is only visible to a partner when BOTH match:
+ *   - Category match: the job's service category equals one of the partner's
+ *     registered/approved service categories (partnerProfile.categories).
+ *   - Work area match: the job's locality (location.taskArea / locality /
+ *     city mentioned in the address) equals one of the partner's selected
+ *     work areas (partnerProfile.workAreas).
+ *
+ * The restriction is applied inside the Mongo query itself, so a partner can
+ * never receive a job they don't qualify for — even via direct API calls.
  */
-const CATEGORY_MAP: Record<string, string[]> = {
-  cleaning: ['cleaning', 'home-cleaning', 'home_cleaning'],
-  repair: ['repair', 'plumbing', 'electrical', 'carpenter'],
-  plumbing: ['plumbing', 'repair'],
-  electrical: ['electrical', 'repair'],
-  delivery: ['delivery', 'pickup', 'pick-drop'],
-  assembly: ['assembly', 'furniture-assembly'],
-  gardening: ['gardening', 'lawn-mowing'],
-  petcare: ['petcare', 'pet-care'],
-  'packers-movers': ['packers-movers', 'moving'],
-  beautician: ['beautician', 'beauty', 'salon'],
-  driver: ['driver', 'chauffeur', 'driving'],
-  'home-cleaning': ['cleaning', 'home-cleaning'],
-};
-
-function normalizeCategory(input: string): string {
-  const lower = input.toLowerCase().replace(/[\s_-]+/g, '-');
-  for (const [canonical, aliases] of Object.entries(CATEGORY_MAP)) {
-    if (aliases.includes(lower) || canonical === lower) return canonical;
-  }
-  return lower;
-}
 
 export class PartnerBookNowController {
   /**
    * GET /api/v1/book-now/available-leads
-   * Fetch open (unassigned) Book Now tasks matching the partner's work areas.
+   * Fetch open (unassigned) Book Now tasks for the authenticated partner.
+   * A job is only visible when BOTH match:
+   *   - Category match: the job's service category equals one of the
+   *     partner's registered/approved service categories
+   *     (partnerProfile.categories).
+   *   - Work area match: the job's locality (location.taskArea / locality /
+   *     city mentioned in the address) equals one of the partner's selected
+   *     work areas (partnerProfile.workAreas).
    * "Overdue" tasks are still status === 'open' in the DB — they show up too.
    *
    * Query params:
-   *   - categories (comma-separated, optional) – override work-areas lookup
+   *   - categories (comma-separated, optional) – additional narrowing on top
+   *     of the partner's own categories
    *   - lat, lng, radiusKm (optional) – for geo filtering
    */
   static async getAvailableLeads(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -60,6 +56,20 @@ export class PartnerBookNowController {
       partnerUid: null,
     };
 
+    // Server-side visibility guard: the requesting partner can only ever see
+    // jobs whose category matches one of their registered categories AND whose
+    // locality matches one of their selected work areas.
+    const partnerMatch = await resolvePartnerMatchConditions(req);
+    if (!partnerMatch) {
+      // Partner not found, or has no categories / no work areas → no leads.
+      ApiResponse.success(res, [], 'Available leads retrieved');
+      return;
+    }
+
+    const andConditions: Record<string, any>[] = [partnerMatch.category, partnerMatch.workArea];
+
+    // Optional client-provided `categories` param further narrows the feed;
+    // it can never widen it past the partner's own category constraints.
     if (categories) {
       const explicitAreas = categories
         .split(',')
@@ -67,25 +77,32 @@ export class PartnerBookNowController {
         .filter(Boolean);
       if (explicitAreas.length) {
         const normalizedAreas = explicitAreas.map(normalizeCategory);
-        filter.$or = [
-          { category: { $in: normalizedAreas } },
-          { categorySlug: { $in: normalizedAreas } },
-          { categoryLabel: { $in: explicitAreas } },
-        ];
+        andConditions.push({
+          $or: [
+            { category: { $in: normalizedAreas } },
+            { categorySlug: { $in: normalizedAreas } },
+            { categoryLabel: { $in: explicitAreas } },
+          ],
+        });
       }
     }
+
+    if (andConditions.length) filter.$and = andConditions;
 
     let tasks: Record<string, any>[];
 
     if (userLat !== undefined && userLng !== undefined) {
+      // $geoNear must be the FIRST stage of the pipeline; the visibility
+      // filter (bookingSource/status/category/work-area guard) is passed
+      // through its `query` option.
       tasks = await Task.aggregate([
-        { $match: filter },
         {
           $geoNear: {
             near: { type: 'Point', coordinates: [userLng, userLat] },
             distanceField: 'distance',
             maxDistance: maxRadius * 1000,
             spherical: true,
+            query: filter,
           },
         },
         { $sort: { createdAt: -1 } },
@@ -152,6 +169,73 @@ export class PartnerBookNowController {
         };
       }),
     );
+
+    // Logger: Print partner Name, Profile ID, UID, Work Areas, Categories & calculated distance for all returned Book Now leads
+    const partnerUid = req.user?.uid || (req.headers['x-user-id'] as string) || 'unknown';
+    let partnerName = 'Partner';
+    let partnerProfileId = req.user?.profileId?.toString() || 'N/A';
+    let partnerWorkAreas: string[] = [];
+    let partnerCategories: string[] = [];
+    let partnerLat: number | undefined = userLat;
+    let partnerLng: number | undefined = userLng;
+
+    try {
+      const Profile = mongoose.connection.collection('profiles');
+      const pDoc = await Profile.findOne(
+        { $or: [{ uid: partnerUid }, { _id: req.user?.profileId }] },
+        { projection: { name: 1, fullName: 1, _id: 1, partnerProfile: 1, location: 1, homeLocation: 1 } }
+      );
+      if (pDoc) {
+        partnerName = (pDoc as any).name || (pDoc as any).fullName || 'Partner';
+        partnerProfileId = String((pDoc as any)._id);
+        const pp = (pDoc as any).partnerProfile || {};
+        partnerWorkAreas = Array.isArray(pp.workAreas) ? pp.workAreas : [];
+        partnerCategories = Array.isArray(pp.categories) ? pp.categories : [];
+
+        if (partnerLat === undefined || partnerLng === undefined) {
+          const pCoords = (pDoc as any).location?.coordinates || (pDoc as any).homeLocation?.coordinates;
+          if (Array.isArray(pCoords) && pCoords.length === 2 && typeof pCoords[1] === 'number') {
+            partnerLng = pCoords[0];
+            partnerLat = pCoords[1];
+          }
+        }
+      }
+    } catch {
+      // swallow — profile lookup for logging is best-effort
+    }
+
+    logger.info(`📋 [BookNowLeads] Partner Name: "${partnerName}" | Profile ID: ${partnerProfileId} | UID: ${partnerUid}`);
+    logger.info(`   Partner Work Areas: [${partnerWorkAreas.join(', ')}] | Categories: [${partnerCategories.join(', ')}] | Total Available Leads: ${enriched.length}`);
+
+    enriched.forEach((lead, idx) => {
+      const rank = idx + 1;
+      let distKm: number | null = lead.distance != null ? lead.distance / 1000 : null;
+
+      // Fallback Haversine distance calculation if geoNear distance was not computed by query
+      if (distKm === null && partnerLat !== undefined && partnerLng !== undefined && lead.location?.coordinates) {
+        const coords = lead.location.coordinates;
+        if (Array.isArray(coords) && coords.length === 2 && typeof coords[1] === 'number') {
+          const dLat = (coords[1] - partnerLat) * (Math.PI / 180);
+          const dLon = (coords[0] - partnerLng) * (Math.PI / 180);
+          const a =
+            Math.sin(dLat / 2) ** 2 +
+            Math.cos(partnerLat * (Math.PI / 180)) * Math.cos(coords[1] * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+          distKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+      }
+
+      const distStr = distKm !== null ? `${distKm.toFixed(2)} km` : 'Location Coordinates Not Set';
+      const workAreaStr =
+        lead.location?.taskArea ||
+        lead.location?.locality ||
+        lead.location?.city ||
+        lead.location?.address ||
+        'N/A';
+
+      logger.info(
+        `   Rank #${rank} | Task ID: ${lead.id} | Title: "${lead.title}" | Category: ${lead.categoryLabel || lead.category} | Work Area: "${workAreaStr}" | Distance: ${distStr}`
+      );
+    });
 
     ApiResponse.success(res, enriched, 'Available leads retrieved');
   }
