@@ -39,6 +39,7 @@ function testDeniedMapsToBadRequest() {
     bookingStatus: 'assigned',
     taskStatus: 'started',
     taskExecutionPhase: 'arrived',
+    helperAssigned: true,
   });
   assert.strictEqual(result.status, 'DENIED');
   assert.strictEqual(result.reasonCode, 'IN_PROGRESS');

@@ -24,6 +24,7 @@ import type {
   HourlyCancellationResult,
   PersistedHourlyCancellationResult,
 } from './cancellationTypes';
+import { isHelperAssignedOnTask } from './cancellationTypes';
 
 export type CancelHourlyBookingParams = {
   orderId: string;
@@ -185,6 +186,8 @@ export async function cancelHourlyBooking(
     primaryItem?.scheduledTimeStart ||
     order.scheduledTimeStart;
 
+  const helperAssigned = isHelperAssignedOnTask(primaryTask);
+
   const context = buildHourlyCancellationContext({
     paidAmountRupees: Number(order.total) || 0,
     cancelledBy,
@@ -194,15 +197,19 @@ export async function cancelHourlyBooking(
     bookingStatus: order.status,
     taskStatus: primaryTask?.status,
     taskExecutionPhase: primaryTask?.executionPhase,
+    helperAssigned,
   });
 
   const result = evaluateHourlyCancellation(context);
 
   logger.info('Hourly cancellation: evaluated (no payment yet)', {
     orderId,
+    bookingType: 'hourly_helper',
+    helperAssigned,
     status: result.status,
     reasonCode: result.reasonCode,
     customerFeePaise: result.customerFeePaise,
+    refundAmountPaise: result.settlement.refundAmountPaise,
     refundRequired: result.refundRequired,
   });
 

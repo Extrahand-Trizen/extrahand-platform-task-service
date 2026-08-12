@@ -16,7 +16,10 @@ import logger from '../config/logger';
 import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
 import {
   assertBookNowSlotAvailable,
+  deriveBookNowTimeSlot,
   getOccupiedBookNowSlots,
+  isBookNowSlotWithinLeadTime,
+  normalizeBookNowSlotLabel,
   type BookNowTimeBucket,
 } from '../utils/bookNowSlotAvailability';
 import {
@@ -47,7 +50,10 @@ import {
 } from './cancellation/cancellationContext';
 import { config } from '../config/env';
 import type { BookingFulfillmentType } from '../models/BookingOrder';
-import type { HourlyCancellationOrchestratorResult } from './cancellation/cancellationTypes';
+import {
+  isHelperAssignedOnTask,
+  type HourlyCancellationOrchestratorResult,
+} from './cancellation/cancellationTypes';
 
 
 type BookingAddress = {
@@ -117,6 +123,83 @@ type PendingBookingLine = {
   scheduledTimeEnd?: string;
   timeSlot?: BookNowTimeBucket;
 };
+
+const MAX_ONE_TIME_RESCHEDULES = 2;
+const RESCHEDULE_SLOT_STARTS = [
+  '8:00 AM',
+  '8:30 AM',
+  '9:00 AM',
+  '9:30 AM',
+  '10:00 AM',
+  '10:30 AM',
+  '11:00 AM',
+  '11:30 AM',
+  '12:00 PM',
+  '12:30 PM',
+  '1:00 PM',
+  '1:30 PM',
+  '2:00 PM',
+  '2:30 PM',
+  '3:00 PM',
+  '3:30 PM',
+  '4:00 PM',
+  '4:30 PM',
+  '5:00 PM',
+  '5:30 PM',
+  '6:00 PM',
+  '6:30 PM',
+  '7:00 PM',
+  '7:30 PM',
+  '8:00 PM',
+];
+
+function parseCalendarDate(date: string): Date {
+  const trimmed = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    throw new BadRequestError('scheduledDate must be YYYY-MM-DD');
+  }
+  return new Date(`${trimmed}T00:00:00.000+05:30`);
+}
+
+function parseSlotMinutes(slot: string): number | null {
+  const match = String(slot || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const period = match[3].toUpperCase();
+  if (period === 'PM' && hours !== 12) hours += 12;
+  if (period === 'AM' && hours === 12) hours = 0;
+  return hours * 60 + minutes;
+}
+
+function minutesToSlot(totalMinutes: number): string {
+  const h24 = Math.floor(totalMinutes / 60) % 24;
+  const minutes = totalMinutes % 60;
+  const period = h24 >= 12 ? 'PM' : 'AM';
+  const h12 = h24 % 12 || 12;
+  return `${h12}:${minutes.toString().padStart(2, '0')} ${period}`;
+}
+
+function defaultSlotEnd(start: string): string {
+  const minutes = parseSlotMinutes(start);
+  return minutes == null ? '' : minutesToSlot(minutes + 30);
+}
+
+function isTaskPastNormalReschedule(task: {
+  status?: string;
+  executionPhase?: string;
+  startedAt?: Date;
+  arrivedAt?: Date;
+}) {
+  const status = String(task.status || '').toLowerCase();
+  const phase = String(task.executionPhase || '').toLowerCase();
+  return Boolean(
+    task.startedAt ||
+      task.arrivedAt ||
+      phase === 'arrived' ||
+      ['started', 'in_progress', 'completed', 'cancelled'].includes(status),
+  );
+}
 
 function pendingBookNowTaskId(orderId: string): string {
   return `booknow-pending-${orderId}`;
@@ -211,6 +294,29 @@ function orderScheduleFromLine(line: ResolvedLine | undefined) {
 }
 
 export class BookingService {
+  static async getFirstBookingEligibleCustomerUids(uids: string[]): Promise<string[]> {
+    const normalizedUids = Array.from(
+      new Set(
+        (uids || [])
+          .map((uid) => String(uid || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (normalizedUids.length === 0) {
+      return [];
+    }
+
+    const priorPaidStatuses = ['paid', 'assigning', 'assigned', 'cancelled', 'refunded'];
+    const ineligibleUids = await BookingOrder.distinct('customerUid', {
+      customerUid: { $in: normalizedUids },
+      status: { $in: priorPaidStatuses },
+    });
+
+    const ineligibleSet = new Set(ineligibleUids.map((uid) => String(uid)));
+    return normalizedUids.filter((uid) => !ineligibleSet.has(uid));
+  }
+
   /** Helper on site — highest Book Now cancellation tier. */
   static isBookNowPartnerReached(task: { status?: string }): boolean {
     const status = String(task.status || '').toLowerCase();
@@ -923,6 +1029,175 @@ export class BookingService {
     };
   }
 
+  static async getRescheduleEligibility(orderId: string, customerUid: string) {
+    const order = await BookingOrder.findOne({ orderId }).select(
+      'orderId customerUid status address scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount',
+    );
+    if (!order) throw new NotFoundError('Booking not found');
+    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
+
+    const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
+      .select('taskId')
+      .lean();
+    const taskIds = items.map((item) => item.taskId).filter(Boolean);
+    const tasks = taskIds.length
+      ? await Task.find({ _id: { $in: taskIds } })
+          .select('status assigneeId assigneeUid executionPhase startedAt arrivedAt')
+          .lean()
+      : [];
+    const hasCommittedPartner = tasks.some((task) => isHelperAssignedOnTask(task));
+    const pastNormalReschedule = tasks.some((task) => isTaskPastNormalReschedule(task as any));
+    const rescheduleCount = Number(order.rescheduleCount || 0);
+    const remainingReschedules = Math.max(0, MAX_ONE_TIME_RESCHEDULES - rescheduleCount);
+
+    if (!['paid', 'assigning', 'assigned'].includes(String(order.status || '').toLowerCase())) {
+      return {
+        allowed: false,
+        message: `Cannot reschedule booking in status ${order.status}`,
+        rescheduleCount,
+        rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+      };
+    }
+    if (rescheduleCount >= MAX_ONE_TIME_RESCHEDULES) {
+      return {
+        allowed: false,
+        message: 'This booking has already been rescheduled twice. Please contact support.',
+        rescheduleCount,
+        rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+      };
+    }
+    if (pastNormalReschedule) {
+      return {
+        allowed: false,
+        message: 'The helper has already arrived or the work has started. Please contact support.',
+        rescheduleCount,
+        rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+      };
+    }
+
+    return {
+      allowed: true,
+      chargeRequired: hasCommittedPartner,
+      message: hasCommittedPartner
+        ? 'Helper is already assigned. Existing late-change rules may apply.'
+        : 'Free reschedule available.',
+      rescheduleCount,
+      rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+      remainingReschedules,
+      maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+    };
+  }
+
+  static async getRescheduleSlots(orderId: string, customerUid: string, date: string) {
+    const order = await BookingOrder.findOne({ orderId }).select('customerUid address').lean();
+    if (!order) throw new NotFoundError('Booking not found');
+    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
+
+    const dateKey = String(date || '').trim();
+    parseCalendarDate(dateKey);
+    const city = String(order.address?.city || '').trim();
+    const occupied = await getOccupiedBookNowSlots(dateKey, city);
+    const blocked = new Set(occupied.occupiedTimeStarts.map(normalizeBookNowSlotLabel));
+    const slots = RESCHEDULE_SLOT_STARTS.map((start) => {
+      const normalized = normalizeBookNowSlotLabel(start);
+      const unavailable = blocked.has(normalized) || isBookNowSlotWithinLeadTime(normalized, dateKey);
+      return {
+        id: normalized,
+        label: normalized,
+        startTime: normalized,
+        endTime: defaultSlotEnd(normalized),
+        available: !unavailable,
+      };
+    });
+
+    return { date: dateKey, slots };
+  }
+
+  static async rescheduleOrder(
+    orderId: string,
+    customerUid: string,
+    params: {
+      scheduledDate?: string;
+      scheduledTimeStart?: string;
+      scheduledTimeEnd?: string;
+      reason?: string;
+    },
+  ) {
+    const eligibility = await BookingService.getRescheduleEligibility(orderId, customerUid);
+    if (!eligibility.allowed) {
+      throw new BadRequestError(eligibility.message || 'This booking cannot be rescheduled');
+    }
+
+    const dateKey = String(params.scheduledDate || '').trim();
+    const scheduledDate = parseCalendarDate(dateKey);
+    const scheduledTimeStart = normalizeBookNowSlotLabel(String(params.scheduledTimeStart || '').trim());
+    if (!scheduledTimeStart) throw new BadRequestError('scheduledTimeStart is required');
+    const scheduledTimeEnd =
+      String(params.scheduledTimeEnd || '').trim() || defaultSlotEnd(scheduledTimeStart);
+    const timeSlot = deriveBookNowTimeSlot(scheduledTimeStart);
+
+    const order = await BookingOrder.findOne({ orderId });
+    if (!order) throw new NotFoundError('Booking not found');
+    await assertBookNowSlotAvailable({
+      date: dateKey,
+      city: order.address.city,
+      scheduledTimeStart,
+      timeSlot,
+    });
+
+    order.scheduledDate = scheduledDate;
+    order.scheduledTimeStart = scheduledTimeStart;
+    order.scheduledTimeEnd = scheduledTimeEnd;
+    order.timeSlot = timeSlot;
+    order.rescheduleCount = Number(order.rescheduleCount || 0) + 1;
+    order.lastRescheduledAt = new Date();
+    await order.save();
+
+    const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } });
+    const taskIds = items.map((item) => item.taskId).filter(Boolean);
+    await Promise.all([
+      ...items.map((item) => {
+        item.scheduledDate = scheduledDate;
+        item.scheduledTimeStart = scheduledTimeStart;
+        item.scheduledTimeEnd = scheduledTimeEnd;
+        item.timeSlot = timeSlot;
+        return item.save();
+      }),
+      taskIds.length
+        ? Task.updateMany(
+            { _id: { $in: taskIds } },
+            {
+              $set: {
+                scheduledDate,
+                scheduledTimeStart,
+                scheduledTimeEnd,
+                timeSlot,
+                dateOption: 'on-date',
+                lastRescheduledAt: order.lastRescheduledAt,
+              },
+              $inc: { rescheduleCount: 1 },
+            },
+          )
+        : Promise.resolve(),
+    ]);
+
+    logger.info('Booking rescheduled by customer', {
+      orderId,
+      customerUid,
+      scheduledDate: dateKey,
+      scheduledTimeStart,
+      reason: params.reason,
+    });
+
+    return { order, items };
+  }
+
   /**
    * Client fallback when payment-service → task-service callback fails after Razorpay verify.
    * Idempotent — safe to call after every successful Book Now payment.
@@ -1325,7 +1600,17 @@ export class BookingService {
       ? new Date(task.assignedAt).toISOString()
       : null;
     const catalogId = item.skuSnapshot?.categorySlug || task.categorySlug;
-    const partnerReachedLocation = BookingService.isBookNowPartnerReached(task);
+    const partnerAssigned = isHelperAssignedOnTask(task);
+    const partnerReachedLocation =
+      partnerAssigned && BookingService.isBookNowPartnerReached(task);
+
+    logger.info('Book Now item cancel: assignment gate', {
+      orderId,
+      taskId: String(taskId),
+      partnerAssigned,
+      partnerReachedLocation,
+      paid: Boolean(order.paidAt),
+    });
 
     if (order.paidAt) {
       if (isMultiItem) {
@@ -1341,6 +1626,7 @@ export class BookingService {
           isLastActiveItem,
           catalogId,
           partnerReachedLocation,
+          partnerAssigned,
         });
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this service');
@@ -1359,6 +1645,7 @@ export class BookingService {
           taskTitle: task.title,
           catalogId,
           partnerReachedLocation,
+          partnerAssigned,
         });
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this service');
@@ -1412,6 +1699,13 @@ export class BookingService {
 
       if (order.paidAt && task.status === 'open' && !refundInitiated) {
         const firstItem = items.find((i) => String(i.taskId) === String(task._id)) || items[0];
+        const partnerAssigned = isHelperAssignedOnTask(task);
+        logger.info('Book Now order cancel: assignment gate', {
+          orderId,
+          taskId: String(task._id),
+          partnerAssigned,
+          paid: true,
+        });
         const refundResult = await PaymentClient.cancelPaymentForTask({
           taskId: String(task._id),
           bookingOrderId: orderId,
@@ -1424,7 +1718,9 @@ export class BookingService {
           feeBaseAmount: order.subtotal,
           taskTitle: task.title,
           catalogId: firstItem?.skuSnapshot?.categorySlug || task.categorySlug,
-          partnerReachedLocation: BookingService.isBookNowPartnerReached(task),
+          partnerReachedLocation:
+            partnerAssigned && BookingService.isBookNowPartnerReached(task),
+          partnerAssigned,
         });
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this booking');

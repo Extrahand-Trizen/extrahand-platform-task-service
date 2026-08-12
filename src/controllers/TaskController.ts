@@ -263,6 +263,39 @@ export class TaskController {
     ApiResponse.success(res, task, 'Task updated successfully');
   }
 
+  static async getRescheduleEligibility(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await TaskService.getRescheduleEligibility(req.params.id, req.user!.profileId);
+    ApiResponse.success(res, data, 'Reschedule eligibility retrieved');
+  }
+
+  static async getRescheduleSlots(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const date = String(req.query.date || '').trim();
+    if (!date) {
+      throw new BadRequestError('date is required');
+    }
+    const data = await TaskService.getRescheduleSlots(req.params.id, req.user!.profileId, date);
+    ApiResponse.success(res, data, 'Reschedule slots retrieved');
+  }
+
+  static async rescheduleTask(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const task = await TaskService.rescheduleTask(req.params.id, req.user!.profileId, {
+      scheduledDate: req.body?.scheduledDate,
+      scheduledTimeStart: req.body?.scheduledTimeStart,
+      scheduledTimeEnd: req.body?.scheduledTimeEnd,
+      reason: req.body?.reason,
+    });
+    ApiResponse.success(res, task, 'Task rescheduled successfully');
+  }
+
   /**
    * DELETE /api/v1/tasks/:id
    * Hard-delete untouched open tasks, or soft-remove from customer lists.
@@ -610,4 +643,3 @@ export class TaskController {
     res.json({ success: true, tasks });
   }
 }
-

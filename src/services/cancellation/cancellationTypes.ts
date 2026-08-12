@@ -24,6 +24,7 @@ export type CancellationStatus = 'ALLOWED' | 'DENIED';
 
 export type CancellationReasonCode =
   | 'FREE_CANCEL'
+  | 'NO_HELPER_ASSIGNED'
   | 'LATE_FLAT_FEE'
   | 'POST_ARRIVAL_FEE'
   | 'CUSTOMER_NO_SHOW'
@@ -34,6 +35,17 @@ export type CancellationReasonCode =
   | 'COMPLETED'
   | 'UNPAID'
   | 'INVALID_STATE';
+
+/** True when Task has a real assigned helper (assigneeUid and/or assigneeId). */
+export function isHelperAssignedOnTask(task: {
+  assigneeUid?: string | null;
+  assigneeId?: unknown;
+} | null | undefined): boolean {
+  if (!task) return false;
+  const uid = typeof task.assigneeUid === 'string' ? task.assigneeUid.trim() : '';
+  if (uid.length > 0) return true;
+  return task.assigneeId != null && String(task.assigneeId).trim().length > 0;
+}
 
 /** Amounts payment-service will execute — no policy meaning. */
 export type CancellationSettlement = {
@@ -56,6 +68,11 @@ export type HourlyCancellationContext = {
   taskStatus?: TaskStatus;
   /** Mongo Task.executionPhase when present. */
   taskExecutionPhase?: TaskExecutionPhase | null;
+  /**
+   * Whether a helper is actually assigned (Task.assigneeUid / assigneeId).
+   * When false, customer cancel is full refund (no time-based fees).
+   */
+  helperAssigned: boolean;
 };
 
 export type HourlyCancellationResult = {

@@ -124,6 +124,8 @@ export function buildHourlyCancellationContext(input: {
   bookingStatus: BookingOrderStatus;
   taskStatus?: unknown;
   taskExecutionPhase?: unknown;
+  /** Source of truth: Task.assigneeUid / assigneeId present. */
+  helperAssigned?: boolean;
 }): HourlyCancellationContext {
   return {
     paidAmountPaise: rupeesToPaise(input.paidAmountRupees),
@@ -140,6 +142,7 @@ export function buildHourlyCancellationContext(input: {
     bookingStatus: input.bookingStatus,
     taskStatus: normalizeTaskStatus(input.taskStatus),
     taskExecutionPhase: normalizeTaskExecutionPhase(input.taskExecutionPhase),
+    helperAssigned: Boolean(input.helperAssigned),
   };
 }
 

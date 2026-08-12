@@ -77,6 +77,27 @@ router.get(
   asyncHandler(TaskController.getMyApplication)
 );
 
+router.get(
+  "/:id/reschedule/eligibility",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getRescheduleEligibility)
+);
+
+router.get(
+  "/:id/reschedule/slots",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getRescheduleSlots)
+);
+
+router.post(
+  "/:id/reschedule",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.rescheduleTask)
+);
+
 // GET /api/v1/tasks/:id - Get a single task (public route)
 router.get(
   "/:id",

@@ -68,11 +68,13 @@ function testBuildContextAndEvaluateLate() {
     bookingStatus: 'assigned',
     taskStatus: 'assigned',
     taskExecutionPhase: 'on_the_way',
+    helperAssigned: true,
   });
 
   assert.strictEqual(ctx.paidAmountPaise, 18900);
   assert.strictEqual(ctx.firstHourRatePaise, 9900);
   assert.strictEqual(ctx.taskExecutionPhase, 'on_the_way');
+  assert.strictEqual(ctx.helperAssigned, true);
 
   const result = evaluateHourlyCancellation(ctx);
   assert.strictEqual(result.status, 'ALLOWED');
@@ -94,10 +96,31 @@ function testBuildContextPostArrival() {
     bookingStatus: 'assigned',
     taskStatus: 'assigned',
     taskExecutionPhase: 'arrived',
+    helperAssigned: true,
   });
   const result = evaluateHourlyCancellation(ctx);
   assert.strictEqual(result.reasonCode, 'POST_ARRIVAL_FEE');
   assert.strictEqual(result.customerFeePaise, 9900);
+}
+
+function testNoHelperAssignedFullRefund() {
+  const scheduledDate = new Date('2026-08-03T00:00:00.000+05:30');
+  const ctx = buildHourlyCancellationContext({
+    paidAmountRupees: 189,
+    cancelledBy: 'CUSTOMER',
+    cancelledAt: new Date('2026-08-03T07:30:00.000Z'),
+    scheduledDate,
+    scheduledTimeStart: '2:00 PM',
+    bookingStatus: 'paid',
+    taskStatus: 'open',
+    taskExecutionPhase: null,
+    helperAssigned: false,
+  });
+  const result = evaluateHourlyCancellation(ctx);
+  assert.strictEqual(result.status, 'ALLOWED');
+  assert.strictEqual(result.reasonCode, 'NO_HELPER_ASSIGNED');
+  assert.strictEqual(result.customerFeePaise, 0);
+  assert.strictEqual(result.settlement.refundAmountPaise, 18900);
 }
 
 function testPersistedResultRoundTrip() {
@@ -134,6 +157,7 @@ testIsHourlyHints();
 testResolveVisitScheduledAt();
 testBuildContextAndEvaluateLate();
 testBuildContextPostArrival();
+testNoHelperAssignedFullRefund();
 testPersistedResultRoundTrip();
 testMissingScheduleThrows();
 

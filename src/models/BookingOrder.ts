@@ -65,6 +65,8 @@ export interface IBookingOrder extends Document {
   /** Serialized cart lines — tasks are created only after payment succeeds. */
   pendingLines?: Record<string, unknown>[];
   bookingNotes?: string;
+  rescheduleCount?: number;
+  lastRescheduledAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -119,6 +121,8 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     deletedByCustomerId: { type: String, index: true },
     pendingLines: { type: [Schema.Types.Mixed], default: undefined },
     bookingNotes: String,
+    rescheduleCount: { type: Number, default: 0, min: 0 },
+    lastRescheduledAt: Date,
   },
   { timestamps: true }
 );

@@ -44,6 +44,12 @@ router.post(
 );
 
 router.post(
+  '/bookings/internal/first-booking-eligible',
+  serviceAuthMiddleware,
+  asyncHandler(BookingController.getFirstBookingEligibleCustomers)
+);
+
+router.post(
   '/recurring/internal/visit-payment-captured',
   serviceAuthMiddleware,
   asyncHandler(RecurringVisitController.visitPaymentCaptured)

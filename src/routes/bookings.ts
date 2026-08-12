@@ -20,6 +20,21 @@ router.get(
   authMiddleware,
   asyncHandler(BookingController.getOrderIdForTask),
 );
+router.get(
+  '/:orderId/reschedule/eligibility',
+  authMiddleware,
+  asyncHandler(BookingController.getRescheduleEligibility),
+);
+router.get(
+  '/:orderId/reschedule/slots',
+  authMiddleware,
+  asyncHandler(BookingController.getRescheduleSlots),
+);
+router.post(
+  '/:orderId/reschedule',
+  authMiddleware,
+  asyncHandler(BookingController.rescheduleOrder),
+);
 router.get('/:orderId', authMiddleware, asyncHandler(BookingController.getOrder));
 router.post(
   '/:orderId/abandon',

@@ -141,6 +141,8 @@ export interface ITask extends Document {
   scheduledDate?: Date;
   scheduledTimeStart?: string;
   scheduledTimeEnd?: string;
+  rescheduleCount?: number;
+  lastRescheduledAt?: Date;
   dateOption?: "flexible" | "on-date" | "before-date";
   timeSlot?: "morning" | "midday" | "afternoon" | "evening";
   flexibility: "strict" | "flexible" | "anytime";
@@ -540,6 +542,8 @@ const TaskSchema = new Schema<ITask>(
     scheduledDate: Date,
     scheduledTimeStart: String,
     scheduledTimeEnd: String,
+    rescheduleCount: { type: Number, default: 0, min: 0 },
+    lastRescheduledAt: Date,
     dateOption: {
       type: String,
       enum: ["flexible", "on-date", "before-date"],

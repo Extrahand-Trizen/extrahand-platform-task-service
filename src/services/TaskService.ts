@@ -50,6 +50,83 @@ import {
   truncateDescription,
 } from './myTasksEnrichment';
 
+const MAX_NORMAL_TASK_RESCHEDULES = 2;
+const NORMAL_TASK_RESCHEDULE_SLOTS = [
+  '8:00 AM',
+  '8:30 AM',
+  '9:00 AM',
+  '9:30 AM',
+  '10:00 AM',
+  '10:30 AM',
+  '11:00 AM',
+  '11:30 AM',
+  '12:00 PM',
+  '12:30 PM',
+  '1:00 PM',
+  '1:30 PM',
+  '2:00 PM',
+  '2:30 PM',
+  '3:00 PM',
+  '3:30 PM',
+  '4:00 PM',
+  '4:30 PM',
+  '5:00 PM',
+  '5:30 PM',
+  '6:00 PM',
+  '6:30 PM',
+  '7:00 PM',
+  '7:30 PM',
+  '8:00 PM',
+];
+
+function parseNormalTaskCalendarDate(date: string): Date {
+  const trimmed = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    throw new BadRequestError('scheduledDate must be YYYY-MM-DD');
+  }
+  return new Date(`${trimmed}T00:00:00.000+05:30`);
+}
+
+function parseNormalTaskSlotMinutes(slot: string): number | null {
+  const match = String(slot || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const period = match[3].toUpperCase();
+  if (period === 'PM' && hours !== 12) hours += 12;
+  if (period === 'AM' && hours === 12) hours = 0;
+  return hours * 60 + minutes;
+}
+
+function normalTaskMinutesToSlot(totalMinutes: number): string {
+  const h24 = Math.floor(totalMinutes / 60) % 24;
+  const minutes = totalMinutes % 60;
+  const period = h24 >= 12 ? 'PM' : 'AM';
+  const h12 = h24 % 12 || 12;
+  return `${h12}:${minutes.toString().padStart(2, '0')} ${period}`;
+}
+
+function normalTaskSlotEnd(start: string): string {
+  const minutes = parseNormalTaskSlotMinutes(start);
+  return minutes == null ? '' : normalTaskMinutesToSlot(minutes + 30);
+}
+
+function normalizeNormalTaskSlot(slot: string): string {
+  const minutes = parseNormalTaskSlotMinutes(slot);
+  return minutes == null ? String(slot || '').trim() : normalTaskMinutesToSlot(minutes);
+}
+
+function isNormalTaskPastReschedule(task: Pick<ITask, 'status' | 'executionPhase' | 'startedAt' | 'arrivedAt'>) {
+  const status = String(task.status || '').toLowerCase();
+  const phase = String(task.executionPhase || '').toLowerCase();
+  return Boolean(
+    task.startedAt ||
+      task.arrivedAt ||
+      phase === 'arrived' ||
+      ['started', 'in_progress', 'completed', 'cancelled'].includes(status),
+  );
+}
+
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
   if (!frontendCategory) return "other";
@@ -1692,6 +1769,146 @@ export class TaskService {
 
     TaskService.invalidateTaskCache(taskId);
     return updatedTask as unknown as ITask;
+  }
+
+  static async getRescheduleEligibility(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+  ) {
+    const task = await Task.findById(taskId).select(
+      'requesterId status assigneeId assigneeUid executionPhase startedAt arrivedAt isRecurringWork recurringPlan rescheduleCount',
+    );
+    if (!task) throw new NotFoundError('Task not found');
+    if (!task.requesterId.equals(profileId)) {
+      throw new ForbiddenError('Not authorized to reschedule this task');
+    }
+
+    const rescheduleCount = Number(task.rescheduleCount || 0);
+    const remainingReschedules = Math.max(0, MAX_NORMAL_TASK_RESCHEDULES - rescheduleCount);
+    if ((task as any).isRecurringWork || isRecurringVisitPlanTask(task as any)) {
+      return {
+        allowed: false,
+        message: 'Use recurring visit controls for recurring work.',
+        rescheduleCount,
+        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+      };
+    }
+    if (!['open', 'paid', 'assigning', 'assigned'].includes(String(task.status || '').toLowerCase())) {
+      return {
+        allowed: false,
+        message: `Cannot reschedule work in status ${task.status}`,
+        rescheduleCount,
+        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+      };
+    }
+    if (rescheduleCount >= MAX_NORMAL_TASK_RESCHEDULES) {
+      return {
+        allowed: false,
+        message: 'This work has already been rescheduled twice. Please contact support.',
+        rescheduleCount,
+        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+      };
+    }
+    if (isNormalTaskPastReschedule(task as any)) {
+      return {
+        allowed: false,
+        message: 'The helper has already arrived or the work has started. Please contact support.',
+        rescheduleCount,
+        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+      };
+    }
+
+    const hasCommittedPartner = Boolean((task as any).assigneeId || (task as any).assigneeUid);
+    return {
+      allowed: true,
+      chargeRequired: hasCommittedPartner,
+      message: hasCommittedPartner
+        ? 'Helper is already assigned. Existing late-change rules may apply.'
+        : 'Free reschedule available.',
+      rescheduleCount,
+      rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+      remainingReschedules,
+      maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+    };
+  }
+
+  static async getRescheduleSlots(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    date: string,
+  ) {
+    const task = await Task.findById(taskId).select('requesterId').lean();
+    if (!task) throw new NotFoundError('Task not found');
+    if (!task.requesterId.equals(profileId)) {
+      throw new ForbiddenError('Not authorized to reschedule this task');
+    }
+    const dateKey = String(date || '').trim();
+    parseNormalTaskCalendarDate(dateKey);
+    return {
+      date: dateKey,
+      slots: NORMAL_TASK_RESCHEDULE_SLOTS.map((start) => ({
+        id: start,
+        label: start,
+        startTime: start,
+        endTime: normalTaskSlotEnd(start),
+        available: true,
+      })),
+    };
+  }
+
+  static async rescheduleTask(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    params: {
+      scheduledDate?: string;
+      scheduledTimeStart?: string;
+      scheduledTimeEnd?: string;
+      reason?: string;
+    },
+  ): Promise<ITask> {
+    const eligibility = await TaskService.getRescheduleEligibility(taskId, profileId);
+    if (!eligibility.allowed) {
+      throw new BadRequestError(eligibility.message || 'This work cannot be rescheduled');
+    }
+
+    const scheduledDate = parseNormalTaskCalendarDate(String(params.scheduledDate || '').trim());
+    const scheduledTimeStart = normalizeNormalTaskSlot(String(params.scheduledTimeStart || '').trim());
+    if (!scheduledTimeStart) throw new BadRequestError('scheduledTimeStart is required');
+    const scheduledTimeEnd =
+      String(params.scheduledTimeEnd || '').trim() || normalTaskSlotEnd(scheduledTimeStart);
+
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError('Task not found');
+    if (!task.requesterId.equals(profileId)) {
+      throw new ForbiddenError('Not authorized to reschedule this task');
+    }
+
+    task.scheduledDate = scheduledDate;
+    task.scheduledTimeStart = scheduledTimeStart;
+    task.scheduledTimeEnd = scheduledTimeEnd;
+    task.dateOption = 'on-date';
+    task.rescheduleCount = Number(task.rescheduleCount || 0) + 1;
+    task.lastRescheduledAt = new Date();
+    await task.save();
+
+    logger.info('Task rescheduled by customer', {
+      taskId,
+      profileId: String(profileId),
+      scheduledDate: params.scheduledDate,
+      scheduledTimeStart,
+      reason: params.reason,
+    });
+
+    TaskService.invalidateTaskCache(taskId);
+    return task;
   }
 
   /** Collect parent task plus recurring visit child tasks linked in schedule or RecurringVisit collection. */

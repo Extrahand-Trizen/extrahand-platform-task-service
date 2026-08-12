@@ -16,6 +16,7 @@ function testLateSettlementShape() {
     bookingStatus: 'assigned',
     taskStatus: 'assigned',
     taskExecutionPhase: 'on_the_way',
+    helperAssigned: true,
   });
   assert.strictEqual(result.status, 'ALLOWED');
   assert.strictEqual(
@@ -30,6 +31,25 @@ function testLateSettlementShape() {
   assert.strictEqual(result.refundRequired, true);
 }
 
+function testNoHelperAssignedFullSettlement() {
+  const result = evaluateHourlyCancellation({
+    paidAmountPaise: 18900,
+    firstHourRatePaise: 9900,
+    cancelledBy: 'CUSTOMER',
+    cancelledAt: new Date('2026-08-03T11:00:00.000Z'),
+    scheduledAt: new Date('2026-08-03T12:00:00.000Z'),
+    bookingStatus: 'paid',
+    taskStatus: 'open',
+    taskExecutionPhase: null,
+    helperAssigned: false,
+  });
+  assert.strictEqual(result.reasonCode, 'NO_HELPER_ASSIGNED');
+  assert.strictEqual(result.settlement.refundAmountPaise, 18900);
+  assert.strictEqual(result.settlement.workerCompensationPaise, 0);
+  assert.strictEqual(result.customerFeePaise, 0);
+  assert.strictEqual(result.refundRequired, true);
+}
+
 function testFeeOnlyNoShowSettlement() {
   const result = evaluateHourlyCancellation({
     paidAmountPaise: 9900,
@@ -40,6 +60,7 @@ function testFeeOnlyNoShowSettlement() {
     bookingStatus: 'assigned',
     taskStatus: 'assigned',
     taskExecutionPhase: 'arrived',
+    helperAssigned: true,
   });
   assert.strictEqual(result.reasonCode, 'CUSTOMER_NO_SHOW');
   assert.strictEqual(result.settlement.refundAmountPaise, 0);
@@ -48,5 +69,6 @@ function testFeeOnlyNoShowSettlement() {
 }
 
 testLateSettlementShape();
+testNoHelperAssignedFullSettlement();
 testFeeOnlyNoShowSettlement();
 console.log('hourlyCancellationSettlement.test.ts: all tests passed');

@@ -317,4 +317,3 @@ export class Config {
 Config.initialize();
 
 export const config = Config;
-
