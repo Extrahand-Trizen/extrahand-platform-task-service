@@ -32,6 +32,7 @@ import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
@@ -1402,6 +1403,15 @@ export class TaskService {
     }
 
     const taskRecord = task.toObject() as ITask;
+
+    if (taskRecord.bookingSource === 'book_now') {
+      try {
+        await BookNowAutoAssignService.autoAssign(taskRecord);
+      } catch (autoAssignErr) {
+        logger.error('[BookNowAutoAssign] ❌ Auto-assignment error in TaskService:', autoAssignErr);
+      }
+    }
+
     schedulePostCreateNotifications(taskRecord, {
       uid,
       mappedCategory,
