@@ -47,4 +47,23 @@ router.patch(
   asyncHandler(PartnerBookNowController.updateLeadStatus as any),
 );
 
+// POST /api/v1/book-now/tasks/:id/confirm-assignment
+// Partner confirms acknowledgement of their auto-assigned Book Now lead.
+// Sets task.confirmed = true, task.confirmedAt = now.
+router.post(
+  '/tasks/:id/confirm-assignment',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(PartnerBookNowController.confirmAssignment as any),
+);
+
+// GET /api/v1/book-now/admin/unacknowledged-leads
+// Returns assigned Book Now leads where partner has NOT confirmed — for support dashboard.
+router.get(
+  '/admin/unacknowledged-leads',
+  serviceAuthMiddleware,
+  asyncHandler(PartnerBookNowController.getUnacknowledgedLeads as any),
+);
+
 export default router;
+

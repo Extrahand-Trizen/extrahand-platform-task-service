@@ -416,6 +416,9 @@ export class PartnerBookNowController {
           scheduledTimeEnd: task.scheduledTimeEnd,
           createdAt: task.createdAt,
           partnerAcceptedAt: task.partnerAcceptedAt,
+          confirmed: Boolean(task.confirmed),
+          confirmedAt: task.confirmedAt || (task as any).confirmed_at || null,
+          confirmed_at: task.confirmedAt || (task as any).confirmed_at || null,
           requesterName,
           bookingOrderId: task.bookingOrderId,
           bookingItemId: task.bookingItemId,
@@ -607,5 +610,81 @@ export class PartnerBookNowController {
     }
 
     ApiResponse.success(res, { id: String(task._id), status: newStatus }, 'Status updated');
+  }
+
+  /**
+   * POST /api/v1/book-now/tasks/:id/confirm-assignment
+   * Partner acknowledges/confirms their assigned Book Now lead.
+   * Sets task.confirmed = true and task.confirmedAt = current timestamp.
+   */
+  static async confirmAssignment(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+    let profileId: mongoose.Types.ObjectId | undefined = req.user?.profileId;
+
+    if (!profileId && uid) {
+      const Profile = mongoose.connection.collection('profiles');
+      const found = await Profile.findOne({ uid }, { projection: { _id: 1 } });
+      if (found) profileId = found._id as mongoose.Types.ObjectId;
+    }
+
+    if (!profileId || !uid) {
+      throw new BadRequestError('Profile ID and UID required');
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      throw new BadRequestError('Invalid task ID');
+    }
+
+    const partnerOid =
+      profileId instanceof mongoose.Types.ObjectId
+        ? profileId
+        : new mongoose.Types.ObjectId(profileId as string);
+
+    const task = await Task.findOne({
+      _id: new mongoose.Types.ObjectId(id),
+      bookingSource: 'book_now',
+      $or: [{ partnerId: partnerOid }, { partnerUid: uid }],
+    });
+
+    if (!task) {
+      throw new NotFoundError('Assigned Book Now lead not found or not assigned to partner');
+    }
+
+    const now = new Date();
+    task.confirmed = true;
+    task.confirmedAt = now;
+    (task as any).confirmed_at = now;
+    await task.save();
+
+    logger.info(`[PartnerBookNow] Task ${id} assignment confirmed by partner ${uid} at ${now.toISOString()}`);
+
+    ApiResponse.success(
+      res,
+      {
+        id: String(task._id),
+        confirmed: true,
+        confirmedAt: now,
+        confirmed_at: now,
+      },
+      'Assignment confirmed successfully',
+    );
+  }
+
+  /**
+   * GET /api/v1/book-now/admin/unacknowledged-leads
+   * Returns assigned Book Now leads where partner has NOT yet confirmed (confirmed !== true).
+   * Flagged for support team dashboard follow-up.
+   */
+  static async getUnacknowledgedLeads(_req: AuthenticatedRequest, res: Response): Promise<void> {
+    const tasks = await Task.find({
+      bookingSource: 'book_now',
+      status: 'assigned',
+      $or: [{ confirmed: { $ne: true } }, { confirmed: false }],
+    })
+      .sort({ assignedAt: -1, createdAt: -1 })
+      .lean();
+
+    ApiResponse.success(res, tasks, 'Unacknowledged leads retrieved for support dashboard');
   }
 }
