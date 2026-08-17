@@ -13,6 +13,38 @@ import { TaskTrackingBundleService } from '../services/TaskTrackingBundleService
 import { ConsultationProjectService } from '../services/ConsultationProjectService';
 import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
+import { resolvePartnerMatchConditions } from '../services/partnerVisibility';
+
+/**
+ * Internal/system service callers that legitimately list the Book Now pool
+ * without going through the partner feed (main admin dashboard).
+ */
+const INTERNAL_SERVICE_UIDS = ['main-admin-service'];
+
+/**
+ * Book Now pool visibility guard for GET /tasks?bookingSource=book_now.
+ *
+ * End users (partners) may only ever receive Book Now jobs that match BOTH
+ * their registered service categories and their selected work areas. When the
+ * caller cannot be resolved to a partner, the pool is fully blocked. Internal
+ * service callers (admin) stay unrestricted.
+ */
+async function resolveBookNowVisibilityGuard(
+  req: AuthenticatedRequest,
+  bookingSource: string | undefined,
+): Promise<{
+  partnerVisibilityFilter?: Record<string, any>;
+  partnerVisibilityBlocked?: boolean;
+}> {
+  if (bookingSource !== 'book_now' || !req.user?.uid) return {};
+  if (INTERNAL_SERVICE_UIDS.includes(req.user.uid)) return {};
+
+  const partnerMatch = await resolvePartnerMatchConditions(req);
+  if (partnerMatch) {
+    return { partnerVisibilityFilter: { $and: [partnerMatch.category, partnerMatch.workArea] } };
+  }
+  return { partnerVisibilityBlocked: true };
+}
 
 export class TaskController {
   /**
@@ -72,6 +104,7 @@ export class TaskController {
       posterUid: posterUid ? (posterUid as string) : undefined,
       requesterId: requesterId ? (requesterId as string) : undefined,
       bookingSource: bookingSource ? (bookingSource as string) : undefined,
+      ...(await resolveBookNowVisibilityGuard(req, bookingSource ? (bookingSource as string) : undefined)),
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
     });

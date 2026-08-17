@@ -32,6 +32,7 @@ import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
@@ -400,13 +401,34 @@ export class TaskService {
     posterUid?: string;
     requesterId?: string;
     bookingSource?: string;
+    /**
+     * Server-side Book Now visibility guard (partner category ∩ work areas).
+     * Only applied when bookingSource === 'book_now'.
+     */
+    partnerVisibilityFilter?: Record<string, any> | null;
+    /** When true the requesting end user may not see ANY Book Now pool jobs. */
+    partnerVisibilityBlocked?: boolean;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, limit = 50, page = 1 } = filters;
+    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, partnerVisibilityFilter, partnerVisibilityBlocked, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
+
+    // End users explicitly requesting the Book Now pool who cannot be resolved
+    // to a qualifying partner see no Book Now jobs at all.
+    if (partnerVisibilityBlocked) {
+      return {
+        tasks: [],
+        pagination: {
+          page: effectivePage,
+          limit: effectiveLimit,
+          total: 0,
+          pages: 0,
+        },
+      };
+    }
 
     // Determine if this request is eligible for Redis caching (discover list shape)
     const hasCategory =
@@ -422,6 +444,7 @@ export class TaskService {
 
     const isCacheable =
       (status === "open" || (Array.isArray(status) && status.length === 1 && status[0] === "open")) &&
+      !bookingSource &&
       !(excludeOverdue === true || excludeOverdue === 'true') &&
       !hasCategory &&
       !city &&
@@ -472,7 +495,14 @@ export class TaskService {
     if (bookingSource && bookingSource !== 'all') {
       // Admin requested a specific booking source — filter directly by bookingSource
       if (bookingSource === 'book_now') {
-        andClauses.push({ bookingSource: 'book_now' });
+        const bookNowClauses: any[] = [{ bookingSource: 'book_now' }];
+        // Partner visibility guard: end users only receive Book Now jobs that
+        // match their registered service categories AND their selected work
+        // areas — enforced inside the query itself.
+        if (partnerVisibilityFilter) {
+          bookNowClauses.push(partnerVisibilityFilter);
+        }
+        andClauses.push({ $and: bookNowClauses });
       } else if (bookingSource === 'posted_task' || bookingSource === 'marketplace') {
         // Posted tasks: no bookingSource field, or marketplace
         andClauses.push({
@@ -984,6 +1014,17 @@ export class TaskService {
       }
     }
 
+    // Attach dispatchLogs for Book Now tasks if not yet stored
+    if (task.bookingSource === 'book_now' && (!task.dispatchLogs || !task.dispatchLogs.length)) {
+      try {
+        const { BookNowAutoAssignService } = await import('./BookNowAutoAssignService');
+        const logs = await BookNowAutoAssignService.buildDispatchLog(task);
+        (task as any).dispatchLogs = logs;
+      } catch (err) {
+        logger.warn('Failed to build on-the-fly dispatch log', { taskId, error: err });
+      }
+    }
+
     if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
       const planDoc = await Task.findById(taskId);
       if (planDoc) {
@@ -1445,6 +1486,15 @@ export class TaskService {
     }
 
     const taskRecord = task.toObject() as ITask;
+
+    if (taskRecord.bookingSource === 'book_now') {
+      try {
+        await BookNowAutoAssignService.autoAssign(taskRecord);
+      } catch (autoAssignErr) {
+        logger.error('[BookNowAutoAssign] ❌ Auto-assignment error in TaskService:', autoAssignErr);
+      }
+    }
+
     schedulePostCreateNotifications(taskRecord, {
       uid,
       mappedCategory,

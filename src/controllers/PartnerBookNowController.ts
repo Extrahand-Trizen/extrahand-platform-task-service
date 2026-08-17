@@ -7,42 +7,39 @@ import { ApiResponse } from '../utils/ApiResponse';
 import { emitBookNowLeadRemoved } from '../socket/socketHandlers';
 import logger from '../config/logger';
 import { CatalogService } from '../services/CatalogService';
+import { resolvePartnerMatchConditions, normalizeCategory } from '../services/partnerVisibility';
+import { CancellationPassService } from '../services/CancellationPassService';
 
 /**
- * Maps category aliases to canonical category names so queries are robust
- * even when the task was created with a different slug variant.
+ * Server-side visibility guard for the Book Now partner feed.
+ *
+ * A Book Now job is only visible to a partner when BOTH match:
+ *   - Category match: the job's service category equals one of the partner's
+ *     registered/approved service categories (partnerProfile.categories).
+ *   - Work area match: the job's locality (location.taskArea / locality /
+ *     city mentioned in the address) equals one of the partner's selected
+ *     work areas (partnerProfile.workAreas).
+ *
+ * The restriction is applied inside the Mongo query itself, so a partner can
+ * never receive a job they don't qualify for — even via direct API calls.
  */
-const CATEGORY_MAP: Record<string, string[]> = {
-  cleaning: ['cleaning', 'home-cleaning', 'home_cleaning'],
-  repair: ['repair', 'plumbing', 'electrical', 'carpenter'],
-  plumbing: ['plumbing', 'repair'],
-  electrical: ['electrical', 'repair'],
-  delivery: ['delivery', 'pickup', 'pick-drop'],
-  assembly: ['assembly', 'furniture-assembly'],
-  gardening: ['gardening', 'lawn-mowing'],
-  petcare: ['petcare', 'pet-care'],
-  'packers-movers': ['packers-movers', 'moving'],
-  beautician: ['beautician', 'beauty', 'salon'],
-  driver: ['driver', 'chauffeur', 'driving'],
-  'home-cleaning': ['cleaning', 'home-cleaning'],
-};
-
-function normalizeCategory(input: string): string {
-  const lower = input.toLowerCase().replace(/[\s_-]+/g, '-');
-  for (const [canonical, aliases] of Object.entries(CATEGORY_MAP)) {
-    if (aliases.includes(lower) || canonical === lower) return canonical;
-  }
-  return lower;
-}
 
 export class PartnerBookNowController {
   /**
    * GET /api/v1/book-now/available-leads
-   * Fetch open (unassigned) Book Now tasks matching the partner's work areas.
+   * Fetch open (unassigned) Book Now tasks for the authenticated partner.
+   * A job is only visible when BOTH match:
+   *   - Category match: the job's service category equals one of the
+   *     partner's registered/approved service categories
+   *     (partnerProfile.categories).
+   *   - Work area match: the job's locality (location.taskArea / locality /
+   *     city mentioned in the address) equals one of the partner's selected
+   *     work areas (partnerProfile.workAreas).
    * "Overdue" tasks are still status === 'open' in the DB — they show up too.
    *
    * Query params:
-   *   - categories (comma-separated, optional) – override work-areas lookup
+   *   - categories (comma-separated, optional) – additional narrowing on top
+   *     of the partner's own categories
    *   - lat, lng, radiusKm (optional) – for geo filtering
    */
   static async getAvailableLeads(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -60,6 +57,20 @@ export class PartnerBookNowController {
       partnerUid: null,
     };
 
+    // Server-side visibility guard: the requesting partner can only ever see
+    // jobs whose category matches one of their registered categories AND whose
+    // locality matches one of their selected work areas.
+    const partnerMatch = await resolvePartnerMatchConditions(req);
+    if (!partnerMatch) {
+      // Partner not found, or has no categories / no work areas → no leads.
+      ApiResponse.success(res, [], 'Available leads retrieved');
+      return;
+    }
+
+    const andConditions: Record<string, any>[] = [partnerMatch.category, partnerMatch.workArea];
+
+    // Optional client-provided `categories` param further narrows the feed;
+    // it can never widen it past the partner's own category constraints.
     if (categories) {
       const explicitAreas = categories
         .split(',')
@@ -67,25 +78,32 @@ export class PartnerBookNowController {
         .filter(Boolean);
       if (explicitAreas.length) {
         const normalizedAreas = explicitAreas.map(normalizeCategory);
-        filter.$or = [
-          { category: { $in: normalizedAreas } },
-          { categorySlug: { $in: normalizedAreas } },
-          { categoryLabel: { $in: explicitAreas } },
-        ];
+        andConditions.push({
+          $or: [
+            { category: { $in: normalizedAreas } },
+            { categorySlug: { $in: normalizedAreas } },
+            { categoryLabel: { $in: explicitAreas } },
+          ],
+        });
       }
     }
+
+    if (andConditions.length) filter.$and = andConditions;
 
     let tasks: Record<string, any>[];
 
     if (userLat !== undefined && userLng !== undefined) {
+      // $geoNear must be the FIRST stage of the pipeline; the visibility
+      // filter (bookingSource/status/category/work-area guard) is passed
+      // through its `query` option.
       tasks = await Task.aggregate([
-        { $match: filter },
         {
           $geoNear: {
             near: { type: 'Point', coordinates: [userLng, userLat] },
             distanceField: 'distance',
             maxDistance: maxRadius * 1000,
             spherical: true,
+            query: filter,
           },
         },
         { $sort: { createdAt: -1 } },
@@ -152,6 +170,73 @@ export class PartnerBookNowController {
         };
       }),
     );
+
+    // Logger: Print partner Name, Profile ID, UID, Work Areas, Categories & calculated distance for all returned Book Now leads
+    const partnerUid = req.user?.uid || (req.headers['x-user-id'] as string) || 'unknown';
+    let partnerName = 'Partner';
+    let partnerProfileId = req.user?.profileId?.toString() || 'N/A';
+    let partnerWorkAreas: string[] = [];
+    let partnerCategories: string[] = [];
+    let partnerLat: number | undefined = userLat;
+    let partnerLng: number | undefined = userLng;
+
+    try {
+      const Profile = mongoose.connection.collection('profiles');
+      const pDoc = await Profile.findOne(
+        { $or: [{ uid: partnerUid }, { _id: req.user?.profileId }] },
+        { projection: { name: 1, fullName: 1, _id: 1, partnerProfile: 1, location: 1, homeLocation: 1 } }
+      );
+      if (pDoc) {
+        partnerName = (pDoc as any).name || (pDoc as any).fullName || 'Partner';
+        partnerProfileId = String((pDoc as any)._id);
+        const pp = (pDoc as any).partnerProfile || {};
+        partnerWorkAreas = Array.isArray(pp.workAreas) ? pp.workAreas : [];
+        partnerCategories = Array.isArray(pp.categories) ? pp.categories : [];
+
+        if (partnerLat === undefined || partnerLng === undefined) {
+          const pCoords = (pDoc as any).location?.coordinates || (pDoc as any).homeLocation?.coordinates;
+          if (Array.isArray(pCoords) && pCoords.length === 2 && typeof pCoords[1] === 'number') {
+            partnerLng = pCoords[0];
+            partnerLat = pCoords[1];
+          }
+        }
+      }
+    } catch {
+      // swallow — profile lookup for logging is best-effort
+    }
+
+    logger.info(`📋 [BookNowLeads] Partner Name: "${partnerName}" | Profile ID: ${partnerProfileId} | UID: ${partnerUid}`);
+    logger.info(`   Partner Work Areas: [${partnerWorkAreas.join(', ')}] | Categories: [${partnerCategories.join(', ')}] | Total Available Leads: ${enriched.length}`);
+
+    enriched.forEach((lead, idx) => {
+      const rank = idx + 1;
+      let distKm: number | null = lead.distance != null ? lead.distance / 1000 : null;
+
+      // Fallback Haversine distance calculation if geoNear distance was not computed by query
+      if (distKm === null && partnerLat !== undefined && partnerLng !== undefined && lead.location?.coordinates) {
+        const coords = lead.location.coordinates;
+        if (Array.isArray(coords) && coords.length === 2 && typeof coords[1] === 'number') {
+          const dLat = (coords[1] - partnerLat) * (Math.PI / 180);
+          const dLon = (coords[0] - partnerLng) * (Math.PI / 180);
+          const a =
+            Math.sin(dLat / 2) ** 2 +
+            Math.cos(partnerLat * (Math.PI / 180)) * Math.cos(coords[1] * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+          distKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+      }
+
+      const distStr = distKm !== null ? `${distKm.toFixed(2)} km` : 'Location Coordinates Not Set';
+      const workAreaStr =
+        lead.location?.taskArea ||
+        lead.location?.locality ||
+        lead.location?.city ||
+        lead.location?.address ||
+        'N/A';
+
+      logger.info(
+        `   Rank #${rank} | Task ID: ${lead.id} | Title: "${lead.title}" | Category: ${lead.categoryLabel || lead.category} | Work Area: "${workAreaStr}" | Distance: ${distStr}`
+      );
+    });
 
     ApiResponse.success(res, enriched, 'Available leads retrieved');
   }
@@ -332,6 +417,9 @@ export class PartnerBookNowController {
           scheduledTimeEnd: task.scheduledTimeEnd,
           createdAt: task.createdAt,
           partnerAcceptedAt: task.partnerAcceptedAt,
+          confirmed: Boolean(task.confirmed),
+          confirmedAt: task.confirmedAt || (task as any).confirmed_at || null,
+          confirmed_at: task.confirmedAt || (task as any).confirmed_at || null,
           requesterName,
           bookingOrderId: task.bookingOrderId,
           bookingItemId: task.bookingItemId,
@@ -399,35 +487,14 @@ export class PartnerBookNowController {
         throw new BadRequestError('Task can only be cancelled before the journey is started');
       }
 
-      // Apply the performer cancellation penalty via the payment service
-      // (best-effort, non-blocking — the lead must return to the pool regardless).
-      // No customer refund is issued; the penalty is recovered from the partner's
-      // future payout.
+      // Track cancellation pass usage (best-effort, non-blocking).
+      // No penalty is applied — passes are informational only.
       try {
-        const { PaymentClient } = await import('../services/PaymentClient');
-        const taskStartIso = (task.scheduledDate || task.createdAt).toISOString();
-        const feeBaseAmount =
-          typeof task.budget === 'object' && task.budget
-            ? Number(task.budget.amount)
-            : Number(task.budget);
-        const penaltyResult = await PaymentClient.createPerformerPenalty({
-          performerUid: uid,
-          taskId: String(task._id),
-          taskStartDate: taskStartIso,
-          feeBaseAmount,
-          reason: cancellationReason || 'Partner cancelled before starting the journey',
-          taskTitle: task.title,
-        });
-        if (!penaltyResult.success) {
-          logger.error('[PartnerBookNow] Cancellation penalty failed:', {
-            taskId: id,
-            error: penaltyResult.error,
-          });
-        }
-      } catch (penaltyError: any) {
-        logger.error('[PartnerBookNow] Cancellation penalty threw:', {
+        await CancellationPassService.consumePass(uid);
+      } catch (passError: any) {
+        logger.error('[PartnerBookNow] Cancellation pass tracking failed:', {
           taskId: id,
-          error: penaltyError?.message || penaltyError,
+          error: passError?.message || passError,
         });
       }
 
@@ -523,5 +590,98 @@ export class PartnerBookNowController {
     }
 
     ApiResponse.success(res, { id: String(task._id), status: newStatus }, 'Status updated');
+  }
+
+  /**
+   * POST /api/v1/book-now/tasks/:id/confirm-assignment
+   * Partner acknowledges/confirms their assigned Book Now lead.
+   * Sets task.confirmed = true and task.confirmedAt = current timestamp.
+   */
+  static async confirmAssignment(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+    let profileId: mongoose.Types.ObjectId | undefined = req.user?.profileId;
+
+    if (!profileId && uid) {
+      const Profile = mongoose.connection.collection('profiles');
+      const found = await Profile.findOne({ uid }, { projection: { _id: 1 } });
+      if (found) profileId = found._id as mongoose.Types.ObjectId;
+    }
+
+    if (!profileId || !uid) {
+      throw new BadRequestError('Profile ID and UID required');
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      throw new BadRequestError('Invalid task ID');
+    }
+
+    const partnerOid =
+      profileId instanceof mongoose.Types.ObjectId
+        ? profileId
+        : new mongoose.Types.ObjectId(profileId as string);
+
+    const task = await Task.findOne({
+      _id: new mongoose.Types.ObjectId(id),
+      bookingSource: 'book_now',
+      $or: [{ partnerId: partnerOid }, { partnerUid: uid }],
+    });
+
+    if (!task) {
+      throw new NotFoundError('Assigned Book Now lead not found or not assigned to partner');
+    }
+
+    const now = new Date();
+    task.confirmed = true;
+    task.confirmedAt = now;
+    (task as any).confirmed_at = now;
+    await task.save();
+
+    logger.info(`[PartnerBookNow] Task ${id} assignment confirmed by partner ${uid} at ${now.toISOString()}`);
+
+    ApiResponse.success(
+      res,
+      {
+        id: String(task._id),
+        confirmed: true,
+        confirmedAt: now,
+        confirmed_at: now,
+      },
+      'Assignment confirmed successfully',
+    );
+  }
+
+  /**
+   * GET /api/v1/book-now/admin/unacknowledged-leads
+   * Returns assigned Book Now leads where partner has NOT yet confirmed (confirmed !== true).
+   * Flagged for support team dashboard follow-up.
+   */
+  static async getUnacknowledgedLeads(_req: AuthenticatedRequest, res: Response): Promise<void> {
+    const tasks = await Task.find({
+      bookingSource: 'book_now',
+      status: 'assigned',
+      $or: [{ confirmed: { $ne: true } }, { confirmed: false }],
+    })
+      .sort({ assignedAt: -1, createdAt: -1 })
+      .lean();
+
+    ApiResponse.success(res, tasks, 'Unacknowledged leads retrieved for support dashboard');
+  }
+
+  /**
+   * GET /api/v1/book-now/cancellation-pass-status
+   * Returns the partner's current month cancellation pass status.
+   * Passes are informational only — cancellation is always allowed.
+   */
+  static async getCancellationPassStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+
+    if (!uid) {
+      throw new BadRequestError('UID required');
+    }
+
+    const passStatus = await CancellationPassService.getPassStatus(uid);
+
+    ApiResponse.success(res, passStatus, 'Cancellation pass status retrieved');
   }
 }

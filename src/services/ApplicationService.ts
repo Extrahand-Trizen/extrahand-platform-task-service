@@ -167,8 +167,10 @@ export class ApplicationService {
         if (activeApplicationsOnOtherTasks.length > 0) {
           const otherTaskIds = activeApplicationsOnOtherTasks.map((a) => a.taskId);
           // Fetch those tasks and check for date+time overlap.
+          // Completed/cancelled tasks no longer occupy the slot — only active ones block.
           const conflictingTask = await Task.findOne({
             _id: { $in: otherTaskIds },
+            status: { $nin: ['completed', 'cancelled'] },
             scheduledDate: task.scheduledDate,
             ...(task.scheduledTimeStart
               ? {

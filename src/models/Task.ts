@@ -372,6 +372,35 @@ export interface ITask extends Document {
   partnerUid?: string | null;
   partnerAcceptedAt?: Date;
 
+  /** Confirmation of assignment by the assigned partner */
+  confirmed?: boolean;
+  confirmedAt?: Date | null;
+  confirmed_at?: Date | null;
+
+  /** Auto-assignment dispatch evaluation logs for Book Now tasks */
+  dispatchLogs?: Array<{
+    area: string;
+    isJobArea?: boolean;
+    distanceKm: number;
+    matchedCategoryCount: number;
+    eligibleCount: number;
+    notifiedCount: number;
+    acceptedCount?: number;
+    assignedCount?: number;
+    candidates: Array<{
+      partnerId?: string;
+      partnerUid?: string;
+      name: string;
+      status: 'eligible' | 'ineligible' | 'assigned' | 'notified' | 'timed_out' | 'declined';
+      reasons?: string[];
+      details?: string;
+      shiftTiming?: string;
+      distanceKm?: number | null;
+      notifiedAt?: Date | string | null;
+      respondedAt?: Date | string | null;
+    }>;
+  }>;
+
   notificationGovernance?: {
     /** Bumped when scheduled date/time changes — invalidates old start-soon idempotency keys. */
     scheduleVersion?: string;
@@ -925,6 +954,44 @@ const TaskSchema = new Schema<ITask>(
     },
     partnerUid: { type: String, default: null, index: true },
     partnerAcceptedAt: Date,
+
+    /** Confirmation status of partner assignment */
+    confirmed: { type: Boolean, default: false, index: true },
+    confirmedAt: { type: Date, default: null },
+
+    /** Auto-assignment dispatch logs */
+    dispatchLogs: {
+      type: [
+        {
+          area: String,
+          isJobArea: Boolean,
+          distanceKm: Number,
+          matchedCategoryCount: Number,
+          eligibleCount: Number,
+          notifiedCount: Number,
+          acceptedCount: Number,
+          assignedCount: Number,
+          candidates: [
+            {
+              partnerId: String,
+              partnerUid: String,
+              name: String,
+              status: {
+                type: String,
+                enum: ['eligible', 'ineligible', 'assigned', 'notified', 'timed_out', 'declined'],
+              },
+              reasons: [String],
+              details: String,
+              shiftTiming: String,
+              distanceKm: Number,
+              notifiedAt: Date,
+              respondedAt: Date,
+            },
+          ],
+        },
+      ],
+      default: undefined,
+    },
 
     notificationGovernance: {
       scheduleVersion: String,

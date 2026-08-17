@@ -36,6 +36,7 @@ import {
 } from '../utils/bookNowScheduleResolution';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
+import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 import {
   assertHourlyInstantOperatingHours,
   assertHourlySingleVisitCheckout,
@@ -1563,6 +1564,39 @@ export class BookingService {
           ...bookingItemScheduleFields(line),
         });
         await Task.findByIdAndUpdate(task._id, { bookingItemId: String(createdItem._id) });
+      }
+
+      // ─── AUTO-ASSIGN: Immediately find nearest partner and assign ───────────
+      try {
+        const result = await BookNowAutoAssignService.autoAssign(task as any);
+        const postedArea = task.location?.taskArea || (task.location as any)?.locality || task.location?.city || 'N/A';
+        const timeInfo = task.scheduledTimeStart || task.timeSlot || 'Flexible';
+        const catInfo = line.categoryLabel || task.category || 'N/A';
+
+        logger.info(`================================================================================`);
+        logger.info(`📢 [BookNowWorkPosted] NEW BOOK NOW WORK POSTED!`);
+        logger.info(`   Task ID           : ${task._id}`);
+        logger.info(`   Task Title        : "${task.title}"`);
+        logger.info(`   Category          : ${catInfo}`);
+        logger.info(`   Work Posted Area  : ${postedArea}`);
+        logger.info(`   Work Scheduled    : ${timeInfo}`);
+        logger.info(`--------------------------------------------------------------------------------`);
+        if (result.assigned && result.partner) {
+          const distStr = result.partner.distKm !== null ? `${result.partner.distKm.toFixed(2)} km` : 'Location Not Set';
+          logger.info(`✅ AUTO-ASSIGNMENT STATUS: SUCCESS`);
+          logger.info(`   Partner Name      : ${result.partner.name}`);
+          logger.info(`   Partner UID       : ${result.partner.uid}`);
+          logger.info(`   Partner Profile ID: ${result.partner.profileId}`);
+          logger.info(`   Assigned Work Area: "${result.partner.workArea}" (${result.partner.workAreaDistKm.toFixed(2)} km from task)`);
+          logger.info(`   Partner Distance  : ${distStr}`);
+        } else {
+          logger.info(`⚠️ AUTO-ASSIGNMENT STATUS: UNASSIGNED`);
+          logger.info(`   Reason            : ${result.reason ?? 'No matching approved partner found within 5km'}`);
+          logger.info(`   Action Required   : Operations team manual assignment`);
+        }
+        logger.info(`================================================================================`);
+      } catch (autoAssignErr) {
+        logger.error('[BookNowAutoAssign] ❌ Auto-assignment error:', autoAssignErr);
       }
 
       try {

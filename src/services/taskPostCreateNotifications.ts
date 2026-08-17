@@ -17,6 +17,7 @@ import {
   resolvePosterUid,
   withHelperAlertData,
 } from '../utils/helperNotificationRecipients';
+import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 
 export type PostCreateNotificationContext = {
   uid?: string;
@@ -259,8 +260,185 @@ export async function runPostCreateNotifications(
       }
     }
 
+    // Dedicated logging for Book Now tasks ONLY: Rank all matching partners by distance, work area (posted & nearby <= 5km), category & shift timing match
+    if (task.bookingSource === 'book_now') {
+      try {
+        const Profile = mongoose.connection.collection('profiles');
+        // ONLY consider partners whose partnerProfile status is 'approved'
+        const profiles = await Profile.find({
+          isActive: true,
+          'partnerProfile.status': 'approved',
+        }).toArray();
+        const taskCoords = Array.isArray(task.location?.coordinates) && task.location.coordinates.length === 2
+          ? { lng: task.location.coordinates[0], lat: task.location.coordinates[1] }
+          : null;
+
+        const postedArea = task.location?.taskArea || (task.location as any)?.locality || task.location?.city || 'Secunderabad';
+        const taskTimeInfo = task.scheduledTimeStart || task.timeSlot || 'Morning / Flexible';
+
+        // Known work area coordinates in Telangana/Hyderabad
+        const WORK_AREA_COORDS: Array<{ area: string; lat: number; lng: number }> = [
+          { area: 'Secunderabad', lat: 17.4399, lng: 78.4983 },
+          { area: 'Malkajgiri', lat: 17.4478, lng: 78.5382 },
+          { area: 'Tarnaka', lat: 17.4278, lng: 78.5284 },
+          { area: 'Uppal', lat: 17.4056, lng: 78.5594 },
+          { area: 'LB Nagar', lat: 17.3457, lng: 78.5522 },
+          { area: 'Kukatpally', lat: 17.4849, lng: 78.4074 },
+          { area: 'Ameerpet', lat: 17.4375, lng: 78.4482 },
+          { area: 'Moti Nagar', lat: 17.4532, lng: 78.4215 },
+          { area: 'Madhapur', lat: 17.4483, lng: 78.3915 },
+          { area: 'Gachibowli', lat: 17.4401, lng: 78.3489 },
+          { area: 'Hitec City', lat: 17.4435, lng: 78.3772 },
+          { area: 'Begumpet', lat: 17.4448, lng: 78.4661 },
+          { area: 'Banjara Hills', lat: 17.4156, lng: 78.4347 },
+          { area: 'Jubilee Hills', lat: 17.4319, lng: 78.4071 },
+        ];
+
+        function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+          const R = 6371;
+          const dLat = (lat2 - lat1) * (Math.PI / 180);
+          const dLon = (lon2 - lon1) * (Math.PI / 180);
+          const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+          return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        // Calculate nearby work areas <= 5 km
+        const nearbyWorkAreas: Array<{ area: string; distKm: number }> = [];
+        if (taskCoords) {
+          WORK_AREA_COORDS.forEach((wa) => {
+            const dist = haversineKm(taskCoords.lat, taskCoords.lng, wa.lat, wa.lng);
+            if (dist <= 5.0 && wa.area.toLowerCase() !== postedArea.toLowerCase()) {
+              nearbyWorkAreas.push({ area: wa.area, distKm: dist });
+            }
+          });
+          nearbyWorkAreas.sort((a, b) => a.distKm - b.distKm);
+        }
+
+        logger.info(`================================================================================`);
+        logger.info(`📋 [BookNowTaskCreated] New Book Now Task: "${task.title}" (${task._id})`);
+        logger.info(`   Category          : ${task.categoryLabel || task.category}`);
+        logger.info(`   Work Scheduled    : ${taskTimeInfo}`);
+        logger.info(`   Work Posted Area  : ${postedArea}`);
+        logger.info(`   Nearby Areas (<=5km): ${nearbyWorkAreas.length > 0 ? nearbyWorkAreas.map(w => `${w.area} (${w.distKm.toFixed(2)} km)`).join(', ') : 'None within 5 km'}`);
+        logger.info(`================================================================================`);
+
+        // Helper timing match check (Partners without selected shift timings are NOT considered)
+        function checkTimingMatch(_workShiftType?: string, workShifts?: string[]): boolean {
+          if (!workShifts || !Array.isArray(workShifts) || workShifts.length === 0) return false;
+          let startHour = 10;
+          if (task.scheduledTimeStart) {
+            const m = String(task.scheduledTimeStart).match(/(\d+):?(\d+)?\s*(AM|PM)?/i);
+            if (m) {
+              let h = parseInt(m[1], 10);
+              if (m[3] && m[3].toUpperCase() === 'PM' && h < 12) h += 12;
+              if (m[3] && m[3].toUpperCase() === 'AM' && h === 12) h = 0;
+              startHour = h;
+            }
+          } else if (task.timeSlot) {
+            const s = String(task.timeSlot).toLowerCase();
+            if (s === 'morning') startHour = 9;
+            else if (s === 'midday') startHour = 13;
+            else if (s === 'afternoon') startHour = 16;
+            else if (s === 'evening') startHour = 19;
+          }
+          for (const shiftId of workShifts) {
+            const s = String(shiftId).toLowerCase();
+            if (s.includes('morning') && startHour >= 7 && startHour < 12) return true;
+            if ((s.includes('general') || s.includes('day') || s.includes('mid')) && startHour >= 9 && startHour < 17) return true;
+            if ((s.includes('evening') || s.includes('afternoon')) && startHour >= 12 && startHour < 22) return true;
+          }
+          return false;
+        }
+
+        // Group & Print Partners by Work Area in order of nearest distance
+        const orderedWorkAreaList: Array<{ area: string; distKm: number; isPosted: boolean }> = [
+          { area: postedArea, distKm: 0.0, isPosted: true },
+          ...nearbyWorkAreas.map((w) => ({ area: w.area, distKm: w.distKm, isPosted: false })),
+        ];
+
+        orderedWorkAreaList.forEach((wa, waIdx) => {
+          const areaNameNorm = wa.area.toLowerCase();
+          const areaPartners: any[] = [];
+
+          profiles.forEach((p) => {
+            const pp = p.partnerProfile || {};
+            if (pp.status !== 'approved') return; // ONLY consider approved partners
+            const categories = Array.isArray(pp.categories) ? pp.categories : [];
+            const workAreas = Array.isArray(pp.workAreas) ? pp.workAreas : (Array.isArray(p.helperWorkAreas) ? p.helperWorkAreas : []);
+            if (!categories.length || !workAreas.length) return;
+
+            const normAreas = workAreas.map((a: any) => String(a).toLowerCase());
+            const isMatch = normAreas.some((a: any) => a.includes(areaNameNorm) || areaNameNorm.includes(a));
+            if (!isMatch) return;
+
+            const shiftType = pp.workShiftType || 'full_time';
+            const shiftIds = Array.isArray(pp.workShifts) ? pp.workShifts : [];
+            if (!checkTimingMatch(shiftType, shiftIds)) return;
+
+            let distKm: number | null = null;
+            const pCoords = p.location?.coordinates || p.homeLocation?.coordinates;
+            if (taskCoords && Array.isArray(pCoords) && pCoords.length === 2 && typeof pCoords[1] === 'number' && (pCoords[0] !== 0 || pCoords[1] !== 0)) {
+              distKm = haversineKm(taskCoords.lat, taskCoords.lng, pCoords[1], pCoords[0]);
+            }
+
+            areaPartners.push({
+              name: p.name || p.fullName || 'Partner',
+              uid: p.uid,
+              id: String(p._id),
+              categories,
+              workAreas,
+              distKm,
+              shiftType,
+              shiftIds,
+            });
+          });
+
+          areaPartners.sort((a, b) => {
+            if (a.distKm === null && b.distKm === null) return 0;
+            if (a.distKm === null) return 1;
+            if (b.distKm === null) return -1;
+            return a.distKm - b.distKm;
+          });
+
+          const label = wa.isPosted
+            ? `WORK AREA ${waIdx + 1}: "${wa.area.toUpperCase()}" (WORK POSTED AREA - 0.00 km)`
+            : `WORK AREA ${waIdx + 1}: "${wa.area.toUpperCase()}" (NEAREST WORK AREA - ${wa.distKm.toFixed(2)} km away)`;
+
+          logger.info(`📍 ${label} | Shift-Matched Partners: ${areaPartners.length}`);
+          if (areaPartners.length === 0) {
+            logger.info(`   (No shift-matched partners registered in "${wa.area}")`);
+          } else {
+            areaPartners.forEach((h, idx) => {
+              const distStr = h.distKm !== null ? `${h.distKm.toFixed(2)} km` : 'Location Coordinates Not Set';
+              logger.info(
+                `   Rank #${idx + 1} | Name: ${h.name} | UID: ${h.uid} | Profile ID: ${h.id} | Distance: ${distStr} | Work Areas: [${h.workAreas.join(', ')}] | Shift Type: ${h.shiftType} | Selected Shifts: [${h.shiftIds.join(', ')}] | Timing Match: ✅ MATCHED`
+              );
+            });
+          }
+        });
+      } catch (logErr) {
+        logger.error('[BookNowTaskCreated] Log error:', logErr);
+      }
+
+      // ─── AUTO-ASSIGN: Find nearest eligible partner and assign directly ───────
+      try {
+        logger.info(`[BookNowAutoAssign] 🔍 Starting auto-assignment for Book Now task: "${task.title}" (${task._id})`);
+        const result = await BookNowAutoAssignService.autoAssign(task);
+        if (result.assigned && result.partner) {
+          logger.info(
+            `[BookNowAutoAssign] ✅ Task (${task._id}) auto-assigned → Partner: ${result.partner.name} (UID: ${result.partner.uid}) in Work Area: "${result.partner.workArea}" (${result.partner.workAreaDistKm.toFixed(2)} km from task location)`
+          );
+        } else {
+          logger.warn(
+            `[BookNowAutoAssign] ⚠️  Task (${task._id}) could NOT be auto-assigned. Reason: ${result.reason ?? 'Unknown'}. Requires manual ops assignment.`
+          );
+        }
+      } catch (autoAssignErr) {
+        logger.error('[BookNowAutoAssign] ❌ Auto-assignment threw an error:', autoAssignErr);
+      }
+    }
+
     const nearbyTaskerSet = new Set(nearbyTaskers);
-    const skillMatchedSet = new Set(skillMatchedTaskers);
 
     // Skill-only discovery (TASK_CREATED_RECOMMENDED) is disabled:
     // helpers get discovery alerts only when BOTH nearby + skill match (STEP 4).
@@ -618,6 +796,7 @@ export async function runPostCreateNotifications(
     // STEP 4: Emit TASK_NEARBY notification
     // Requires BOTH location (~10km) AND skill/category match — no location-only blasts.
     try {
+      const skillMatchedSet = new Set(skillMatchedTaskers);
       if (nearbyTaskers.length > 0) {
         const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
         const taskRoute = `/tasks/${task._id}`;
