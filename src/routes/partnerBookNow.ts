@@ -65,5 +65,14 @@ router.get(
   asyncHandler(PartnerBookNowController.getUnacknowledgedLeads as any),
 );
 
+// GET /api/v1/book-now/cancellation-pass-status
+// Returns the partner's current month cancellation pass status.
+router.get(
+  '/cancellation-pass-status',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(PartnerBookNowController.getCancellationPassStatus as any),
+);
+
 export default router;
 

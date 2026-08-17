@@ -942,6 +942,17 @@ export class TaskService {
       }
     }
 
+    // Attach dispatchLogs for Book Now tasks if not yet stored
+    if (task.bookingSource === 'book_now' && (!task.dispatchLogs || !task.dispatchLogs.length)) {
+      try {
+        const { BookNowAutoAssignService } = await import('./BookNowAutoAssignService');
+        const logs = await BookNowAutoAssignService.buildDispatchLog(task);
+        (task as any).dispatchLogs = logs;
+      } catch (err) {
+        logger.warn('Failed to build on-the-fly dispatch log', { taskId, error: err });
+      }
+    }
+
     if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
       const planDoc = await Task.findById(taskId);
       if (planDoc) {

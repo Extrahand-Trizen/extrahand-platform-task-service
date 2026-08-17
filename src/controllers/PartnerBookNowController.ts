@@ -8,6 +8,7 @@ import { emitBookNowLeadRemoved } from '../socket/socketHandlers';
 import logger from '../config/logger';
 import { CatalogService } from '../services/CatalogService';
 import { resolvePartnerMatchConditions, normalizeCategory } from '../services/partnerVisibility';
+import { CancellationPassService } from '../services/CancellationPassService';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -486,35 +487,14 @@ export class PartnerBookNowController {
         throw new BadRequestError('Task can only be cancelled before the journey is started');
       }
 
-      // Apply the performer cancellation penalty via the payment service
-      // (best-effort, non-blocking — the lead must return to the pool regardless).
-      // No customer refund is issued; the penalty is recovered from the partner's
-      // future payout.
+      // Track cancellation pass usage (best-effort, non-blocking).
+      // No penalty is applied — passes are informational only.
       try {
-        const { PaymentClient } = await import('../services/PaymentClient');
-        const taskStartIso = (task.scheduledDate || task.createdAt).toISOString();
-        const feeBaseAmount =
-          typeof task.budget === 'object' && task.budget
-            ? Number(task.budget.amount)
-            : Number(task.budget);
-        const penaltyResult = await PaymentClient.createPerformerPenalty({
-          performerUid: uid,
-          taskId: String(task._id),
-          taskStartDate: taskStartIso,
-          feeBaseAmount,
-          reason: cancellationReason || 'Partner cancelled before starting the journey',
-          taskTitle: task.title,
-        });
-        if (!penaltyResult.success) {
-          logger.error('[PartnerBookNow] Cancellation penalty failed:', {
-            taskId: id,
-            error: penaltyResult.error,
-          });
-        }
-      } catch (penaltyError: any) {
-        logger.error('[PartnerBookNow] Cancellation penalty threw:', {
+        await CancellationPassService.consumePass(uid);
+      } catch (passError: any) {
+        logger.error('[PartnerBookNow] Cancellation pass tracking failed:', {
           taskId: id,
-          error: penaltyError?.message || penaltyError,
+          error: passError?.message || passError,
         });
       }
 
@@ -686,5 +666,22 @@ export class PartnerBookNowController {
       .lean();
 
     ApiResponse.success(res, tasks, 'Unacknowledged leads retrieved for support dashboard');
+  }
+
+  /**
+   * GET /api/v1/book-now/cancellation-pass-status
+   * Returns the partner's current month cancellation pass status.
+   * Passes are informational only — cancellation is always allowed.
+   */
+  static async getCancellationPassStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+
+    if (!uid) {
+      throw new BadRequestError('UID required');
+    }
+
+    const passStatus = await CancellationPassService.getPassStatus(uid);
+
+    ApiResponse.success(res, passStatus, 'Cancellation pass status retrieved');
   }
 }
