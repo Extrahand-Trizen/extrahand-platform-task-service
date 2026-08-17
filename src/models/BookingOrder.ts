@@ -65,6 +65,27 @@ export interface IBookingOrder extends Document {
   /** Serialized cart lines — tasks are created only after payment succeeds. */
   pendingLines?: Record<string, unknown>[];
   bookingNotes?: string;
+  serviceFlowType?: 'standard' | 'consultation_project';
+  bookingKind?: 'standard' | 'consultation' | 'project';
+  serviceType?: string;
+  pricingProfile?: {
+    gstExempt?: boolean;
+  };
+  consultationMeta?: {
+    samePartnerPreferred?: boolean;
+    consultationFee?: number;
+    customerRequirements?: string;
+    sourceTaskId?: string;
+    sourceQuotationId?: string;
+    projectTitle?: string;
+    estimateSnapshot?: {
+      amount?: number;
+      currency?: string;
+      durationLabel?: string;
+      notes?: string;
+      selections?: Record<string, unknown>;
+    };
+  };
   rescheduleCount?: number;
   lastRescheduledAt?: Date;
   createdAt: Date;
@@ -121,6 +142,41 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     deletedByCustomerId: { type: String, index: true },
     pendingLines: { type: [Schema.Types.Mixed], default: undefined },
     bookingNotes: String,
+    serviceFlowType: {
+      type: String,
+      enum: ['standard', 'consultation_project'],
+      default: 'standard',
+      index: true,
+    },
+    bookingKind: {
+      type: String,
+      enum: ['standard', 'consultation', 'project'],
+      default: 'standard',
+      index: true,
+    },
+    serviceType: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    pricingProfile: {
+      gstExempt: { type: Boolean, default: false },
+    },
+    consultationMeta: {
+      samePartnerPreferred: Boolean,
+      consultationFee: Number,
+      customerRequirements: String,
+      sourceTaskId: String,
+      sourceQuotationId: String,
+      projectTitle: String,
+      estimateSnapshot: {
+        amount: Number,
+        currency: String,
+        durationLabel: String,
+        notes: String,
+        selections: { type: Schema.Types.Mixed, default: undefined },
+      },
+    },
     rescheduleCount: { type: Number, default: 0, min: 0 },
     lastRescheduledAt: Date,
   },
@@ -130,6 +186,10 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
 BookingOrderSchema.index(
   { fulfillmentType: 1, status: 1, createdAt: -1 },
   { sparse: true, name: 'booking_fulfillment_status_created' },
+);
+BookingOrderSchema.index(
+  { bookingKind: 1, serviceType: 1, status: 1, createdAt: -1 },
+  { sparse: true, name: 'booking_kind_service_status_created' },
 );
 
 const BookingOrder: Model<IBookingOrder> =

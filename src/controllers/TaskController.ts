@@ -10,6 +10,7 @@ import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection
 import { getMeaningfulTextError } from '../utils/textValidation';
 import logger from '../config/logger';
 import { TaskTrackingBundleService } from '../services/TaskTrackingBundleService';
+import { ConsultationProjectService } from '../services/ConsultationProjectService';
 import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
 
@@ -294,6 +295,81 @@ export class TaskController {
       reason: req.body?.reason,
     });
     ApiResponse.success(res, task, 'Task rescheduled successfully');
+  }
+
+  static async getConsultationFlow(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await ConsultationProjectService.getConsultationFlow(
+      req.params.id,
+      req.user!.profileId,
+    );
+    ApiResponse.success(res, data, 'Consultation flow retrieved');
+  }
+
+  static async submitConsultationAssessment(
+    req: AuthenticatedRequest,
+    res: Response,
+  ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await ConsultationProjectService.submitAssessment(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+      req.body || {},
+    );
+    ApiResponse.success(res, data, 'Consultation assessment submitted');
+  }
+
+  static async createConsultationQuotation(
+    req: AuthenticatedRequest,
+    res: Response,
+  ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await ConsultationProjectService.createQuotation(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+      req.body || {},
+    );
+    ApiResponse.success(res, data, 'Consultation quotation created');
+  }
+
+  static async acceptConsultationQuotation(
+    req: AuthenticatedRequest,
+    res: Response,
+  ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await ConsultationProjectService.acceptQuotation(
+      req.params.id,
+      req.params.quotationId,
+      req.user!.profileId,
+      req.body || {},
+    );
+    ApiResponse.success(res, data, 'Quotation accepted and project payment initiated');
+  }
+
+  static async rejectConsultationQuotation(
+    req: AuthenticatedRequest,
+    res: Response,
+  ): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await ConsultationProjectService.rejectQuotation(
+      req.params.id,
+      req.params.quotationId,
+      req.user!.profileId,
+      req.body?.reason,
+    );
+    ApiResponse.success(res, data, 'Quotation rejected');
   }
 
   /**

@@ -26,6 +26,15 @@ export const BOOK_NOW_CATALOG_LABELS: Record<string, string> = {
   'painting-exterior': 'Exterior Painting',
   'painting-rental': 'Rental Painting',
   'painting-waterproofing': 'Waterproofing',
+  'car-wash-basic': 'Basic Car Wash',
+  'car-wash-premium': 'Premium Car Wash',
+  'car-wash-interior-deep-cleaning': 'Car Interior Deep Cleaning',
+  'car-wash-sanitization': 'Car Sanitization',
+  'laundry-wash-by-weight': 'Wash by Weight',
+  'laundry-ironing-services': 'Ironing Services',
+  'laundry-traditional-wear': 'Traditional Wear',
+  'laundry-bedding-and-blankets': 'Bedding & Blankets',
+  'laundry-shoe-cleaning': 'Shoe Cleaning',
   'hourly-helper': 'Hourly Helper',
 };
 
@@ -42,6 +51,15 @@ export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
   'painting-exterior': 'other',
   'painting-rental': 'other',
   'painting-waterproofing': 'other',
+  'car-wash-basic': 'cleaning',
+  'car-wash-premium': 'cleaning',
+  'car-wash-interior-deep-cleaning': 'cleaning',
+  'car-wash-sanitization': 'cleaning',
+  'laundry-wash-by-weight': 'cleaning',
+  'laundry-ironing-services': 'cleaning',
+  'laundry-traditional-wear': 'cleaning',
+  'laundry-bedding-and-blankets': 'cleaning',
+  'laundry-shoe-cleaning': 'cleaning',
   /** Hourly Helper is general help — maps to Task enum `other` (not a catalog slug). */
   'hourly-helper': 'other',
 };

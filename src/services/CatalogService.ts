@@ -28,6 +28,7 @@ import type {
 } from '../schemas/catalogContent';
 import type { IServiceSku } from '../models/ServiceSku';
 import type { PatchOperationalSkuOfferInput } from '../schemas/catalogContent';
+import { resolveBookNowServiceFlowConfig } from '../utils/bookNowServiceFlowConfig';
 
 function assertObjectId(id: string, label = 'id'): string {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -93,6 +94,13 @@ type BookNowPackageListItem = {
     sortOrder: number;
   } | null;
   primaryImageUrl: string;
+  serviceFlow: {
+    serviceFlowType: 'standard' | 'consultation_project';
+    bookingKind: 'standard' | 'consultation';
+    serviceType?: string;
+    consultationEnabled: boolean;
+    gstExempt: boolean;
+  };
 };
 
 function normalizeHubSectionServices(services: UpsertHubSectionInput['services'] | PatchHubSectionInput['services']) {
@@ -390,6 +398,10 @@ export class CatalogService {
         const shortDescription = String(content?.shortDescription || '').trim();
         const fallbackDescription = String(sku.description || '').trim();
         const durationLabel = toDurationLabel(Number(sku.durationMinutes || 0));
+        const serviceFlow = resolveBookNowServiceFlowConfig({
+          categorySlug: category.slug,
+          skuSlug: String(sku.slug || ''),
+        });
 
         return {
           _id: sku._id,
@@ -413,6 +425,7 @@ export class CatalogService {
               }
             : null,
           primaryImageUrl: Array.isArray(content?.imageUrls) ? String(content?.imageUrls?.[0] || '').trim() : '',
+          serviceFlow,
         };
       })
       .filter((item) => item.name.trim().length > 0);

@@ -49,6 +49,12 @@ import {
   parseMyTasksInclude,
   truncateDescription,
 } from './myTasksEnrichment';
+import {
+  evaluateBookingLineReschedulePolicy,
+  evaluateTaskReschedulePolicy,
+  resolveReschedulePartnerState,
+  resolveScheduledAt,
+} from '../utils/reschedulePolicy';
 
 const MAX_NORMAL_TASK_RESCHEDULES = 2;
 const NORMAL_TASK_RESCHEDULE_SLOTS = [
@@ -114,17 +120,6 @@ function normalTaskSlotEnd(start: string): string {
 function normalizeNormalTaskSlot(slot: string): string {
   const minutes = parseNormalTaskSlotMinutes(slot);
   return minutes == null ? String(slot || '').trim() : normalTaskMinutesToSlot(minutes);
-}
-
-function isNormalTaskPastReschedule(task: Pick<ITask, 'status' | 'executionPhase' | 'startedAt' | 'arrivedAt'>) {
-  const status = String(task.status || '').toLowerCase();
-  const phase = String(task.executionPhase || '').toLowerCase();
-  return Boolean(
-    task.startedAt ||
-      task.arrivedAt ||
-      phase === 'arrived' ||
-      ['started', 'in_progress', 'completed', 'cancelled'].includes(status),
-  );
 }
 
 // Helper function to map frontend category values to backend enum values
@@ -1776,7 +1771,7 @@ export class TaskService {
     profileId: mongoose.Types.ObjectId,
   ) {
     const task = await Task.findById(taskId).select(
-      'requesterId status assigneeId assigneeUid executionPhase startedAt arrivedAt isRecurringWork recurringPlan rescheduleCount',
+      'requesterId status assigneeId assigneeUid executionPhase startedAt arrivedAt isRecurringWork recurringPlan rescheduleCount scheduledDate scheduledTimeStart bookingSource categorySlug serviceType bookingKind serviceFlowType consultationState budget',
     );
     if (!task) throw new NotFoundError('Task not found');
     if (!task.requesterId.equals(profileId)) {
@@ -1788,6 +1783,9 @@ export class TaskService {
     if ((task as any).isRecurringWork || isRecurringVisitPlanTask(task as any)) {
       return {
         allowed: false,
+        chargeRequired: false,
+        reasonCode: 'RECURRING_ONLY',
+        partnerState: 'unassigned',
         message: 'Use recurring visit controls for recurring work.',
         rescheduleCount,
         rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
@@ -1798,6 +1796,9 @@ export class TaskService {
     if (!['open', 'paid', 'assigning', 'assigned'].includes(String(task.status || '').toLowerCase())) {
       return {
         allowed: false,
+        chargeRequired: false,
+        reasonCode: 'STATUS_BLOCKED',
+        partnerState: 'unassigned',
         message: `Cannot reschedule work in status ${task.status}`,
         rescheduleCount,
         rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
@@ -1808,6 +1809,9 @@ export class TaskService {
     if (rescheduleCount >= MAX_NORMAL_TASK_RESCHEDULES) {
       return {
         allowed: false,
+        chargeRequired: false,
+        reasonCode: 'RESCHEDULE_LIMIT_REACHED',
+        partnerState: 'unassigned',
         message: 'This work has already been rescheduled twice. Please contact support.',
         rescheduleCount,
         rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
@@ -1815,24 +1819,51 @@ export class TaskService {
         maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
       };
     }
-    if (isNormalTaskPastReschedule(task as any)) {
-      return {
-        allowed: false,
-        message: 'The helper has already arrived or the work has started. Please contact support.',
-        rescheduleCount,
-        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
-        remainingReschedules,
-        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
-      };
-    }
+    const partnerState = resolveReschedulePartnerState({
+      assigneeId: task.assigneeId,
+      assigneeUid: task.assigneeUid,
+      executionPhase: task.executionPhase,
+      startedAt: task.startedAt,
+      arrivedAt: task.arrivedAt,
+      status: task.status,
+    });
+    const scheduledAt = resolveScheduledAt({
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+    });
+    const isBookNowTask = String((task as any).bookingSource || '').trim().toLowerCase() === 'book_now';
+    const isHourlyBookNowTask =
+      isBookNowTask &&
+      String((task as any).categorySlug || '').trim().toLowerCase() === 'hourly-helper';
+    const policyDecision = isBookNowTask
+      ? evaluateBookingLineReschedulePolicy({
+          kind:
+            String((task as any).bookingKind || '').trim().toLowerCase() === 'consultation'
+              ? 'consultation'
+              : isHourlyBookNowTask
+                ? 'hourly'
+                : 'standard',
+          partnerState,
+          scheduledAt,
+          categorySlug: (task as any).categorySlug,
+          serviceType: (task as any).serviceType,
+          bookingKind: (task as any).bookingKind,
+          consultationFee: (task as any).consultationState?.consultationFee ?? null,
+          lineTotal: Number((task as any).budget?.amount || 0),
+        })
+      : evaluateTaskReschedulePolicy({
+          partnerState,
+          scheduledAt,
+        });
 
-    const hasCommittedPartner = Boolean((task as any).assigneeId || (task as any).assigneeUid);
     return {
-      allowed: true,
-      chargeRequired: hasCommittedPartner,
-      message: hasCommittedPartner
-        ? 'Helper is already assigned. Existing late-change rules may apply.'
-        : 'Free reschedule available.',
+      allowed: policyDecision.allowed,
+      chargeRequired: policyDecision.chargeRequired,
+      chargeAmount: policyDecision.chargeAmount,
+      reasonCode: policyDecision.reasonCode,
+      partnerState: policyDecision.partnerState,
+      policyWindowLabel: policyDecision.policyWindowLabel,
+      message: policyDecision.message,
       rescheduleCount,
       rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
       remainingReschedules,
@@ -1845,6 +1876,10 @@ export class TaskService {
     profileId: mongoose.Types.ObjectId,
     date: string,
   ) {
+    const eligibility = await TaskService.getRescheduleEligibility(taskId, profileId);
+    if (!eligibility.allowed) {
+      throw new BadRequestError(eligibility.message || 'This work cannot be rescheduled');
+    }
     const task = await Task.findById(taskId).select('requesterId').lean();
     if (!task) throw new NotFoundError('Task not found');
     if (!task.requesterId.equals(profileId)) {
@@ -1897,6 +1932,14 @@ export class TaskService {
     task.dateOption = 'on-date';
     task.rescheduleCount = Number(task.rescheduleCount || 0) + 1;
     task.lastRescheduledAt = new Date();
+    const helperCommitted = Boolean(task.assigneeId || task.assigneeUid || task.executionPhase);
+    if (helperCommitted) {
+      task.executionPhase = 'assigned';
+      (task as any).executionPhaseUpdatedAt = task.lastRescheduledAt;
+    }
+    (task as any).startOtp = undefined;
+    (task as any).onTheWayAt = undefined;
+    (task as any).arrivedAt = undefined;
     await task.save();
 
     logger.info('Task rescheduled by customer', {

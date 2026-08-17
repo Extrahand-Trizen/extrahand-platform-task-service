@@ -31,6 +31,11 @@ export class BookingController {
       requestedCoinDiscountRupees,
       fulfillmentType,
       couponCode,
+      serviceFlowType,
+      bookingKind,
+      serviceType,
+      consultationMeta,
+      gstExempt,
     } = req.body;
 
     const hasItems = Array.isArray(items) && items.length > 0;
@@ -60,6 +65,11 @@ export class BookingController {
       requestedCoinDiscountRupees: Number(requestedCoinDiscountRupees) || 0,
       fulfillmentType,
       couponCode: couponCode ? String(couponCode) : undefined,
+      serviceFlowType,
+      bookingKind,
+      serviceType,
+      consultationMeta,
+      gstExempt: gstExempt === true,
     });
 
     res.status(201).json({

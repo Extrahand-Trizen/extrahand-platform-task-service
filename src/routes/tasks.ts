@@ -98,6 +98,41 @@ router.post(
   asyncHandler(TaskController.rescheduleTask)
 );
 
+router.get(
+  "/:id/consultation-flow",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getConsultationFlow)
+);
+
+router.post(
+  "/:id/consultation/assessment",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.submitConsultationAssessment)
+);
+
+router.post(
+  "/:id/consultation/quotation",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.createConsultationQuotation)
+);
+
+router.post(
+  "/:id/consultation/quotation/:quotationId/accept",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.acceptConsultationQuotation)
+);
+
+router.post(
+  "/:id/consultation/quotation/:quotationId/reject",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.rejectConsultationQuotation)
+);
+
 // GET /api/v1/tasks/:id - Get a single task (public route)
 router.get(
   "/:id",
