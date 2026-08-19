@@ -696,6 +696,13 @@ export class BookNowAutoAssignService {
 
       try {
         const categoryLabel = (task as any).categoryLabel || task.category || 'service';
+        const taskAmount = typeof task.budget === 'object' && task.budget?.amount 
+          ? task.budget.amount 
+          : 0;
+        const taskLocation = task.location as any;
+        const locationAddress = taskLocation?.address || '';
+        const locationCity = taskLocation?.city || taskLocation?.taskArea || '';
+
         await NotificationClient.send({
           eventKey: 'BOOK_NOW_PARTNER_ASSIGNED',
           category: 'taskUpdates',
@@ -705,8 +712,20 @@ export class BookNowAutoAssignService {
           body: `${task.title || categoryLabel} - Tap to view details`,
           data: {
             taskId,
+            title: task.title,
+            category: task.category,
+            categoryLabel,
             bookingSource: 'book_now',
             eventKey: 'BOOK_NOW_PARTNER_ASSIGNED',
+            budgetAmount: taskAmount,
+            amount: taskAmount,
+            address: locationAddress,
+            locationAddress,
+            city: locationCity,
+            taskArea: locationCity,
+            scheduledTimeStart: task.scheduledTimeStart || task.timeSlot || '',
+            scheduledDate: task.scheduledDate || '',
+            distance: best.distKm != null ? Number(best.distKm.toFixed(1)) : undefined,
             partnerName: best.name,
             workArea: best.workArea,
           },
