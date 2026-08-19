@@ -2,12 +2,14 @@ import mongoose from 'mongoose';
 import type { ITask } from '../models/Task';
 import type { IServiceQuotation } from '../models/ServiceQuotation';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../errors/AppError';
+import {
+  buildInitialProjectExecution,
+  clampPlannedDays,
+  estimateProjectDurationMinutes,
+} from './projectExecution';
 
 const CONSULTATION_PROJECT_TAX_RATE = Number(
   process.env.CONSULTATION_PROJECT_TAX_RATE || '0.18',
-);
-const CONSULTATION_PROJECT_WORK_DURATION_MINUTES = Number(
-  process.env.CONSULTATION_PROJECT_WORK_DURATION_MINUTES || '60',
 );
 
 function roundCurrency(value: number): number {
@@ -259,13 +261,9 @@ export function buildConsultationProjectPlan(params: {
     scheduledTimeStart: task.scheduledTimeStart,
     scheduledTimeEnd: task.scheduledTimeEnd,
     timeSlot: task.timeSlot,
-    // The partner can quote the project timeline in days, but the materialized
-    // work task should still use the normal one-time Book Now progress flow.
-    estimatedDuration:
-      Number.isFinite(CONSULTATION_PROJECT_WORK_DURATION_MINUTES) &&
-      CONSULTATION_PROJECT_WORK_DURATION_MINUTES > 0
-        ? CONSULTATION_PROJECT_WORK_DURATION_MINUTES
-        : task.estimatedDuration,
+    estimatedDuration: estimateProjectDurationMinutes(
+      clampPlannedDays(quotation.estimatedTimelineDays),
+    ),
     assignedProfileId,
     assignedUid: assignedUid || null,
     partnerId: task.partnerId || assignedProfileId || null,
@@ -380,6 +378,11 @@ export function buildConsultationTaskProjectTransitionPatch(params: {
     partnerId: plan.partnerId,
     partnerUid: plan.partnerUid,
     partnerAcceptedAt: task.partnerAcceptedAt || (plan.assignedProfileId ? new Date() : undefined),
+    projectExecution: buildInitialProjectExecution({
+      quotationId: quotation._id,
+      estimatedTimelineDays: quotation.estimatedTimelineDays,
+      plannedStartDate: plan.startDate,
+    }),
     consultationState: {
       ...task.consultationState,
       currentStage: 'project_created' as const,

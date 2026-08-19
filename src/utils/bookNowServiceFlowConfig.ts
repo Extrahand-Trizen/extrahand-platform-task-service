@@ -6,11 +6,15 @@ export type BookNowFlowConfig = {
   gstExempt: boolean;
 };
 
-type ResolveBookNowFlowConfigInput = {
+export type ResolveBookNowFlowConfigInput = {
   categorySlug?: string;
   skuSlug?: string;
   catalogId?: string;
   packageId?: string;
+  packageSlug?: string;
+  serviceFlowType?: string;
+  bookingKind?: string;
+  serviceType?: string;
 };
 
 const PAINTING_CATEGORY_SLUGS = new Set([
@@ -32,11 +36,34 @@ function isPaintingConsultationPackage(packageSlug: string): boolean {
   return packageSlug.startsWith('painting-consultation-');
 }
 
+export function isPaintingBookNowCheckoutLine(
+  line: ResolveBookNowFlowConfigInput,
+): boolean {
+  if (String(line.serviceType || '').trim().toLowerCase() === 'painting') {
+    return true;
+  }
+  if (line.serviceFlowType === 'consultation_project') {
+    return true;
+  }
+
+  const normalizedCategorySlug = normalizeSlug(line.categorySlug || line.catalogId);
+  const normalizedPackageSlug = normalizeSlug(
+    line.skuSlug || line.packageId || line.packageSlug,
+  );
+
+  return (
+    PAINTING_CATEGORY_SLUGS.has(normalizedCategorySlug) ||
+    isPaintingConsultationPackage(normalizedPackageSlug)
+  );
+}
+
 export function resolveBookNowServiceFlowConfig(
   input: ResolveBookNowFlowConfigInput,
 ): BookNowFlowConfig {
   const normalizedCategorySlug = normalizeSlug(input.categorySlug || input.catalogId);
-  const normalizedPackageSlug = normalizeSlug(input.skuSlug || input.packageId);
+  const normalizedPackageSlug = normalizeSlug(
+    input.skuSlug || input.packageId || input.packageSlug,
+  );
 
   const isPaintingFlow =
     PAINTING_CATEGORY_SLUGS.has(normalizedCategorySlug) ||

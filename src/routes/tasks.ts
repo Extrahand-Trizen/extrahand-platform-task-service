@@ -133,6 +133,34 @@ router.post(
   asyncHandler(TaskController.rejectConsultationQuotation)
 );
 
+router.get(
+  "/:id/project-execution",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getProjectExecution)
+);
+
+router.post(
+  "/:id/project-execution/start-day",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.startProjectDay)
+);
+
+router.post(
+  "/:id/project-execution/complete-day",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.completeProjectDay)
+);
+
+router.post(
+  "/:id/project-execution/complete",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.completeProjectExecution)
+);
+
 // GET /api/v1/tasks/:id - Get a single task (public route)
 router.get(
   "/:id",

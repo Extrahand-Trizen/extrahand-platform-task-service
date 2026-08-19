@@ -9,6 +9,7 @@ import logger from '../config/logger';
 import { CatalogService } from '../services/CatalogService';
 import { resolvePartnerMatchConditions, normalizeCategory } from '../services/partnerVisibility';
 import { CancellationPassService } from '../services/CancellationPassService';
+import { serializeBookNowLeadExecutionFields } from '../utils/bookNowLeadSerialization';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -55,6 +56,8 @@ export class PartnerBookNowController {
       status: 'open',
       partnerId: null,
       partnerUid: null,
+      assigneeId: null,
+      assigneeUid: null,
     };
 
     // Server-side visibility guard: the requesting partner can only ever see
@@ -167,6 +170,7 @@ export class PartnerBookNowController {
           serviceIncludes: serviceContent?.includes || [],
           serviceNotIncludes: serviceContent?.excludes || [],
           isOverdue,
+          ...serializeBookNowLeadExecutionFields(task),
         };
       }),
     );
@@ -311,6 +315,8 @@ export class PartnerBookNowController {
         status: 'open',      // overdue tasks are still status === 'open' in DB
         partnerId: null,
         partnerUid: null,
+        assigneeId: null,
+        assigneeUid: null,
       },
       {
         $set: {
@@ -371,7 +377,7 @@ export class PartnerBookNowController {
 
     const tasks = await Task.find({
       bookingSource: 'book_now',
-      partnerId: partnerOid,
+      $or: [{ partnerId: partnerOid }, { assigneeId: partnerOid }],
       status: { $in: ['assigned', 'started', 'in_progress', 'review', 'completed', 'cancelled'] },
     })
       .sort({ partnerAcceptedAt: -1 })
@@ -425,6 +431,7 @@ export class PartnerBookNowController {
           bookingItemId: task.bookingItemId,
           serviceIncludes: serviceContent?.includes || [],
           serviceNotIncludes: serviceContent?.excludes || [],
+          ...serializeBookNowLeadExecutionFields(task),
         };
       }),
     );

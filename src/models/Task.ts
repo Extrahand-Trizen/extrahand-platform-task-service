@@ -1,5 +1,34 @@
 import mongoose, { Schema, Model, Document } from "mongoose";
 
+export type ProjectExecutionStatus =
+  | 'not_started'
+  | 'active'
+  | 'completed'
+  | 'ended_early';
+
+export type ProjectDayStatus = 'planned' | 'active' | 'completed' | 'skipped';
+
+export interface IProjectExecutionDay {
+  dayNumber: number;
+  status: ProjectDayStatus;
+  startedAt?: Date;
+  completedAt?: Date;
+  notePreview?: string;
+  proofCount?: number;
+}
+
+export interface IProjectExecution {
+  status: ProjectExecutionStatus;
+  totalPlannedDays: number;
+  completedDayCount: number;
+  activeDayNumber?: number | null;
+  quotationId: mongoose.Types.ObjectId;
+  plannedStartDate?: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+  days: IProjectExecutionDay[];
+}
+
 export interface ITask extends Document {
   title: string;
   description: string;
@@ -193,6 +222,7 @@ export interface ITask extends Document {
   serviceFlowType?: 'standard' | 'consultation_project';
   bookingKind?: 'standard' | 'consultation' | 'project';
   serviceType?: string;
+  projectExecution?: IProjectExecution;
   consultationState?: {
     currentStage?:
       | 'consultation_booked'
@@ -841,6 +871,36 @@ const TaskSchema = new Schema<ITask>(
       type: String,
       trim: true,
       index: true,
+    },
+    projectExecution: {
+      status: {
+        type: String,
+        enum: ['not_started', 'active', 'completed', 'ended_early'],
+      },
+      totalPlannedDays: { type: Number, min: 1, max: 30 },
+      completedDayCount: { type: Number, min: 0, default: 0 },
+      activeDayNumber: { type: Number, min: 1, max: 30, default: null },
+      quotationId: {
+        type: Schema.Types.ObjectId,
+        ref: 'ServiceQuotation',
+      },
+      plannedStartDate: Date,
+      startedAt: Date,
+      completedAt: Date,
+      days: [
+        {
+          dayNumber: { type: Number, required: true, min: 1, max: 30 },
+          status: {
+            type: String,
+            enum: ['planned', 'active', 'completed', 'skipped'],
+            required: true,
+          },
+          startedAt: Date,
+          completedAt: Date,
+          notePreview: { type: String, maxlength: 120 },
+          proofCount: { type: Number, min: 0, default: 0 },
+        },
+      ],
     },
     consultationState: {
       currentStage: {

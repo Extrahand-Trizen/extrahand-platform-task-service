@@ -25,6 +25,7 @@ export type BookNowHubSectionSeed = {
 };
 
 export const BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG: Record<string, string> = {
+  'personal-assistance': cdnImage('personal-assistance'),
   'full-house': cdnImage('fullhouse-booknow'),
   bathroom: cdnImage('bathroom-booknow'),
   kitchen: cdnImage('kitchen-booknow'),
@@ -246,6 +247,20 @@ export const BOOK_NOW_PACKAGE_IMAGE_URLS_BY_CATEGORY_AND_SKU: Record<string, str
 };
 
 export const BOOK_NOW_HUB_SECTION_SEED: BookNowHubSectionSeed[] = [
+  {
+    id: 'personal-assistance',
+    title: 'Personal Assistance',
+    iconKey: 'User',
+    sortOrder: 5,
+    services: [
+      {
+        id: 'personal-assistance',
+        label: 'Personal Assistant',
+        categorySlug: 'personal-assistance',
+        imageUrl: cdnImage('personal-assistance'),
+      },
+    ],
+  },
   {
     id: 'home-cleaning',
     title: 'Home Cleaning',

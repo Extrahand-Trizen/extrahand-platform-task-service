@@ -11,6 +11,7 @@ import { getMeaningfulTextError } from '../utils/textValidation';
 import logger from '../config/logger';
 import { TaskTrackingBundleService } from '../services/TaskTrackingBundleService';
 import { ConsultationProjectService } from '../services/ConsultationProjectService';
+import { ProjectExecutionService } from '../services/ProjectExecutionService';
 import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
 import { resolvePartnerMatchConditions } from '../services/partnerVisibility';
@@ -403,6 +404,67 @@ export class TaskController {
       req.body?.reason,
     );
     ApiResponse.success(res, data, 'Quotation rejected');
+  }
+
+  static async getProjectExecution(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await ProjectExecutionService.getProjectExecution(
+      req.params.id,
+      req.user!.profileId,
+      req.user!.uid,
+    );
+    ApiResponse.success(res, data, 'Project execution retrieved');
+  }
+
+  static async startProjectDay(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const dayNumber = Number(req.body?.dayNumber);
+    const data = await ProjectExecutionService.startDay(
+      req.params.id,
+      dayNumber,
+      req.user!.profileId,
+      req.user!.uid,
+    );
+    ApiResponse.success(res, data, 'Project day started');
+  }
+
+  static async completeProjectDay(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const dayNumber = Number(req.body?.dayNumber);
+    const data = await ProjectExecutionService.completeDay(
+      req.params.id,
+      dayNumber,
+      req.user!.profileId,
+      {
+        notes: req.body?.notes,
+        proofUrls: req.body?.proofUrls,
+      },
+      req.user!.uid,
+    );
+    ApiResponse.success(res, data, 'Project day completed');
+  }
+
+  static async completeProjectExecution(req: AuthenticatedRequest, res: Response): Promise<void> {
+    if (!req.user!.profileId) {
+      throw new BadRequestError('Profile not found. Please complete onboarding.');
+    }
+    const data = await ProjectExecutionService.completeProject(
+      req.params.id,
+      req.user!.profileId,
+      {
+        proofUrls: req.body?.proofUrls,
+        notes: req.body?.notes,
+        endedEarly: req.body?.endedEarly,
+      },
+      req.user!.uid,
+    );
+    ApiResponse.success(res, data, 'Project completed');
   }
 
   /**

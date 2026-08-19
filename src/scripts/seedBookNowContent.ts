@@ -25,6 +25,12 @@ import {
 } from '../constants/beautyOfferCatalogSeed';
 import { buildBookNowCsvSeed } from '../utils/bookNowCsvCatalogSeed';
 import { loadSupplementalBookNowContentSeed } from '../utils/bookNowSupplementalContentSeed';
+import { BookNowCatalogBootstrap } from '../services/BookNowCatalogBootstrap';
+import {
+  PERSONAL_ASSISTANT_CATEGORY,
+  PERSONAL_ASSISTANT_CATEGORY_SLUG,
+} from '../constants/personalAssistantBooking';
+import { personalAssistantCatalogIsActive } from '../utils/personalAssistantCatalogVisibility';
 
 const BOOK_NOW_SKU_CONTENT_OVERRIDES: Record<
   string,
@@ -756,15 +762,51 @@ async function seedBeautyOfferCatalog(): Promise<{ categoryCount: number; skuCou
   return { categoryCount, skuCount, contentCount };
 }
 
+async function seedPersonalAssistantCatalog(): Promise<{
+  categoryId: string;
+  skus: number;
+}> {
+  const isActive = personalAssistantCatalogIsActive();
+  const result = await BookNowCatalogBootstrap.seedPersonalAssistantCatalog();
+  const imageUrl = BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG[PERSONAL_ASSISTANT_CATEGORY_SLUG] || '';
+
+  await BookNowHubSection.findOneAndUpdate(
+    { slug: PERSONAL_ASSISTANT_CATEGORY.slug },
+    {
+      slug: PERSONAL_ASSISTANT_CATEGORY.slug,
+      title: 'Personal Assistance',
+      iconKey: 'User',
+      sortOrder: PERSONAL_ASSISTANT_CATEGORY.sortOrder,
+      services: [
+        {
+          serviceId: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+          label: PERSONAL_ASSISTANT_CATEGORY.name,
+          categorySlug: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+          sectionId: '',
+          imageUrl,
+          sortOrder: 10,
+          isActive,
+        },
+      ],
+      isActive,
+    },
+    { upsert: true, new: true },
+  );
+
+  return result;
+}
+
 async function main() {
   await Database.connectToDb();
 
-  const [csvSeed, skuCount, categoryCount, faqCount, beautySeed] = await Promise.all([
+  const [csvSeed, skuCount, categoryCount, faqCount, beautySeed, personalAssistantSeed] =
+    await Promise.all([
     seedBookNowCsvCatalog(),
     seedBookNowSkuContent(),
     seedBookNowCategoryContent(),
     seedHelpSupportContent(),
     seedBeautyOfferCatalog(),
+    seedPersonalAssistantCatalog(),
   ]);
 
   logger.info('Seeded Book Now content', {
@@ -777,6 +819,8 @@ async function main() {
     csvContentCount: csvSeed.contentCount,
     beautyCategoryCount: beautySeed.categoryCount,
     beautySkuCount: beautySeed.skuCount,
+    personalAssistantCategoryId: personalAssistantSeed.categoryId,
+    personalAssistantSkuCount: personalAssistantSeed.skus,
     beautyContentCount: beautySeed.contentCount,
     supplementalContentMatchedCount: SUPPLEMENTAL_BOOK_NOW_CONTENT.matchedCount,
     supplementalContentUnmatchedServices: SUPPLEMENTAL_BOOK_NOW_CONTENT.unmatchedServices,

@@ -26,6 +26,7 @@ export const BOOK_NOW_CATALOG_LABELS: Record<string, string> = {
   'painting-exterior': 'Exterior Painting',
   'painting-rental': 'Rental Painting',
   'painting-waterproofing': 'Waterproofing',
+  painting: 'Painting',
   'car-wash-basic': 'Basic Car Wash',
   'car-wash-premium': 'Premium Car Wash',
   'car-wash-interior-deep-cleaning': 'Car Interior Deep Cleaning',
@@ -36,6 +37,7 @@ export const BOOK_NOW_CATALOG_LABELS: Record<string, string> = {
   'laundry-bedding-and-blankets': 'Bedding & Blankets',
   'laundry-shoe-cleaning': 'Shoe Cleaning',
   'hourly-helper': 'Hourly Helper',
+  'personal-assistance': 'Personal Assistant',
 };
 
 export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
@@ -51,6 +53,7 @@ export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
   'painting-exterior': 'other',
   'painting-rental': 'other',
   'painting-waterproofing': 'other',
+  painting: 'other',
   'car-wash-basic': 'cleaning',
   'car-wash-premium': 'cleaning',
   'car-wash-interior-deep-cleaning': 'cleaning',
@@ -62,6 +65,7 @@ export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
   'laundry-shoe-cleaning': 'cleaning',
   /** Hourly Helper is general help — maps to Task enum `other` (not a catalog slug). */
   'hourly-helper': 'other',
+  'personal-assistance': 'other',
 };
 
 /** Legacy / mistaken SKU.taskCategory values → valid Task.category. */
@@ -80,7 +84,16 @@ const TASK_CATEGORY_ALIASES: Record<string, TaskCategory> = {
 };
 
 export function resolveBookNowTaskCategory(catalogId: string): TaskCategory {
-  return BOOK_NOW_TASK_CATEGORY_BY_CATALOG[catalogId] || 'cleaning';
+  const key = String(catalogId || '')
+    .trim()
+    .toLowerCase();
+  if (BOOK_NOW_TASK_CATEGORY_BY_CATALOG[key]) {
+    return BOOK_NOW_TASK_CATEGORY_BY_CATALOG[key];
+  }
+  if (key === 'painting' || key.startsWith('painting-')) {
+    return 'other';
+  }
+  return 'cleaning';
 }
 
 /**

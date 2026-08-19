@@ -22,31 +22,48 @@ function parseIncludeInactive(value: unknown): boolean {
   return false;
 }
 
+function getCatalogCustomerUid(req: Request): string | undefined {
+  return (req as AuthenticatedRequest).user?.uid;
+}
+
 export class CatalogController {
-  static async listCategories(_req: Request, res: Response): Promise<void> {
-    const categories = await CatalogService.listCategories();
+  static async listCategories(req: Request, res: Response): Promise<void> {
+    const categories = await CatalogService.listCategories(getCatalogCustomerUid(req));
     res.json({ success: true, data: categories });
   }
 
   static async getCategory(req: Request, res: Response): Promise<void> {
-    const { category, skus, content } = await CatalogService.listSkusByCategorySlug(req.params.slug);
+    const customerUid = getCatalogCustomerUid(req);
+    const { category, skus, content } = await CatalogService.listSkusByCategorySlug(
+      req.params.slug,
+      customerUid,
+    );
     res.json({ success: true, data: { category, skus, content } });
   }
 
   static async getBookNowHubCatalog(req: Request, res: Response): Promise<void> {
     const previewLimit =
       req.query.previewLimit !== undefined ? Number(req.query.previewLimit) : undefined;
-    const sections = await CatalogService.getBookNowHubCatalog(previewLimit);
+    const sections = await CatalogService.getBookNowHubCatalog(
+      previewLimit,
+      getCatalogCustomerUid(req),
+    );
     res.json({ success: true, data: sections });
   }
 
   static async getBookNowCategoryPackages(req: Request, res: Response): Promise<void> {
-    const data = await CatalogService.getBookNowCategoryPackages(req.params.slug);
+    const data = await CatalogService.getBookNowCategoryPackages(
+      req.params.slug,
+      getCatalogCustomerUid(req),
+    );
     res.json({ success: true, data });
   }
 
   static async getCategoryContent(req: Request, res: Response): Promise<void> {
-    const content = await CatalogService.getCategoryContent(req.params.slug);
+    const content = await CatalogService.getCategoryContent(
+      req.params.slug,
+      getCatalogCustomerUid(req),
+    );
     res.json({ success: true, data: content });
   }
 
@@ -88,13 +105,21 @@ export class CatalogController {
 
   static async getSku(req: Request, res: Response): Promise<void> {
     const categorySlug = req.query.categorySlug as string | undefined;
-    const detail = await CatalogService.getSkuDetail(req.params.skuSlug, categorySlug);
+    const detail = await CatalogService.getSkuDetail(
+      req.params.skuSlug,
+      categorySlug,
+      getCatalogCustomerUid(req),
+    );
     res.json({ success: true, data: detail });
   }
 
   static async getSkuContent(req: Request, res: Response): Promise<void> {
     const categorySlug = req.query.categorySlug as string | undefined;
-    const content = await CatalogService.getSkuContent(req.params.skuSlug, categorySlug);
+    const content = await CatalogService.getSkuContent(
+      req.params.skuSlug,
+      categorySlug,
+      getCatalogCustomerUid(req),
+    );
     res.json({ success: true, data: content });
   }
 
