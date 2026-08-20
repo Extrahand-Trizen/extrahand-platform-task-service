@@ -102,6 +102,9 @@ const envSchema = z.object({
 
   /** Comma-separated Firebase UIDs that can see PA before public launch (optional). */
   BOOK_NOW_PERSONAL_ASSISTANT_PREVIEW_UIDS: z.string().optional(),
+
+  /** Dev only: force painting consultation auto-assign to this partner phone (last 10 digits). */
+  BOOK_NOW_PAINTING_CONSULTATION_PREFERRED_PHONE: z.string().optional(),
 });
 
 // Extend global type for CORS config logging
@@ -328,6 +331,10 @@ export class Config {
 
   static get BOOK_NOW_PERSONAL_ASSISTANT_PREVIEW_UIDS(): string | undefined {
     return this.env.BOOK_NOW_PERSONAL_ASSISTANT_PREVIEW_UIDS;
+  }
+
+  static get BOOK_NOW_PAINTING_CONSULTATION_PREFERRED_PHONE(): string | undefined {
+    return this.env.BOOK_NOW_PAINTING_CONSULTATION_PREFERRED_PHONE;
   }
 }
 

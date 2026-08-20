@@ -2569,6 +2569,12 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
+    TaskService.invalidateTaskCache(taskId);
+    const parentTaskIdForCache = updatedTask.parentTaskId ? String(updatedTask.parentTaskId) : "";
+    if (parentTaskIdForCache) {
+      TaskService.invalidateTaskCache(parentTaskIdForCache);
+    }
+
     logger.info(`Task ${taskId} status updated to ${status} by ${profileId.toString()}`);
 
     if (
@@ -3264,6 +3270,10 @@ export class TaskService {
     workTask.executionPhase = "on_the_way";
 
     await workTask.save();
+    TaskService.invalidateTaskCache(effectiveTaskId);
+    if (effectiveTaskId !== taskId) {
+      TaskService.invalidateTaskCache(taskId);
+    }
 
     const { workTitle: workTitleForOtp, visitNumber } =
       await RecurringVisitService.resolveStartOtpWorkTitle(workTask);
@@ -3394,7 +3404,6 @@ export class TaskService {
     });
 
     logger.info(`[OTP SUCCESS] Generated and successfully dispatched 4-digit start OTP: ${otp} for task: ${effectiveTaskId} to poster: ${requesterName}`);
-    TaskService.invalidateTaskCache(taskId);
 
     return {
       sentTo: requesterName,
@@ -3903,6 +3912,9 @@ export class TaskService {
 
     if (!updated) throw new NotFoundError("Task not found");
     TaskService.invalidateTaskCache(effectiveTaskId);
+    if (effectiveTaskId !== taskId) {
+      TaskService.invalidateTaskCache(taskId);
+    }
     return updated as unknown as ITask;
   }
 

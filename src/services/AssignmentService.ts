@@ -104,7 +104,7 @@ function formatRatingText(rating?: number): string {
   return `${rating.toFixed(1)}★`;
 }
 
-async function notifyBookNowAssignment(params: {
+export async function notifyBookNowAssignment(params: {
   actorUid: string;
   taskId: string;
   taskTitle: string;
@@ -125,11 +125,12 @@ async function notifyBookNowAssignment(params: {
     recipientRole = 'partner',
   } = params;
 
-  const displayName = String(helperName || 'Your partner').trim();
+  const displayName = String(helperName || 'Your professional').trim();
   const ratingText = formatRatingText(helperRating);
   const customerBody = ratingText
     ? `${displayName} (${ratingText}) has been assigned to your booking for "${taskTitle}".`
     : `${displayName} has been assigned to your booking for "${taskTitle}".`;
+  const customerTitle = `${displayName} assigned`;
 
   try {
     await InAppNotificationClient.send({
@@ -174,7 +175,7 @@ async function notifyBookNowAssignment(params: {
   try {
     await InAppNotificationClient.send({
       userId: customerUid,
-      title: 'Partner assigned',
+      title: customerTitle,
       body: customerBody,
       type: 'success',
       category: 'taskUpdates',
@@ -187,12 +188,12 @@ async function notifyBookNowAssignment(params: {
     });
 
     await NotificationClient.send({
-      eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+      eventKey: NOTIFICATION_EVENT_KEYS.BOOK_NOW_PARTNER_ASSIGNED,
       category: 'taskUpdates',
       actorId: actorUid,
       recipients: [customerUid],
       entity: { type: 'task', id: taskId },
-      title: 'Partner assigned',
+      title: customerTitle,
       body: customerBody,
       data: {
         taskId,

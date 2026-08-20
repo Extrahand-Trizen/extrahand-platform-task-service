@@ -17,7 +17,6 @@ import {
   resolvePosterUid,
   withHelperAlertData,
 } from '../utils/helperNotificationRecipients';
-import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 
 export type PostCreateNotificationContext = {
   uid?: string;
@@ -420,22 +419,7 @@ export async function runPostCreateNotifications(
         logger.error('[BookNowTaskCreated] Log error:', logErr);
       }
 
-      // ─── AUTO-ASSIGN: Find nearest eligible partner and assign directly ───────
-      try {
-        logger.info(`[BookNowAutoAssign] 🔍 Starting auto-assignment for Book Now task: "${task.title}" (${task._id})`);
-        const result = await BookNowAutoAssignService.autoAssign(task);
-        if (result.assigned && result.partner) {
-          logger.info(
-            `[BookNowAutoAssign] ✅ Task (${task._id}) auto-assigned → Partner: ${result.partner.name} (UID: ${result.partner.uid}) in Work Area: "${result.partner.workArea}" (${result.partner.workAreaDistKm.toFixed(2)} km from task location)`
-          );
-        } else {
-          logger.warn(
-            `[BookNowAutoAssign] ⚠️  Task (${task._id}) could NOT be auto-assigned. Reason: ${result.reason ?? 'Unknown'}. Requires manual ops assignment.`
-          );
-        }
-      } catch (autoAssignErr) {
-        logger.error('[BookNowAutoAssign] ❌ Auto-assignment threw an error:', autoAssignErr);
-      }
+      // Auto-assign runs in BookingService.scheduleBookNowAutoAssign after payment materialize.
     }
 
     const nearbyTaskerSet = new Set(nearbyTaskers);

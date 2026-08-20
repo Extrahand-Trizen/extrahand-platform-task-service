@@ -54,6 +54,21 @@ export class ApplicationRepository {
   }
 
   /**
+   * Repair a single pending application that missed the denormalized revision
+   * round. Used only as a defensive fallback in respond-to-revision.
+   */
+  static async setApplicationRevisionRound(
+    applicationId: string,
+    round: number
+  ): Promise<ITaskApplication | null> {
+    return TaskApplication.findOneAndUpdate(
+      { _id: applicationId, status: "pending" },
+      { $set: { taskCurrentRevisionRound: round } },
+      { new: true }
+    ).lean() as unknown as ITaskApplication | null;
+  }
+
+  /**
    * Apply a tasker's response to a global revision round (keep or revise).
    * Atomically updates:
    *   - proposedBudget.amount (to newAmount)

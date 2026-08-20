@@ -10,6 +10,8 @@ import { CatalogService } from '../services/CatalogService';
 import { resolvePartnerMatchConditions, normalizeCategory } from '../services/partnerVisibility';
 import { CancellationPassService } from '../services/CancellationPassService';
 import { serializeBookNowLeadExecutionFields } from '../utils/bookNowLeadSerialization';
+import { notifyBookNowAssignment } from '../services/AssignmentService';
+import { ProfileUtils } from '../utils/ProfileUtils';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -286,7 +288,19 @@ export class PartnerBookNowController {
     const Profile = mongoose.connection.collection('profiles');
     const profile = await Profile.findOne(
       { _id: partnerOid },
-      { projection: { supplyPrograms: 1, partnerProfile: 1, roles: 1 } },
+      {
+        projection: {
+          supplyPrograms: 1,
+          partnerProfile: 1,
+          roles: 1,
+          name: 1,
+          fullName: 1,
+          displayName: 1,
+          firstName: 1,
+          lastName: 1,
+          rating: 1,
+        },
+      },
     );
 
     if (!profile) {
@@ -296,6 +310,11 @@ export class PartnerBookNowController {
     const p = profile as Record<string, any>;
     const roles: string[] = p.roles || [];
     const supplyPrograms: string[] = p.supplyPrograms || [];
+    const helperName = ProfileUtils.resolveProfileDisplayName(p);
+    const helperRating =
+      typeof p.rating === 'number' && Number.isFinite(p.rating)
+        ? Number(p.rating)
+        : undefined;
 
     // In development mode, allow any performer/partner role to accept. In production, require book_now supply program.
     const isBookNowPartner =
@@ -325,6 +344,13 @@ export class PartnerBookNowController {
           partnerUid: uid,
           assigneeId: partnerOid,
           assigneeUid: uid,
+          ...(helperName
+            ? {
+                assignedHelperName: helperName,
+                assignedToName: helperName,
+                assigneeName: helperName,
+              }
+            : {}),
           partnerAcceptedAt: new Date(),
           assignedAt: new Date(),
         },
@@ -337,6 +363,24 @@ export class PartnerBookNowController {
     }
 
     const taskDoc = task as Record<string, any>;
+
+    void notifyBookNowAssignment({
+      actorUid: uid,
+      taskId: String(taskDoc._id),
+      taskTitle: String(taskDoc.title || 'your booking'),
+      customerUid: taskDoc.requesterUid,
+      helperUid: uid,
+      helperName,
+      helperRating,
+      recipientRole: 'partner',
+    }).catch((err: any) => {
+      logger.warn('Failed to queue Book Now partner-accept assignment notification', {
+        taskId: String(taskDoc._id),
+        customerUid: taskDoc.requesterUid,
+        helperUid: uid,
+        error: err?.message,
+      });
+    });
 
     // Notify other connected partners that this lead is gone
     try {

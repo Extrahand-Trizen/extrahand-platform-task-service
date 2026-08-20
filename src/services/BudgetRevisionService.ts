@@ -101,27 +101,21 @@ export class BudgetRevisionService {
       actorUid,
     });
 
-    // Drop Redis task detail + browse list cache before returning so poster/helper
-    // refetches cannot overwrite the UI with the pre-revision budget/round.
-    await TaskService.invalidateTaskCacheAsync(taskId);
-    TaskService.invalidateTaskListCache();
-
     // ── DENORMALIZE ROUND onto pending applications ──────────────────────────
     // Bulk write: O(A) one DB op so respond-to-revision doesn't need a task fetch.
     // Synchronous — must complete before HTTP response so helpers see the update
     // immediately when their frontend refetches after poster's revision.
-    try {
-      await ApplicationRepository.setTaskRevisionRound(taskId, round);
-      logger.info(
-        "[BudgetRevisionService.reviseBudget] Denormalized revision round onto applications",
-        { taskId, round }
-      );
-    } catch (err) {
-      logger.error(
-        "[BudgetRevisionService.reviseBudget] Failed to denormalize round",
-        { taskId, round, error: err instanceof Error ? err.message : err }
-      );
-    }
+    await ApplicationRepository.setTaskRevisionRound(taskId, round);
+    logger.info(
+      "[BudgetRevisionService.reviseBudget] Denormalized revision round onto applications",
+      { taskId, round }
+    );
+
+    // Cache invalidation is intentionally after the critical DB writes and
+    // fire-and-forget. A slow Redis delete must not make the poster see a
+    // timeout after the budget has already changed.
+    TaskService.invalidateTaskCache(taskId);
+    TaskService.invalidateTaskListCache();
 
     // ── DISPATCH NOTIFICATIONS ───────────────────────────────────────────────
     // Fetch pending bidder UIDs via covered index scan (no doc reads), then
@@ -213,9 +207,9 @@ export class BudgetRevisionService {
     }
 
     // ── FETCH APPLICATION ─────────────────────────────────────────────────────
-    const application = await ApplicationRepository.findById(
+    let application = await ApplicationRepository.findById(
       applicationId,
-      "applicantId status taskId proposedBudget respondedToRevisionRound taskCurrentRevisionRound quotationRevisions"
+      "applicantId status taskId proposedBudget respondedToRevisionRound taskCurrentRevisionRound quotationRevisions createdAt"
     );
     if (!application) throw new NotFoundError("Application not found");
 
@@ -230,7 +224,50 @@ export class BudgetRevisionService {
     }
 
     // ── ACTIVE REVISION CHECK ─────────────────────────────────────────────────
-    const taskRevisionRound = application.taskCurrentRevisionRound ?? 0;
+    let taskRevisionRound = application.taskCurrentRevisionRound ?? 0;
+    if (taskRevisionRound === 0) {
+      const task = await TaskRepository.findById(
+        application.taskId.toString(),
+        "currentRevisionRound budgetRevisions negotiationStatus"
+      );
+      const latestRevision = Array.isArray(task?.budgetRevisions)
+        ? task.budgetRevisions[task.budgetRevisions.length - 1]
+        : undefined;
+      const latestRevisionAt = latestRevision?.revisedAt
+        ? new Date(latestRevision.revisedAt).getTime()
+        : null;
+      const applicationCreatedAt = application.createdAt
+        ? new Date(application.createdAt).getTime()
+        : null;
+      const applicationWasInRevisionCohort =
+        latestRevisionAt === null ||
+        applicationCreatedAt === null ||
+        applicationCreatedAt <= latestRevisionAt;
+
+      if (
+        task?.negotiationStatus === "revised" &&
+        (task.currentRevisionRound ?? 0) > 0 &&
+        applicationWasInRevisionCohort
+      ) {
+        const repaired = await ApplicationRepository.setApplicationRevisionRound(
+          applicationId,
+          task.currentRevisionRound
+        );
+        if (repaired) {
+          application = repaired;
+          taskRevisionRound = task.currentRevisionRound;
+          logger.warn(
+            "[BudgetRevisionService.respondToRevision] Repaired missing application revision round",
+            {
+              applicationId,
+              taskId: application.taskId.toString(),
+              round: taskRevisionRound,
+            }
+          );
+        }
+      }
+    }
+
     if (taskRevisionRound === 0) {
       throw new BadRequestError(
         "No active budget revision exists for this task"

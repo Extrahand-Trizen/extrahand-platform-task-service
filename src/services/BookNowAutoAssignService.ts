@@ -6,6 +6,8 @@ import AssignmentLog from '../models/AssignmentLog';
 import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
 import { HYDERABAD_WORK_AREA_COORDS } from '../constants/locations/hyderabadWorkAreaCoords';
+import { config } from '../config/env';
+import { resolvePartnerUidByPhone } from '../utils/resolvePartnerUidByPhone';
 import { partnerCategoryMatchesBookNowTask } from './partnerVisibility';
 
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
@@ -170,13 +172,13 @@ function formatTaskTimeDisplay(task: ITask): string {
 }
 
 function checkTimingMatch(workShifts: string[], task: ITask): boolean {
-  if (!workShifts || !Array.isArray(workShifts) || workShifts.length === 0) return false;
-
   const bookingKind = String((task as any).bookingKind || '').trim().toLowerCase();
   if (bookingKind === 'consultation') {
-    // Site-survey consultations: any configured shift is enough when the slot is flexible.
+    // Site-survey consultations: partner travels; any configured shift (or none) is acceptable.
     return true;
   }
+
+  if (!workShifts || !Array.isArray(workShifts) || workShifts.length === 0) return false;
 
   const taskTime = parseTaskTime(task);
   for (const shiftId of workShifts) {
@@ -239,6 +241,71 @@ function buildOrderedWorkAreasForDispatch(task: ITask): Array<{ area: string; di
   }
 
   return orderedWorkAreas;
+}
+
+function isConsultationBookNowTask(task: ITask): boolean {
+  return String((task as any).bookingKind || '').trim().toLowerCase() === 'consultation';
+}
+
+function isPaintingConsultationTask(task: ITask): boolean {
+  if (!isConsultationBookNowTask(task)) return false;
+  const serviceType = String(task.serviceType || '').trim().toLowerCase();
+  const flowType = String((task as any).serviceFlowType || '').trim();
+  const slug = String((task as any).categorySlug || '').trim().toLowerCase();
+  const subcategory = String(task.subcategory || '').trim().toLowerCase();
+  return (
+    serviceType === 'painting' ||
+    flowType === 'consultation_project' ||
+    slug === 'painting' ||
+    slug.startsWith('painting-') ||
+    subcategory.startsWith('painting-consultation-')
+  );
+}
+
+async function resolvePaintingConsultationPreferredPartnerUid(
+  task: ITask,
+): Promise<string | null> {
+  if (config.NODE_ENV !== 'development') return null;
+  if (!isPaintingConsultationTask(task)) return null;
+  const phone = String(config.BOOK_NOW_PAINTING_CONSULTATION_PREFERRED_PHONE || '').trim();
+  if (!phone) return null;
+  return resolvePartnerUidByPhone(phone);
+}
+
+function partnerMatchesWorkArea(workAreas: string[], areaKey: string): boolean {
+  const normAreas = workAreas.map((a: string) => normalizeArea(a));
+  return normAreas.some(
+    (a: string) => a === areaKey || a.includes(areaKey) || areaKey.includes(a),
+  );
+}
+
+function resolvePartnerDistanceKm(
+  taskCoords: { lng: number; lat: number } | null,
+  profile: Record<string, unknown>,
+): number | null {
+  const homeLoc = (profile.homeLocation as { coordinates?: number[] } | undefined)?.coordinates;
+  const liveLoc = (profile.location as { coordinates?: number[] } | undefined)?.coordinates;
+  const coords =
+    Array.isArray(homeLoc) && homeLoc.length === 2 ? homeLoc : liveLoc;
+  if (
+    !taskCoords ||
+    !Array.isArray(coords) ||
+    coords.length !== 2 ||
+    typeof coords[1] !== 'number' ||
+    (coords[0] === 0 && coords[1] === 0)
+  ) {
+    return null;
+  }
+  return haversineKm(taskCoords.lat, taskCoords.lng, coords[1], coords[0]);
+}
+
+function sortPartnersByDistance(partners: EligiblePartner[]): EligiblePartner[] {
+  return [...partners].sort((a, b) => {
+    if (a.distKm === null && b.distKm === null) return 0;
+    if (a.distKm === null) return 1;
+    if (b.distKm === null) return -1;
+    return a.distKm - b.distKm;
+  });
 }
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
@@ -521,6 +588,10 @@ export class BookNowAutoAssignService {
         ? { lng: task.location.coordinates[0], lat: task.location.coordinates[1] }
         : null;
 
+    if (isConsultationBookNowTask(task)) {
+      return BookNowAutoAssignService.findBestPartnerForConsultation(task, profiles, taskCoords);
+    }
+
     const orderedWorkAreas = buildOrderedWorkAreasForDispatch(task);
 
     for (const wa of orderedWorkAreas) {
@@ -542,30 +613,12 @@ export class BookNowAutoAssignService {
 
         if (!partnerCategoryMatchesBookNowTask(categories, task)) continue;
 
-        const normAreas = workAreas.map((a: string) => normalizeArea(a));
-        const areaMatches = normAreas.some((a: string) => a === areaKey || a.includes(areaKey) || areaKey.includes(a));
-        if (!areaMatches) continue;
+        if (!partnerMatchesWorkArea(workAreas, areaKey)) continue;
 
         const workShifts: string[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
         if (!checkTimingMatch(workShifts, task)) continue;
 
-        let distKm: number | null = null;
-        const pCoords: number[] | undefined =
-          (p.homeLocation as any)?.coordinates || (p.location as any)?.coordinates;
-        if (
-          taskCoords &&
-          Array.isArray(pCoords) &&
-          pCoords.length === 2 &&
-          typeof pCoords[1] === 'number' &&
-          (pCoords[0] !== 0 || pCoords[1] !== 0)
-        ) {
-          const homeLoc = (p.homeLocation as any)?.coordinates;
-          const liveLoc = (p.location as any)?.coordinates;
-          const coords = (Array.isArray(homeLoc) && homeLoc.length === 2) ? homeLoc : liveLoc;
-          if (coords) {
-            distKm = haversineKm(taskCoords.lat, taskCoords.lng, coords[1], coords[0]);
-          }
-        }
+        const distKm = resolvePartnerDistanceKm(taskCoords, p as Record<string, unknown>);
 
         areaPartners.push({
           uid: String(p.uid),
@@ -579,17 +632,47 @@ export class BookNowAutoAssignService {
 
       if (areaPartners.length === 0) continue;
 
-      areaPartners.sort((a, b) => {
-        if (a.distKm === null && b.distKm === null) return 0;
-        if (a.distKm === null) return 1;
-        if (b.distKm === null) return -1;
-        return a.distKm - b.distKm;
-      });
-
-      return areaPartners[0];
+      return sortPartnersByDistance(areaPartners)[0];
     }
 
     return null;
+  }
+
+  private static findBestPartnerForConsultation(
+    task: ITask,
+    profiles: Record<string, unknown>[],
+    taskCoords: { lng: number; lat: number } | null,
+  ): EligiblePartner | null {
+    const postedArea =
+      task.location?.taskArea ||
+      (task.location as any)?.locality ||
+      task.location?.city ||
+      'Consultation area';
+    const eligible: EligiblePartner[] = [];
+
+    for (const p of profiles) {
+      const pp = (p.partnerProfile as Record<string, unknown>) || {};
+      if (pp.status !== 'approved') continue;
+
+      const categories: unknown[] = Array.isArray(pp.categories) ? pp.categories : [];
+      if (!categories.length) continue;
+      if (!partnerCategoryMatchesBookNowTask(categories, task)) continue;
+
+      const workShifts: unknown[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
+      if (!checkTimingMatch(workShifts as string[], task)) continue;
+
+      eligible.push({
+        uid: String(p.uid),
+        profileId: String(p._id),
+        name: String(p.name || p.fullName || 'Partner'),
+        distKm: resolvePartnerDistanceKm(taskCoords, p),
+        workArea: postedArea,
+        workAreaDistKm: 0,
+      });
+    }
+
+    if (!eligible.length) return null;
+    return sortPartnersByDistance(eligible)[0];
   }
 
   private static async findPreferredPartnerForTask(
@@ -757,11 +840,44 @@ export class BookNowAutoAssignService {
    * Auto-assign the Book Now task to the best matching partner.
    * Generates and stores dispatch evaluation logs on the task document.
    */
+  static async forceAssignPartner(
+    task: ITask,
+    partnerUid: string,
+  ): Promise<AutoAssignResult> {
+    const uid = String(partnerUid || '').trim();
+    if (!uid) {
+      return { assigned: false, reason: 'Partner uid is required' };
+    }
+
+    const preferred = await BookNowAutoAssignService.findPreferredPartnerForTask(task, uid);
+    if (!preferred) {
+      return {
+        assigned: false,
+        reason: 'Preferred partner is not approved or does not match task category',
+      };
+    }
+
+    const dispatchLogs = await BookNowAutoAssignService.buildDispatchLog(task, preferred.uid);
+    await BookNowAutoAssignService.persistPartnerAssignment(task, preferred, dispatchLogs);
+    return { assigned: true, partner: preferred, dispatchLogs };
+  }
+
   static async autoAssign(task: ITask, options?: AutoAssignOptions): Promise<AutoAssignResult> {
     const taskId = String(task._id);
 
     try {
+      const devPreferredUid = await resolvePaintingConsultationPreferredPartnerUid(task);
       const existingUid = String(task.assigneeUid || task.partnerUid || '').trim();
+
+      if (devPreferredUid && existingUid && existingUid !== devPreferredUid) {
+        logger.info('[BookNowAutoAssign] Dev painting consultation override — reassigning partner', {
+          taskId,
+          fromUid: existingUid,
+          toUid: devPreferredUid,
+        });
+        return BookNowAutoAssignService.forceAssignPartner(task, devPreferredUid);
+      }
+
       if (existingUid) {
         const synced = await BookNowAutoAssignService.syncExistingAssignee(task, existingUid);
         if (synced?.assigned) {
@@ -769,7 +885,8 @@ export class BookNowAutoAssignService {
         }
       }
 
-      const preferredUid = String(options?.preferredPartnerUid || '').trim();
+      const preferredUid =
+        String(options?.preferredPartnerUid || '').trim() || devPreferredUid || '';
       let best = preferredUid
         ? await BookNowAutoAssignService.findPreferredPartnerForTask(task, preferredUid)
         : null;

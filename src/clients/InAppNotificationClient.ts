@@ -99,8 +99,18 @@ export class InAppNotificationClient {
         let resolvedRole = payload.data.recipientRole;
 
         if (task.bookingSource === 'book_now') {
-          // All Book Now notifications go to Partner/Customer tab
-          resolvedRole = 'partner';
+          if (payload.userId) {
+            if (task.requesterUid === payload.userId) {
+              resolvedRole = 'customer';
+            } else if (task.assigneeUid === payload.userId) {
+              resolvedRole = 'partner';
+            } else {
+              resolvedRole = payload.data.recipientRole || 'partner';
+            }
+          } else {
+            // Batch Book Now notifications are used for partner-side lead updates.
+            resolvedRole = payload.data.recipientRole || 'partner';
+          }
         } else {
           // Marketplace / Normal post works
           if (resolvedRole === 'helper') {

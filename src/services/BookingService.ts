@@ -1407,6 +1407,105 @@ export class BookingService {
     return hydrated as unknown as InstanceType<typeof Task>;
   }
 
+  private static scheduleBookNowAutoAssign(
+    task: InstanceType<typeof Task>,
+    line: ResolvedLine,
+    order: InstanceType<typeof BookingOrder>,
+    options?: { preferredPartnerUid?: string },
+  ): void {
+    const taskId = String(task._id);
+    const orderId = order.orderId;
+    const escrowId = String(order.paymentEscrowId || '').trim();
+
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const freshTask = await Task.findById(taskId);
+          if (!freshTask || freshTask.assigneeUid) return;
+
+          const taskForAssign = BookingService.mergeTaskForAutoAssign(freshTask, line, order);
+          const result = await BookNowAutoAssignService.autoAssign(taskForAssign as any, {
+            preferredPartnerUid: options?.preferredPartnerUid,
+          });
+
+          const postedArea =
+            freshTask.location?.taskArea ||
+            (freshTask.location as { locality?: string })?.locality ||
+            freshTask.location?.city ||
+            'N/A';
+          const timeInfo = freshTask.scheduledTimeStart || freshTask.timeSlot || 'Flexible';
+          const catInfo = line.categoryLabel || freshTask.category || 'N/A';
+
+          logger.info(`================================================================================`);
+          logger.info(`📢 [BookNowWorkPosted] NEW BOOK NOW WORK POSTED!`);
+          logger.info(`   Task ID           : ${taskId}`);
+          logger.info(`   Task Title        : "${freshTask.title}"`);
+          logger.info(`   Category          : ${catInfo}`);
+          logger.info(`   Work Posted Area  : ${postedArea}`);
+          logger.info(`   Work Scheduled    : ${timeInfo}`);
+          logger.info(`--------------------------------------------------------------------------------`);
+          if (result.assigned && result.partner) {
+            const distStr =
+              result.partner.distKm != null
+                ? `${result.partner.distKm.toFixed(2)} km`
+                : 'Location Not Set';
+            logger.info(`✅ AUTO-ASSIGNMENT STATUS: SUCCESS`);
+            logger.info(`   Partner Name      : ${result.partner.name}`);
+            logger.info(`   Partner UID       : ${result.partner.uid}`);
+            logger.info(`   Partner Profile ID: ${result.partner.profileId}`);
+            logger.info(
+              `   Assigned Work Area: "${result.partner.workArea}" (${result.partner.workAreaDistKm.toFixed(2)} km from task)`,
+            );
+            logger.info(`   Partner Distance  : ${distStr}`);
+
+            const items = await BookingItem.find({ orderId }).select('taskId').lean();
+            const linkedTaskIds = items.map((item) => item.taskId).filter(Boolean);
+            const linkedTasks = linkedTaskIds.length
+              ? await Task.find({ _id: { $in: linkedTaskIds } }).select('assigneeUid').lean()
+              : [];
+            const allAssigned =
+              linkedTasks.length > 0 && linkedTasks.every((row) => Boolean(row.assigneeUid));
+            if (allAssigned) {
+              await BookingOrder.updateOne(
+                { orderId, status: { $in: ['assigning', 'paid'] } },
+                { $set: { status: 'assigned' } },
+              );
+            }
+
+            if (escrowId && result.partner.uid) {
+              try {
+                await PaymentClient.attachPerformerToEscrow({
+                  escrowId,
+                  performerUid: result.partner.uid,
+                });
+              } catch (attachErr) {
+                logger.warn('[BookNowAutoAssign] Deferred escrow attach failed', {
+                  orderId,
+                  escrowId,
+                  taskId,
+                  error: attachErr instanceof Error ? attachErr.message : String(attachErr),
+                });
+              }
+            }
+          } else {
+            logger.info(`⚠️ AUTO-ASSIGNMENT STATUS: UNASSIGNED`);
+            logger.info(
+              `   Reason            : ${result.reason ?? 'No matching approved partner found within 5km'}`,
+            );
+            logger.info(`   Action Required   : Operations team manual assignment`);
+          }
+          logger.info(`================================================================================`);
+        } catch (autoAssignErr) {
+          logger.error('[BookNowAutoAssign] ❌ Deferred auto-assignment error', {
+            taskId,
+            orderId,
+            error: autoAssignErr instanceof Error ? autoAssignErr.message : String(autoAssignErr),
+          });
+        }
+      })();
+    });
+  }
+
   private static async selfHealUnassignedBookNowTasks(
     order: InstanceType<typeof BookingOrder>,
     items: InstanceType<typeof BookingItem>[],
@@ -1662,44 +1761,12 @@ export class BookingService {
             String(
               sourceConsultationTask.assigneeUid || sourceConsultationTask.partnerUid || '',
             ).trim() || undefined;
-          const taskForAssign = BookingService.mergeTaskForAutoAssign(
-            transitionedTask,
-            line,
-            order,
-          );
-          const result = await BookNowAutoAssignService.autoAssign(taskForAssign as any, {
+          BookingService.scheduleBookNowAutoAssign(transitionedTask, line, order, {
             preferredPartnerUid,
           });
-          const postedArea =
-            transitionedTask.location?.taskArea ||
-            (transitionedTask.location as any)?.locality ||
-            transitionedTask.location?.city ||
-            'N/A';
-          const timeInfo =
-            transitionedTask.scheduledTimeStart || transitionedTask.timeSlot || 'Flexible';
-          const catInfo = line.categoryLabel || transitionedTask.category || 'N/A';
-
-          logger.info(`================================================================================`);
-          logger.info(`📢 [BookNowWorkPosted] CONSULTATION PROJECT POSTED!`);
-          logger.info(`   Task ID           : ${transitionedTask._id}`);
-          logger.info(`   Task Title        : "${transitionedTask.title}"`);
-          logger.info(`   Category          : ${catInfo}`);
-          logger.info(`   Work Posted Area  : ${postedArea}`);
-          logger.info(`   Work Scheduled    : ${timeInfo}`);
-          logger.info(`--------------------------------------------------------------------------------`);
-          if (result.assigned && result.partner) {
-            logger.info(`✅ AUTO-ASSIGNMENT STATUS: SUCCESS`);
-            logger.info(`   Partner Name      : ${result.partner.name}`);
-            logger.info(`   Partner UID       : ${result.partner.uid}`);
-            logger.info(`   Partner Profile ID: ${result.partner.profileId}`);
-          } else {
-            logger.info(`⚠️ AUTO-ASSIGNMENT STATUS: UNASSIGNED`);
-            logger.info(`   Reason            : ${result.reason ?? 'No matching approved partner found'}`);
-          }
-          logger.info(`================================================================================`);
         } catch (autoAssignErr) {
           logger.error(
-            '[BookNowAutoAssign] ❌ Auto-assignment error (consultation project):',
+            '[BookNowAutoAssign] ❌ Failed to schedule auto-assignment (consultation project):',
             autoAssignErr,
           );
         }
@@ -1748,39 +1815,8 @@ export class BookingService {
         await Task.findByIdAndUpdate(task._id, { bookingItemId: String(createdItem._id) });
       }
 
-      // ─── AUTO-ASSIGN: Immediately find nearest partner and assign ───────────
-      try {
-        const taskForAssign = BookingService.mergeTaskForAutoAssign(task, line, order);
-        const result = await BookNowAutoAssignService.autoAssign(taskForAssign as any);
-        const postedArea = task.location?.taskArea || (task.location as any)?.locality || task.location?.city || 'N/A';
-        const timeInfo = task.scheduledTimeStart || task.timeSlot || 'Flexible';
-        const catInfo = line.categoryLabel || task.category || 'N/A';
-
-        logger.info(`================================================================================`);
-        logger.info(`📢 [BookNowWorkPosted] NEW BOOK NOW WORK POSTED!`);
-        logger.info(`   Task ID           : ${task._id}`);
-        logger.info(`   Task Title        : "${task.title}"`);
-        logger.info(`   Category          : ${catInfo}`);
-        logger.info(`   Work Posted Area  : ${postedArea}`);
-        logger.info(`   Work Scheduled    : ${timeInfo}`);
-        logger.info(`--------------------------------------------------------------------------------`);
-        if (result.assigned && result.partner) {
-          const distStr = result.partner.distKm !== null ? `${result.partner.distKm.toFixed(2)} km` : 'Location Not Set';
-          logger.info(`✅ AUTO-ASSIGNMENT STATUS: SUCCESS`);
-          logger.info(`   Partner Name      : ${result.partner.name}`);
-          logger.info(`   Partner UID       : ${result.partner.uid}`);
-          logger.info(`   Partner Profile ID: ${result.partner.profileId}`);
-          logger.info(`   Assigned Work Area: "${result.partner.workArea}" (${result.partner.workAreaDistKm.toFixed(2)} km from task)`);
-          logger.info(`   Partner Distance  : ${distStr}`);
-        } else {
-          logger.info(`⚠️ AUTO-ASSIGNMENT STATUS: UNASSIGNED`);
-          logger.info(`   Reason            : ${result.reason ?? 'No matching approved partner found within 5km'}`);
-          logger.info(`   Action Required   : Operations team manual assignment`);
-        }
-        logger.info(`================================================================================`);
-      } catch (autoAssignErr) {
-        logger.error('[BookNowAutoAssign] ❌ Auto-assignment error:', autoAssignErr);
-      }
+      // Auto-assign off the payment HTTP path — payment callback must return quickly.
+      BookingService.scheduleBookNowAutoAssign(task, line, order);
 
       try {
         schedulePostCreateNotifications(task, {
@@ -2679,6 +2715,7 @@ export class BookingService {
     );
     const isLastActiveItem = remainingActive.length === 0;
     const isMultiItem = items.length > 1;
+    let paymentCancellationResult: unknown = null;
 
     const taskStartIso = (task.scheduledDate || task.createdAt).toISOString();
     const assignedAtIso = task.assignedAt
@@ -2716,6 +2753,7 @@ export class BookingService {
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this service');
         }
+        paymentCancellationResult = refundResult;
       } else {
         const refundResult = await PaymentClient.cancelPaymentForTask({
           taskId: String(task._id),
@@ -2735,6 +2773,7 @@ export class BookingService {
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this service');
         }
+        paymentCancellationResult = refundResult;
       }
     }
 
@@ -2756,7 +2795,7 @@ export class BookingService {
 
     await order.save();
 
-    return { order, item, remainingItems: remainingActive };
+    return { order, item, remainingItems: remainingActive, paymentCancellationResult };
   }
 
   static async cancelBooking(orderId: string, customerUid: string, reason?: string) {
@@ -2778,6 +2817,7 @@ export class BookingService {
     const items = await BookingItem.find({ orderId });
     const taskIds = items.map((i) => i.taskId).filter(Boolean);
     let refundInitiated = false;
+    let paymentCancellationResult: unknown = null;
 
     for (const taskId of taskIds) {
       const task = await Task.findById(taskId);
@@ -2819,6 +2859,7 @@ export class BookingService {
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this booking');
         }
+        paymentCancellationResult = refundResult;
         refundInitiated = true;
       }
 
@@ -2833,6 +2874,6 @@ export class BookingService {
     order.cancellationReason = reason;
     await order.save();
 
-    return { order, items };
+    return { order, items, paymentCancellationResult };
   }
 }
