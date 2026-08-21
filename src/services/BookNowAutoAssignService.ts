@@ -9,6 +9,7 @@ import { HYDERABAD_WORK_AREA_COORDS } from '../constants/locations/hyderabadWork
 import { config } from '../config/env';
 import { resolvePartnerUidByPhone } from '../utils/resolvePartnerUidByPhone';
 import { partnerCategoryMatchesBookNowTask } from './partnerVisibility';
+import { notifyBookNowAssignment } from './AssignmentService';
 
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
 const WORK_AREA_COORDS = HYDERABAD_WORK_AREA_COORDS;
@@ -178,7 +179,9 @@ function checkTimingMatch(workShifts: string[], task: ITask): boolean {
     return true;
   }
 
-  if (!workShifts || !Array.isArray(workShifts) || workShifts.length === 0) return false;
+  // Some approved legacy partner profiles do not have shift slots backfilled yet.
+  // Do not block auto-assignment when category and work-area already match.
+  if (!workShifts || !Array.isArray(workShifts) || workShifts.length === 0) return true;
 
   const taskTime = parseTaskTime(task);
   for (const shiftId of workShifts) {
@@ -790,6 +793,25 @@ export class BookNowAutoAssignService {
       },
       { new: true },
     );
+
+    void notifyBookNowAssignment({
+      actorUid: 'system',
+      taskId,
+      taskTitle: String(task.title || 'your booking'),
+      customerUid: String((task as any).requesterUid || '').trim() || undefined,
+      helperUid: partner.uid,
+      helperName: partner.name,
+      notifyPartner: false,
+      notifyCustomer: true,
+      recipientRole: 'partner',
+    }).catch((err: any) => {
+      logger.warn('[BookNowAutoAssign] Failed to send customer assignment notification', {
+        taskId,
+        customerUid: (task as any).requesterUid,
+        helperUid: partner.uid,
+        error: err?.message,
+      });
+    });
 
     if (options?.notifyPartner === false) return;
 

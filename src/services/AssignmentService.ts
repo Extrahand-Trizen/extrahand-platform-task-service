@@ -113,6 +113,8 @@ export async function notifyBookNowAssignment(params: {
   helperName?: string;
   helperRating?: number;
   recipientRole?: 'partner' | 'tasker';
+  notifyPartner?: boolean;
+  notifyCustomer?: boolean;
 }) {
   const {
     actorUid,
@@ -123,6 +125,8 @@ export async function notifyBookNowAssignment(params: {
     helperName,
     helperRating,
     recipientRole = 'partner',
+    notifyPartner = true,
+    notifyCustomer = true,
   } = params;
 
   const displayName = String(helperName || 'Your professional').trim();
@@ -132,43 +136,45 @@ export async function notifyBookNowAssignment(params: {
     : `${displayName} has been assigned to your booking for "${taskTitle}".`;
   const customerTitle = `${displayName} assigned`;
 
-  try {
-    await InAppNotificationClient.send({
-      userId: helperUid,
-      title: 'Work assigned to you',
-      body: `You are now assigned to "${taskTitle}". Open the work to review the details.`,
-      type: 'success',
-      category: 'taskUpdates',
-      data: {
-        taskId,
-        action: 'assigned',
-        recipientRole,
-      },
-    });
+  if (notifyPartner) {
+    try {
+      await InAppNotificationClient.send({
+        userId: helperUid,
+        title: 'Work assigned to you',
+        body: `You are now assigned to "${taskTitle}". Open the work to review the details.`,
+        type: 'success',
+        category: 'taskUpdates',
+        data: {
+          taskId,
+          action: 'assigned',
+          recipientRole,
+        },
+      });
 
-    await NotificationClient.send({
-      eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
-      category: 'taskUpdates',
-      actorId: actorUid,
-      recipients: [helperUid],
-      entity: { type: 'task', id: taskId },
-      title: 'Work assigned to you',
-      body: `You are now assigned to "${taskTitle}". Open the work to review the details.`,
-      data: {
+      await NotificationClient.send({
+        eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+        category: 'taskUpdates',
+        actorId: actorUid,
+        recipients: [helperUid],
+        entity: { type: 'task', id: taskId },
+        title: 'Work assigned to you',
+        body: `You are now assigned to "${taskTitle}". Open the work to review the details.`,
+        data: {
+          taskId,
+          action: 'assigned',
+          recipientRole,
+        },
+      });
+    } catch (err: any) {
+      logger.warn('Failed to send assignment notification to helper/partner', {
         taskId,
-        action: 'assigned',
-        recipientRole,
-      },
-    });
-  } catch (err: any) {
-    logger.warn('Failed to send assignment notification to helper/partner', {
-      taskId,
-      helperUid,
-      error: err?.message,
-    });
+        helperUid,
+        error: err?.message,
+      });
+    }
   }
 
-  if (!customerUid) {
+  if (!notifyCustomer || !customerUid) {
     return;
   }
 
@@ -597,6 +603,23 @@ export class AssignmentService {
       helperUid,
       applicationId,
       assignedByUid,
+    });
+
+    const helperSnapshot = await resolveAssignedHelperSnapshot({
+      helperName: resolvedHelperName,
+      helperProfileId: helperProfileObjId,
+      helperUid,
+    });
+
+    await notifyBookNowAssignment({
+      actorUid: assignedByUid,
+      taskId: String(task._id),
+      taskTitle: String(task.title || 'your work'),
+      customerUid: task.requesterUid,
+      helperUid,
+      helperName: helperSnapshot.name || resolvedHelperName,
+      helperRating: helperSnapshot.rating,
+      recipientRole: 'tasker',
     });
 
     return { assignment, task };
