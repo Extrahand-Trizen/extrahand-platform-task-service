@@ -53,6 +53,14 @@ export function formatScheduleDateKeyIST(scheduledDate: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+const FAR_FUTURE_MS = 999 * 60 * 60 * 1000;
+
+function toValidDate(value: unknown): Date | null {
+  if (value == null) return null;
+  const parsed = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 /**
  * Combine Book Now schedule date + "h:mm AM/PM" start into an absolute Instant.
  * Matches how slots are stored (calendar day in +05:30).
@@ -70,6 +78,39 @@ export function resolveVisitScheduledAt(params: {
   const hh = String(Math.floor(total / 60) % 24).padStart(2, '0');
   const mm = String(total % 60).padStart(2, '0');
   return new Date(`${dateKey}T${hh}:${mm}:00.000${IST_OFFSET}`);
+}
+
+/**
+ * Absolute service start for Book Now / marketplace cancellation fee tiers.
+ * Never use booking `createdAt` here — that incorrectly triggers within-24h fees.
+ */
+export function resolveTaskStartForCancellationPolicy(params: {
+  scheduledDate?: Date | string | null;
+  scheduledTimeStart?: string | null;
+  timeSlot?: string | null;
+  orderScheduledDate?: Date | string | null;
+  orderScheduledTimeStart?: string | null;
+  orderTimeSlot?: string | null;
+}): Date {
+  const scheduledDate =
+    toValidDate(params.scheduledDate) ?? toValidDate(params.orderScheduledDate);
+  if (!scheduledDate) {
+    return new Date(Date.now() + FAR_FUTURE_MS);
+  }
+
+  const scheduledTimeStart =
+    String(
+      params.scheduledTimeStart ||
+        params.timeSlot ||
+        params.orderScheduledTimeStart ||
+        params.orderTimeSlot ||
+        '',
+    ).trim() || undefined;
+
+  return resolveVisitScheduledAt({
+    scheduledDate,
+    scheduledTimeStart,
+  });
 }
 
 export type HourlyLineHint = {

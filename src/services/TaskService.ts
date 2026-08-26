@@ -21,6 +21,7 @@ import TaskQuestion from "../models/TaskQuestion";
 import TaskFollow from "../models/TaskFollow";
 import TaskReport from "../models/TaskReport";
 import BookingOrder from "../models/BookingOrder";
+import BookingItem from "../models/BookingItem";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -43,6 +44,7 @@ import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
+import { resolveTaskStartForCancellationPolicy } from './cancellation/cancellationContext';
 import {
   MY_TASKS_LIST_SELECT,
   buildApplicationPreviewsForTasks,
@@ -315,7 +317,47 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce';
+
+async function enrichBookNowTaskScheduleFromBooking(task: ITask): Promise<ITask> {
+  if (!isBookNowTaskForCompletion(task)) return task;
+
+  const record = task as unknown as Record<string, any>;
+  if (String(record.scheduledTimeStart || '').trim()) return task;
+
+  const taskId = String(record._id || '').trim();
+  const bookingOrderId = String(record.bookingOrderId || '').trim();
+  if (!taskId && !bookingOrderId) return task;
+
+  const item =
+    taskId && mongoose.Types.ObjectId.isValid(taskId)
+      ? await BookingItem.findOne({ taskId: new mongoose.Types.ObjectId(taskId) })
+          .select('scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot durationMinutes')
+          .lean()
+      : null;
+
+  if (item) {
+    record.scheduledDate = record.scheduledDate ?? item.scheduledDate;
+    record.scheduledTimeStart = record.scheduledTimeStart ?? item.scheduledTimeStart;
+    record.scheduledTimeEnd = record.scheduledTimeEnd ?? item.scheduledTimeEnd;
+    record.timeSlot = record.timeSlot ?? item.timeSlot;
+    record.estimatedDuration = record.estimatedDuration ?? item.durationMinutes;
+  }
+
+  if (!String(record.scheduledTimeStart || '').trim() && bookingOrderId) {
+    const order = await BookingOrder.findOne({ orderId: bookingOrderId })
+      .select('scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot')
+      .lean();
+    if (order) {
+      record.scheduledDate = record.scheduledDate ?? order.scheduledDate;
+      record.scheduledTimeStart = record.scheduledTimeStart ?? order.scheduledTimeStart;
+      record.scheduledTimeEnd = record.scheduledTimeEnd ?? order.scheduledTimeEnd;
+      record.timeSlot = record.timeSlot ?? order.timeSlot;
+    }
+  }
+
+  return task;
+}
 
 /** Post & Choose only â€” Book Now tasks are assigned via ops, not helper browse. */
 function buildMarketplaceBrowseClause(): Record<string, unknown> {
@@ -992,6 +1034,8 @@ export class TaskService {
     if (!task) {
       throw new NotFoundError("Task not found");
     }
+
+    task = await enrichBookNowTaskScheduleFromBooking(task);
 
     // Book Now must never linger in `review` after proof — heal stale rows from older deploys.
     if (
@@ -2212,26 +2256,13 @@ export class TaskService {
     await Task.findByIdAndUpdate(taskId, { $inc: { views: 1 } });
   }
 
-  /** Scheduled start for cancellation fee policy (aligned with web tracking UI). */
+  /** Scheduled start for cancellation fee policy (IST calendar day + slot). */
   private static getTaskStartDateForCancellationPolicy(task: ITask): Date {
-    const now = Date.now();
-    if (!task.scheduledDate) {
-      return new Date(now + 999 * 60 * 60 * 1000);
-    }
-    const d = new Date(task.scheduledDate);
-    const ts = task.scheduledTimeStart;
-    if (ts && typeof ts === "string") {
-      const timeMatch = ts.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
-      if (timeMatch) {
-        let hours = parseInt(timeMatch[1], 10);
-        const mins = parseInt(timeMatch[2], 10);
-        const mod = timeMatch[3]?.toLowerCase();
-        if (mod === "pm" && hours < 12) hours += 12;
-        if (mod === "am" && hours === 12) hours = 0;
-        d.setHours(hours, mins, 0, 0);
-      }
-    }
-    return d;
+    return resolveTaskStartForCancellationPolicy({
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+      timeSlot: task.timeSlot,
+    });
   }
 
   /**

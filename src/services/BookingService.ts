@@ -65,6 +65,7 @@ import {
 } from '../utils/consultationProject';
 import {
   isHourlyBookingFromHints,
+  resolveTaskStartForCancellationPolicy,
 } from './cancellation/cancellationContext';
 import { config } from '../config/env';
 import type { BookingFulfillmentType } from '../models/BookingOrder';
@@ -2594,12 +2595,17 @@ export class BookingService {
     const primaryTask = tasks[0];
     const primaryItem = items.find((i) => i.status !== 'cancelled') || items[0];
 
-    const taskStartDate = (
-      primaryTask?.scheduledDate ||
-      primaryItem?.scheduledDate ||
-      order.scheduledDate ||
-      order.createdAt
-    ).toISOString();
+    const taskStartDate = resolveTaskStartForCancellationPolicy({
+      scheduledDate: primaryTask?.scheduledDate ?? primaryItem?.scheduledDate ?? order.scheduledDate,
+      scheduledTimeStart:
+        primaryTask?.scheduledTimeStart ??
+        primaryItem?.scheduledTimeStart ??
+        order.scheduledTimeStart,
+      timeSlot: primaryTask?.timeSlot ?? order.timeSlot,
+      orderScheduledDate: order.scheduledDate,
+      orderScheduledTimeStart: order.scheduledTimeStart ?? order.timeSlot,
+      orderTimeSlot: order.timeSlot,
+    }).toISOString();
     const assignedAtIso = primaryTask?.assignedAt
       ? new Date(primaryTask.assignedAt).toISOString()
       : null;
@@ -2717,7 +2723,15 @@ export class BookingService {
     const isMultiItem = items.length > 1;
     let paymentCancellationResult: unknown = null;
 
-    const taskStartIso = (task.scheduledDate || task.createdAt).toISOString();
+    const taskStartIso = resolveTaskStartForCancellationPolicy({
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+      timeSlot: task.timeSlot,
+      orderScheduledDate: item.scheduledDate ?? order.scheduledDate,
+      orderScheduledTimeStart:
+        item.scheduledTimeStart ?? order.scheduledTimeStart ?? order.timeSlot,
+      orderTimeSlot: order.timeSlot,
+    }).toISOString();
     const assignedAtIso = task.assignedAt
       ? new Date(task.assignedAt).toISOString()
       : null;
@@ -2848,7 +2862,17 @@ export class BookingService {
           reason: reason || 'Book Now cancelled by customer',
           userId: customerUid,
           cancelledBy: 'poster',
-          taskStartDate: (task.scheduledDate || task.createdAt).toISOString(),
+          taskStartDate: resolveTaskStartForCancellationPolicy({
+            scheduledDate: task.scheduledDate,
+            scheduledTimeStart: task.scheduledTimeStart,
+            timeSlot: task.timeSlot,
+            orderScheduledDate: firstItem?.scheduledDate ?? order.scheduledDate,
+            orderScheduledTimeStart:
+              firstItem?.scheduledTimeStart ??
+              order.scheduledTimeStart ??
+              order.timeSlot,
+            orderTimeSlot: order.timeSlot,
+          }).toISOString(),
           assignedAt: assignedAtIso,
           feeBaseAmount: order.subtotal,
           taskTitle: task.title,
