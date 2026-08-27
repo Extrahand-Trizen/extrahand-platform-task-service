@@ -8,9 +8,12 @@ const CATEGORY_SLUG = 'electrician-submeter-installation';
 const SKU_SLUG = 'submeter-installation';
 const PACKAGE_NAME = 'Submeter Installation';
 
+/** Set SUBMETER_TEST_PRICE_RUPEES=10 to run a low-price refund test SKU. */
+const TEST_PRICE_RUPEES = Number(process.env.SUBMETER_TEST_PRICE_RUPEES || 0);
+
 /** Canonical catalog price from Booknow services and prices(Sheet1).csv */
-const ORIGINAL_PRICE_RUPEES = 349;
-const OFFER_PRICE_RUPEES = 249;
+const ORIGINAL_PRICE_RUPEES = TEST_PRICE_RUPEES > 0 ? TEST_PRICE_RUPEES : 349;
+const OFFER_PRICE_RUPEES = TEST_PRICE_RUPEES > 0 ? TEST_PRICE_RUPEES : 249;
 const DURATION_MINUTES = 90;
 const DURATION_LABEL = '1.5 hrs';
 
@@ -79,7 +82,7 @@ async function main() {
     { upsert: true, new: true },
   );
 
-  logger.info('Restored electrician submeter package pricing', {
+  logger.info(TEST_PRICE_RUPEES > 0 ? 'Set electrician submeter test pricing' : 'Restored electrician submeter package pricing', {
     categoryId: String(category._id),
     categorySlug: CATEGORY_SLUG,
     skuId: String(sku._id),

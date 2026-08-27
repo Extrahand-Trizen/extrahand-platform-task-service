@@ -42,9 +42,10 @@ assert.strictEqual(shouldSkipBookNowFixedPriceMinimum([fixedLine(99)]), false);
 
 assert.strictEqual(getBookNowFixedPriceMinimumShortfall([fixedLine(99)]), 100);
 assert.strictEqual(getBookNowFixedPriceMinimumShortfall([fixedLine(199)]), 0);
+assert.strictEqual(getBookNowFixedPriceMinimumShortfall([fixedLine(198)]), 1);
 assert.strictEqual(
-  getBookNowFixedPriceMinimumShortfall([fixedLine(99), fixedLine(100)]),
-  0,
+  getBookNowFixedPriceMinimumShortfall([fixedLine(100), fixedLine(98)]),
+  1,
 );
 assert.strictEqual(getBookNowFixedPriceMinimumShortfall([hourlyLine(50)]), 0);
 assert.strictEqual(getBookNowFixedPriceMinimumShortfall([paintingConsultationLine(99)]), 0);
