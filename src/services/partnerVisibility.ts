@@ -1,6 +1,10 @@
 import mongoose from 'mongoose';
 import { AuthenticatedRequest } from '../types';
 import { normalizeLocationName } from '../constants/locations/isHardcodedSupportedLocation';
+import {
+  BOOK_NOW_WORK_AREA_PROXIMITY_KM,
+  HYDERABAD_WORK_AREA_COORDS,
+} from '../constants/locations/hyderabadWorkAreaCoords';
 
 /**
  * Shared server-side visibility guard for partner-facing Book Now queries.
@@ -25,17 +29,32 @@ import { normalizeLocationName } from '../constants/locations/isHardcodedSupport
  */
 const CATEGORY_MAP: Record<string, string[]> = {
   cleaning: ['cleaning', 'home-cleaning', 'home_cleaning'],
-  repair: ['repair', 'plumbing', 'electrical', 'carpenter'],
+  repair: [
+    'repair',
+    'plumbing',
+    'electrical',
+    'electrician',
+    'carpenter',
+    'carpentry',
+    'ac-service',
+    'ac-services',
+    'ac-repair',
+    'appliance-repair',
+    'appliance-repair-services',
+  ],
   plumbing: ['plumbing', 'repair'],
-  electrical: ['electrical', 'repair'],
+  electrical: ['electrical', 'electrician', 'repair'],
+  electrician: ['electrician', 'electrical', 'repair'],
   delivery: ['delivery', 'pickup', 'pick-drop'],
   assembly: ['assembly', 'furniture-assembly'],
   gardening: ['gardening', 'lawn-mowing'],
   petcare: ['petcare', 'pet-care'],
   'packers-movers': ['packers-movers', 'moving'],
-  beautician: ['beautician', 'beauty', 'salon'],
+  beautician: ['beautician', 'beauty', 'beauty-services', 'salon'],
   driver: ['driver', 'chauffeur', 'driving'],
   'home-cleaning': ['cleaning', 'home-cleaning'],
+  'pest-control': ['pest-control'],
+  'beauty-services': ['beauty-services', 'beauty', 'beautician', 'salon'],
 };
 
 export function normalizeCategory(input: string): string {
@@ -44,6 +63,26 @@ export function normalizeCategory(input: string): string {
     if (aliases.includes(lower) || canonical === lower) return canonical;
   }
   return lower;
+}
+
+function normalizePartnerCategoryValue(raw: unknown): string {
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    const id = obj.id ?? obj.slug ?? obj.category ?? obj.value;
+    if (id != null && String(id).trim()) {
+      return normalizeCategory(String(id));
+    }
+  }
+  return normalizeCategory(String(raw || ''));
+}
+
+export function normalizePartnerCategorySlug(raw: unknown): string {
+  return normalizePartnerCategoryValue(raw);
+}
+
+export function normalizePartnerCategoryList(categories: unknown[]): string[] {
+  if (!Array.isArray(categories)) return [];
+  return categories.map((entry) => normalizePartnerCategoryValue(entry)).filter(Boolean);
 }
 
 function escapeRegExp(value: string): string {
@@ -82,6 +121,10 @@ const PARTNER_CATEGORY_TO_TASK_CATEGORIES: Record<string, string[]> = {
   plumbing: ['repair'],
   electrical: ['repair'],
   electrician: ['repair'],
+  appliance_repair: ['repair'],
+  'appliance-repair-services': ['repair'],
+  ac_service: ['repair'],
+  'ac-services': ['repair'],
   carpenter: ['repair'],
   carpentry: ['repair'],
   'ac-service': ['repair'],
@@ -107,12 +150,108 @@ const PARTNER_CATEGORY_TO_TASK_CATEGORIES: Record<string, string[]> = {
   // Remaining Book Now catalog services fall under Task.category 'other'.
   other: ['other'],
   painting: ['other'],
-  'pest-control': ['other'],
+  'interior-painting': ['other'],
+  'exterior-painting': ['other'],
+  'rental-painting': ['other'],
+  waterproofing: ['other'],
+  'painting-interior': ['other'],
+  'painting-exterior': ['other'],
+  'painting-rental': ['other'],
+  'painting-waterproofing': ['other'],
+  'pest-control': ['cleaning', 'other'],
+  'pest_control': ['other'],
+  'car-wash': ['cleaning'],
+  carwash: ['cleaning'],
+  laundry: ['cleaning'],
   'beauty-services': ['other'],
+  beauty: ['other'],
+  beautician: ['other'],
+  salon: ['other'],
   'care-services': ['other'],
   'professional-services': ['other'],
   'event-services': ['other'],
 };
+
+const PAINTING_SUPPLY_CATEGORY_SLUGS = new Set([
+  'painting',
+  'interior-painting',
+  'exterior-painting',
+  'rental-painting',
+  'waterproofing',
+  'painting-interior',
+  'painting-exterior',
+  'painting-rental',
+  'painting-waterproofing',
+]);
+
+function partnerHasPaintingSupplyCategory(normalizedPartnerCategories: string[]): boolean {
+  return normalizedPartnerCategories.some(
+    (cat) =>
+      PAINTING_SUPPLY_CATEGORY_SLUGS.has(cat) ||
+      cat.includes('painting') ||
+      cat === 'waterproofing',
+  );
+}
+
+export function partnerCategoryMatchesBookNowTask(
+  partnerCategories: unknown[],
+  task: {
+    category?: string;
+    categorySlug?: string;
+    categoryLabel?: string;
+    subcategory?: string;
+    serviceType?: string;
+    serviceFlowType?: string;
+    bookingKind?: string;
+  },
+): boolean {
+  const normalized = normalizePartnerCategoryList(partnerCategories);
+  if (!normalized.length) return false;
+
+  const taskCategory = String(task.category || '').trim().toLowerCase();
+  const taskSlug = normalizeCategory(String(task.categorySlug || ''));
+  const taskLabel = normalizeCategory(String(task.categoryLabel || ''));
+  const taskSubcategory = String(task.subcategory || '').trim().toLowerCase();
+  const taskServiceType = String(task.serviceType || '').trim().toLowerCase();
+  const taskFlowType = String(task.serviceFlowType || '').trim();
+  const taskBookingKind = String(task.bookingKind || '').trim().toLowerCase();
+
+  const taskCategories = new Set<string>();
+  normalized.forEach((cat) => {
+    const mapped = PARTNER_CATEGORY_TO_TASK_CATEGORIES[cat];
+    if (mapped) mapped.forEach((tc) => taskCategories.add(tc));
+    else taskCategories.add(cat);
+  });
+
+  if (taskCategory && taskCategories.has(taskCategory)) return true;
+  if (taskSlug && normalized.includes(taskSlug)) return true;
+  if (taskLabel && normalized.includes(taskLabel)) return true;
+
+  if (partnerHasPaintingSupplyCategory(normalized)) {
+    if (taskServiceType === 'painting') return true;
+    if (
+      taskFlowType === 'consultation_project' &&
+      (taskBookingKind === 'consultation' || taskBookingKind === 'project')
+    ) {
+      return true;
+    }
+    if (PAINTING_SUPPLY_CATEGORY_SLUGS.has(taskSlug)) return true;
+    if (taskSubcategory.startsWith('painting-consultation-')) return true;
+    if (taskSubcategory.startsWith('consultation-project-')) return true;
+  }
+
+  return normalized.some((partnerCat) => {
+    const partnerKey = partnerCat.replace(/[\s_-]+/g, '');
+    const slugKey = taskSlug.replace(/[\s_-]+/g, '');
+    const labelKey = taskLabel.replace(/[\s_-]+/g, '');
+    const subKey = taskSubcategory.replace(/[\s_-]+/g, '');
+    return (
+      (slugKey && (slugKey === partnerKey || slugKey.includes(partnerKey) || partnerKey.includes(slugKey))) ||
+      (labelKey && (labelKey === partnerKey || labelKey.includes(partnerKey) || partnerKey.includes(labelKey))) ||
+      (subKey && (subKey.includes(partnerKey) || partnerKey.includes(subKey)))
+    );
+  });
+}
 
 /**
  * Builds the query condition "job service category equals one of the
@@ -125,7 +264,7 @@ export function buildPartnerCategoryFilter(
   partnerCategories: unknown[],
 ): Record<string, any> | null {
   const normalized = partnerCategories
-    .map((c) => normalizeCategory(String(c || '')))
+    .map((c) => normalizePartnerCategoryValue(c))
     .filter(Boolean);
 
   if (!normalized.length) return null;
@@ -139,17 +278,26 @@ export function buildPartnerCategoryFilter(
 
   if (!taskCategories.size) return null;
 
-  return {
-    $or: [
-      { category: { $in: [...taskCategories] } },
-      { categorySlug: { $in: normalized } },
-      {
-        categoryLabel: {
-          $in: normalized.map((n) => new RegExp(`^${escapeRegExp(n)}$`, 'i')),
-        },
+  const orConditions: Record<string, unknown>[] = [
+    { category: { $in: [...taskCategories] } },
+    { categorySlug: { $in: normalized } },
+    {
+      categoryLabel: {
+        $in: normalized.map((n) => new RegExp(`^${escapeRegExp(n)}$`, 'i')),
       },
-    ],
-  };
+    },
+  ];
+
+  if (partnerHasPaintingSupplyCategory(normalized)) {
+    orConditions.push({ serviceType: 'painting' });
+    orConditions.push({
+      serviceFlowType: 'consultation_project',
+      bookingKind: { $in: ['consultation', 'project'] },
+    });
+    orConditions.push({ categorySlug: { $in: [...PAINTING_SUPPLY_CATEGORY_SLUGS] } });
+  }
+
+  return { $or: orConditions };
 }
 
 /**
@@ -178,6 +326,8 @@ export function buildPartnerWorkAreaFilter(
 
   const exactFieldConditions: Record<string, unknown>[] = [];
   const addressConditions: Record<string, unknown>[] = [];
+  const geoConditions: Record<string, unknown>[] = [];
+  const EARTH_RADIUS_KM = 6378.1;
 
   areas.forEach((area) => {
     const normalized = normalizeLocationName(area);
@@ -207,11 +357,29 @@ export function buildPartnerWorkAreaFilter(
         'location.address': new RegExp(`(^|[^a-z0-9])${contained}([^a-z0-9]|$)`, 'i'),
       });
     }
+
+    // Geo proximity: align available-leads visibility with auto-assign's 6 km work-area radius.
+    const coord = HYDERABAD_WORK_AREA_COORDS.find(
+      (wa) => normalizeLocationName(wa.area) === normalized,
+    );
+    if (coord) {
+      geoConditions.push({
+        location: {
+          $geoWithin: {
+            $centerSphere: [
+              [coord.lng, coord.lat],
+              BOOK_NOW_WORK_AREA_PROXIMITY_KM / EARTH_RADIUS_KM,
+            ],
+          },
+        },
+      });
+    }
   });
 
   const orConditions: Record<string, unknown>[] = [];
   if (exactFieldConditions.length) orConditions.push({ $or: exactFieldConditions });
   if (addressConditions.length) orConditions.push({ $or: addressConditions });
+  if (geoConditions.length) orConditions.push({ $or: geoConditions });
 
   if (!orConditions.length) return null;
 

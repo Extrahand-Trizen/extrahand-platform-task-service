@@ -31,6 +31,11 @@ export class BookingController {
       requestedCoinDiscountRupees,
       fulfillmentType,
       couponCode,
+      serviceFlowType,
+      bookingKind,
+      serviceType,
+      consultationMeta,
+      gstExempt,
     } = req.body;
 
     const hasItems = Array.isArray(items) && items.length > 0;
@@ -60,6 +65,11 @@ export class BookingController {
       requestedCoinDiscountRupees: Number(requestedCoinDiscountRupees) || 0,
       fulfillmentType,
       couponCode: couponCode ? String(couponCode) : undefined,
+      serviceFlowType,
+      bookingKind,
+      serviceType,
+      consultationMeta,
+      gstExempt: gstExempt === true,
     });
 
     res.status(201).json({
@@ -84,6 +94,45 @@ export class BookingController {
     }
 
     const data = await BookingService.getSlotAvailability(date, city);
+    res.json({ success: true, data });
+  }
+
+  static async getRescheduleEligibility(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+    const data = await BookingService.getRescheduleEligibility(req.params.orderId, user.uid);
+    res.json({ success: true, data });
+  }
+
+  static async getRescheduleSlots(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+    const date = String(req.query.date || '').trim();
+    if (!date) {
+      throw new BadRequestError('date is required');
+    }
+    const data = await BookingService.getRescheduleSlots(req.params.orderId, user.uid, date);
+    res.json({ success: true, data });
+  }
+
+  static async rescheduleOrder(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user;
+    if (!user?.uid) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+    const data = await BookingService.rescheduleOrder(req.params.orderId, user.uid, {
+      scheduledDate: req.body?.scheduledDate,
+      scheduledTimeStart: req.body?.scheduledTimeStart,
+      scheduledTimeEnd: req.body?.scheduledTimeEnd,
+      reason: req.body?.reason,
+    });
     res.json({ success: true, data });
   }
 
@@ -175,6 +224,33 @@ export class BookingController {
       req.body?.reason,
     );
     res.json({ success: true, data });
+  }
+
+  static async getFirstBookingEligibleCustomers(req: Request, res: Response): Promise<void> {
+    const { uids } = req.body;
+    if (!Array.isArray(uids)) {
+      throw new BadRequestError('uids array is required');
+    }
+
+    const eligibleUids = await BookingService.getFirstBookingEligibleCustomerUids(uids);
+    const eligibleSet = new Set(eligibleUids);
+    const normalizedRequested = Array.from(
+      new Set(
+        uids
+          .map((uid) => String(uid || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    res.json({
+      success: true,
+      data: {
+        eligibleUids,
+        ineligibleUids: normalizedRequested.filter((uid) => !eligibleSet.has(uid)),
+        requestedCount: normalizedRequested.length,
+        eligibleCount: eligibleUids.length,
+      },
+    });
   }
 
   /** Service-to-service: payment-service webhook callback after capture */

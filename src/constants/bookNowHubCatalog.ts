@@ -25,6 +25,7 @@ export type BookNowHubSectionSeed = {
 };
 
 export const BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG: Record<string, string> = {
+  'personal-assistance': cdnImage('personal-assistance'),
   'full-house': cdnImage('fullhouse-booknow'),
   bathroom: cdnImage('bathroom-booknow'),
   kitchen: cdnImage('kitchen-booknow'),
@@ -35,7 +36,162 @@ export const BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG: Record<string, string> = {
   'appliance-repair': cdnImage('wachingmachinecheckup-booknow'),
 };
 
+/** Plumbing package cards (MinIO) — keep in sync with bookNowCsvCatalogSeed PLUMBING_PACKAGE_IMAGE_URLS */
+const PLUMBING_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'plumbing-basin-sink::kitchen-sink-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Kitchen%20Sink%20Blockage%20Removal.webp',
+  ],
+  'plumbing-basin-sink::wash-basin-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wash%20Basin%20Blockage%20Removal.webp',
+  ],
+  'plumbing-basin-sink::wash-basin-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wash%20Basin%20Installation.webp',
+  ],
+  'plumbing-basin-sink::wash-basin-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wash%20Basin%20Leakage%20Repair.webp',
+  ],
+  'plumbing-bath-shower::ceiling-mounted-shower-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Ceiling-Mounted%20Shower%20Installation.webp',
+  ],
+  'plumbing-bath-shower::handheld-shower-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Handheld%20Shower%20Installation.webp',
+  ],
+  'plumbing-bath-shower::shower-filter-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shower%20Filter%20Installation.webp',
+  ],
+  'plumbing-bath-shower::shower-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shower%20Repair.webp',
+  ],
+  'plumbing-bath-shower::wall-mounted-shower-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wall-Mounted%20Shower%20Installation.webp',
+  ],
+  'plumbing-drainage-pipe::bathroom-balcony-drain-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Bathroom%20Balcony%20Drain%20Blockage%20Removal.webp',
+  ],
+  'plumbing-drainage-pipe::drain-cover-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Drain%20Cover%20Installation.webp',
+  ],
+  'plumbing-grouting::bathroom-grouting': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Bathroom%20Grouting.webp',
+  ],
+  'plumbing-grouting::kitchen-grouting': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Kitchen%20Grouting.webp',
+  ],
+  'plumbing-tap-mixer::hot-and-cold-mixer-repair-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Hot%20%26%20Cold%20Mixer%20Repair%20Installation.webp',
+  ],
+  'plumbing-tap-mixer::regular-tap-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Regular%20Tap%20Installation%20Replacement.webp',
+  ],
+  'plumbing-tap-mixer::regular-tap-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Regular%20Tap%20Repair.webp',
+  ],
+  'plumbing-tap-mixer::shower-mixer-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shower%20Mixer%20Installation%20Replacement.webp',
+  ],
+  'plumbing-tap-mixer::swan-tap-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Swan%20Tap%20Repair.webp',
+  ],
+  'plumbing-tap-mixer::tap-accessories-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tap%20Accessories%20Installation.webp',
+  ],
+  'plumbing-toilet::flush-tank-repair-ceramic': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Repair%20%E2%80%93%20Ceramic.webp',
+  ],
+  'plumbing-toilet::flush-tank-repair-concealed': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Repair%20%E2%80%93%20Concealed.webp',
+  ],
+  'plumbing-toilet::flush-tank-repair-pvc': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Repair%20%E2%80%93%20PVC.webp',
+  ],
+  'plumbing-toilet::flush-tank-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Replacement.webp',
+  ],
+  'plumbing-toilet::indian-toilet-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Indian%20Toilet%20Installation%20Replacement.webp',
+  ],
+  'plumbing-toilet::indian-toilet-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Indian%20Toilet%20Repair.webp',
+  ],
+  'plumbing-toilet::jet-spray-repair-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Jet%20Spray%20Repair%20Replacement.webp',
+  ],
+  'plumbing-toilet::toilet-pot-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Toilet%20Pot%20Blockage%20Removal.webp',
+  ],
+  'plumbing-toilet::toilet-seat-cover-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Toilet%20Seat%20Cover%20Installation%20Replacement.webp',
+  ],
+  'plumbing-toilet::western-toilet-installation-replacement-floor-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Installation%20Replacement%20%E2%80%93%20Floor%20Mounted.webp',
+  ],
+  'plumbing-toilet::western-toilet-installation-replacement-wall-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Installation%20Replacement%20%E2%80%93%20Wall%20Mounted.webp',
+  ],
+  'plumbing-toilet::western-toilet-repair-floor-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Repair%20%E2%80%93%20Floor%20Mounted.webp',
+  ],
+  'plumbing-toilet::western-toilet-repair-wall-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Repair%20%E2%80%93%20Wall%20Mounted.webp',
+  ],
+  'plumbing::bottle-trap-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Bottle%20Trap%20Installation.webp',
+  ],
+  'plumbing::connection-hose-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Connection%20Hose%20Installation.webp',
+  ],
+  'plumbing::geyser-connection-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Geyser%20Connection%20Leakage%20Repair.webp',
+  ],
+  'plumbing::motor-air-cavity-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Motor%20Air%20Cavity%20Removal.webp',
+  ],
+  'plumbing::motor-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Motor%20Installation%20Replacement.webp',
+  ],
+  'plumbing::overhead-tank-installation-5002-000l': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Overhead%20Tank%20Installation%20%E2%80%93%20500%E2%80%932%2C000L.webp',
+  ],
+  'plumbing::overhead-tank-installation-up-to-500l': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Overhead%20Tank%20Installation%20%E2%80%93%20Up%20to%20500L.webp',
+  ],
+  'plumbing::ro-water-connection': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-RO%20Water%20Connection.webp',
+  ],
+  'plumbing::shelf-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shelf%20Installation.webp',
+  ],
+  'plumbing::shutoff-valve-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shutoff%20Valve%20Leakage%20Repair.webp',
+  ],
+  'plumbing::soap-holder-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Soap%20Holder%20Installation.webp',
+  ],
+  'plumbing::tank-connection-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tank%20Connection%20Leakage%20Repair.webp',
+  ],
+  'plumbing::tank-cover-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tank%20Cover%20Replacement.webp',
+  ],
+  'plumbing::tank-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tank%20Leakage%20Repair.webp',
+  ],
+  'plumbing::towel-holder-rack-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Towel%20Holder%20Rack%20Installation.webp',
+  ],
+  'plumbing::washing-machine-inlet-connection': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Washing%20Machine%20Inlet%20Connection.webp',
+  ],
+  'plumbing::waste-pipe-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Waste%20Pipe%20Installation.webp',
+  ],
+  'plumbing::water-meter-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Water%20Meter%20Installation.webp',
+  ],
+};
+
 export const BOOK_NOW_PACKAGE_IMAGE_URLS_BY_CATEGORY_AND_SKU: Record<string, string[]> = {
+  ...PLUMBING_PACKAGE_IMAGE_URLS,
   'full-house::1bhk-economy': [cdnImage('fullhouse-1bhk-economy')],
   'full-house::1bhk-deep': [cdnImage('fullhouse-1bhk-deep')],
   'full-house::2bhk-economy': [cdnImage('fullhouse-2bhk-economy')],
@@ -91,6 +247,20 @@ export const BOOK_NOW_PACKAGE_IMAGE_URLS_BY_CATEGORY_AND_SKU: Record<string, str
 };
 
 export const BOOK_NOW_HUB_SECTION_SEED: BookNowHubSectionSeed[] = [
+  {
+    id: 'personal-assistance',
+    title: 'Personal Assistance',
+    iconKey: 'User',
+    sortOrder: 5,
+    services: [
+      {
+        id: 'personal-assistance',
+        label: 'Personal Assistant',
+        categorySlug: 'personal-assistance',
+        imageUrl: cdnImage('personal-assistance'),
+      },
+    ],
+  },
   {
     id: 'home-cleaning',
     title: 'Home Cleaning',

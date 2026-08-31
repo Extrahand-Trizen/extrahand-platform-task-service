@@ -62,6 +62,161 @@ function applyAssignedHelperNameToTask(
   task.assigneeName = name;
 }
 
+async function resolveAssignedHelperSnapshot(params: {
+  helperName?: string;
+  helperProfileId: mongoose.Types.ObjectId | string;
+  helperUid?: string;
+}): Promise<{ name?: string; rating?: number }> {
+  const profile =
+    (await ProfileUtils.getByProfileId(
+      params.helperProfileId,
+      'name fullName displayName firstName lastName rating',
+    )) ||
+    (params.helperUid
+      ? await mongoose.connection.collection('profiles').findOne(
+          { uid: String(params.helperUid).trim() },
+          {
+            projection: {
+              name: 1,
+              fullName: 1,
+              displayName: 1,
+              firstName: 1,
+              lastName: 1,
+              rating: 1,
+            },
+          },
+        )
+      : null);
+
+  return {
+    name: await resolveAssignedHelperName(params),
+    rating:
+      typeof profile?.rating === 'number' && Number.isFinite(profile.rating)
+        ? Number(profile.rating)
+        : undefined,
+  };
+}
+
+function formatRatingText(rating?: number): string {
+  if (typeof rating !== 'number' || !Number.isFinite(rating) || rating <= 0) {
+    return '';
+  }
+  return `${rating.toFixed(1)}★`;
+}
+
+export async function notifyBookNowAssignment(params: {
+  actorUid: string;
+  taskId: string;
+  taskTitle: string;
+  customerUid?: string | null;
+  helperUid: string;
+  helperName?: string;
+  helperRating?: number;
+  recipientRole?: 'partner' | 'tasker';
+  notifyPartner?: boolean;
+  notifyCustomer?: boolean;
+}) {
+  const {
+    actorUid,
+    taskId,
+    taskTitle,
+    customerUid,
+    helperUid,
+    helperName,
+    helperRating,
+    recipientRole = 'partner',
+    notifyPartner = true,
+    notifyCustomer = true,
+  } = params;
+
+  const displayName = String(helperName || 'Your professional').trim();
+  const ratingText = formatRatingText(helperRating);
+  const customerBody = ratingText
+    ? `${displayName} (${ratingText}) has been assigned to your booking for "${taskTitle}".`
+    : `${displayName} has been assigned to your booking for "${taskTitle}".`;
+  const customerTitle = `${displayName} assigned`;
+
+  if (notifyPartner) {
+    try {
+      await InAppNotificationClient.send({
+        userId: helperUid,
+        title: 'Work assigned to you',
+        body: `You are now assigned to "${taskTitle}". Open the work to review the details.`,
+        type: 'success',
+        category: 'taskUpdates',
+        data: {
+          taskId,
+          action: 'assigned',
+          recipientRole,
+        },
+      });
+
+      await NotificationClient.send({
+        eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+        category: 'taskUpdates',
+        actorId: actorUid,
+        recipients: [helperUid],
+        entity: { type: 'task', id: taskId },
+        title: 'Work assigned to you',
+        body: `You are now assigned to "${taskTitle}". Open the work to review the details.`,
+        data: {
+          taskId,
+          action: 'assigned',
+          recipientRole,
+        },
+      });
+    } catch (err: any) {
+      logger.warn('Failed to send assignment notification to helper/partner', {
+        taskId,
+        helperUid,
+        error: err?.message,
+      });
+    }
+  }
+
+  if (!notifyCustomer || !customerUid) {
+    return;
+  }
+
+  try {
+    await InAppNotificationClient.send({
+      userId: customerUid,
+      title: customerTitle,
+      body: customerBody,
+      type: 'success',
+      category: 'taskUpdates',
+      data: {
+        taskId,
+        action: 'partner_assigned',
+        partnerName: displayName,
+        partnerRating: helperRating,
+      },
+    });
+
+    await NotificationClient.send({
+      eventKey: NOTIFICATION_EVENT_KEYS.BOOK_NOW_PARTNER_ASSIGNED,
+      category: 'taskUpdates',
+      actorId: actorUid,
+      recipients: [customerUid],
+      entity: { type: 'task', id: taskId },
+      title: customerTitle,
+      body: customerBody,
+      data: {
+        taskId,
+        action: 'partner_assigned',
+        partnerName: displayName,
+        partnerRating: helperRating,
+      },
+    });
+  } catch (err: any) {
+    logger.warn('Failed to send assignment notification to customer', {
+      taskId,
+      customerUid,
+      error: err?.message,
+    });
+  }
+}
+
 /**
  * Create (or upsert) a synthetic accepted TaskApplication for a Book Now
  * ops-assigned helper, so the tasker can see the job in their My Work screen.
@@ -209,11 +364,12 @@ export class AssignmentService {
       ? task.budget.amount
       : 0;
 
-    const resolvedHelperName = await resolveAssignedHelperName({
+    const helperSnapshot = await resolveAssignedHelperSnapshot({
       helperName,
       helperProfileId,
       helperUid,
     });
+    const resolvedHelperName = helperSnapshot.name;
 
     const applicationId = await upsertAcceptedApplication({
       taskId: task._id as mongoose.Types.ObjectId,
@@ -303,6 +459,17 @@ export class AssignmentService {
       helperUid,
       applicationId,
       assignedByUid,
+    });
+
+    await notifyBookNowAssignment({
+      actorUid: assignedByUid,
+      taskId: String(task._id),
+      taskTitle: String(task.title || 'your booking'),
+      customerUid: task.requesterUid,
+      helperUid,
+      helperName: resolvedHelperName,
+      helperRating: helperSnapshot.rating,
+      recipientRole: 'partner',
     });
 
     return { assignment, order, task, item };
@@ -436,6 +603,23 @@ export class AssignmentService {
       helperUid,
       applicationId,
       assignedByUid,
+    });
+
+    const helperSnapshot = await resolveAssignedHelperSnapshot({
+      helperName: resolvedHelperName,
+      helperProfileId: helperProfileObjId,
+      helperUid,
+    });
+
+    await notifyBookNowAssignment({
+      actorUid: assignedByUid,
+      taskId: String(task._id),
+      taskTitle: String(task.title || 'your work'),
+      customerUid: task.requesterUid,
+      helperUid,
+      helperName: helperSnapshot.name || resolvedHelperName,
+      helperRating: helperSnapshot.rating,
+      recipientRole: 'tasker',
     });
 
     return { assignment, task };
@@ -597,7 +781,7 @@ export class AssignmentService {
     partnerName?: string;
     assignedByUid: string;
   }) {
-    const { taskId, partnerUid, partnerProfileId, assignedByUid } = params;
+    const { taskId, partnerUid, partnerProfileId, partnerName, assignedByUid } = params;
 
     const task = await Task.findById(taskId);
     if (!task) throw new NotFoundError('Task not found');
@@ -649,6 +833,12 @@ export class AssignmentService {
       metadata: { partnerUid, partnerProfileId },
     });
 
+    const partnerSnapshot = await resolveAssignedHelperSnapshot({
+      helperName: partnerName,
+      helperProfileId: partnerProfileObjId,
+      helperUid: partnerUid,
+    });
+
     // Set partnerId/partnerUid so task shows in partner my-leads query
     // Do NOT set acceptedApplicationId — no TaskApplication is created
     task.assigneeId = partnerProfileObjId;
@@ -660,12 +850,24 @@ export class AssignmentService {
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
     task.acceptedApplicationId = null as any;
+    applyAssignedHelperNameToTask(task as any, partnerSnapshot.name);
     await task.save();
 
     logger.info('Direct partner assigned (Book Now)', {
       taskId: task._id,
       partnerUid,
       assignedByUid,
+    });
+
+    await notifyBookNowAssignment({
+      actorUid: assignedByUid,
+      taskId: String(task._id),
+      taskTitle: String(task.title || 'your booking'),
+      customerUid: task.requesterUid,
+      helperUid: partnerUid,
+      helperName: partnerSnapshot.name,
+      helperRating: partnerSnapshot.rating,
+      recipientRole: 'partner',
     });
 
     return { assignment, task };

@@ -25,6 +25,12 @@ import {
 } from '../constants/beautyOfferCatalogSeed';
 import { buildBookNowCsvSeed } from '../utils/bookNowCsvCatalogSeed';
 import { loadSupplementalBookNowContentSeed } from '../utils/bookNowSupplementalContentSeed';
+import { BookNowCatalogBootstrap } from '../services/BookNowCatalogBootstrap';
+import {
+  PERSONAL_ASSISTANT_CATEGORY,
+  PERSONAL_ASSISTANT_CATEGORY_SLUG,
+} from '../constants/personalAssistantBooking';
+import { personalAssistantCatalogIsActive } from '../utils/personalAssistantCatalogVisibility';
 
 const BOOK_NOW_SKU_CONTENT_OVERRIDES: Record<
   string,
@@ -288,11 +294,160 @@ const BOOK_NOW_SKU_CONTENT_OVERRIDES: Record<
   },
 };
 
+const LAUNDRY_SKU_CONTENT_OVERRIDES: Record<
+  string,
+  {
+    includes: string[];
+    excludes: string[];
+    faqItems: Array<{ question: string; answer: string }>;
+  }
+> = {
+  'laundry-wash-by-weight::clothes-washing-per-kg': {
+    includes: [
+      'Sorting of washable clothes',
+      'Washing with detergent',
+      'Rinsing and basic drying arrangement',
+      'Folding after wash',
+    ],
+    excludes: [
+      'Sarees and traditional wear',
+      'Dry cleaning and heavy stain treatment',
+      'Bleach treatment, fabric repair and ironing',
+    ],
+    faqItems: [
+      { question: 'Is detergent included?', answer: 'Yes, detergent is included in the service.' },
+      { question: 'Is ironing included?', answer: 'No, ironing is not included in clothes washing.' },
+      { question: 'Can delicate clothes be washed?', answer: 'Only if the garments are suitable for normal washing.' },
+    ],
+  },
+  'laundry-wash-by-weight::wash-and-iron-per-kg': {
+    includes: [
+      'Sorting of washable clothes',
+      'Washing and drying arrangement',
+      'Ironing after wash',
+      'Folding after ironing',
+    ],
+    excludes: [
+      'Sarees and traditional wear',
+      'Dry cleaning and heavy stain treatment',
+      'Bleach treatment, fabric repair and specialized delicate-garment care',
+    ],
+    faqItems: [
+      { question: 'Does this include washing and ironing?', answer: 'Yes, it includes both washing and ironing.' },
+      { question: 'Are stains guaranteed to come out?', answer: 'No, stain removal depends on fabric type and stain condition.' },
+      { question: 'Can formal clothes be included?', answer: 'Only if they are suitable for normal wash and iron handling.' },
+    ],
+  },
+  'laundry-ironing-services::ironing-steam-ironing-8-pieces': {
+    includes: [
+      'Ironing or steam ironing of garments',
+      'Basic garment handling',
+    ],
+    excludes: [
+      'Washing and stain removal',
+      'Dry cleaning',
+      'Repairs and alterations',
+    ],
+    faqItems: [
+      { question: 'Does washing come with it?', answer: 'No, this service covers ironing only.' },
+      { question: 'Can different garments be included?', answer: 'Yes, subject to fabric suitability and serviceability.' },
+      { question: 'Is steam ironing included?', answer: 'Yes, ironing or steam ironing is included based on the selected service handling.' },
+    ],
+  },
+  'laundry-traditional-wear::saree-and-traditional-wear-cleaning-per-piece': {
+    includes: [
+      'Suitable hand-washing for traditional wear',
+      'Rinsing after wash',
+      'Basic drying arrangement',
+      'Basic folding after cleaning',
+    ],
+    excludes: [
+      'Dry cleaning',
+      'Embroidery restoration and colour restoration',
+      'Heavy stain treatment and ironing',
+    ],
+    faqItems: [
+      { question: 'Can every saree be washed?', answer: 'No, only sarees and traditional wear suitable for this cleaning method can be accepted.' },
+      { question: 'Does it include ironing?', answer: 'No, ironing is not included in this package.' },
+      { question: 'What about heavily embroidered garments?', answer: 'They need assessment before service because delicate work may not be suitable for standard cleaning.' },
+    ],
+  },
+  'laundry-bedding-and-blankets::bedsheet-cleaning-per-piece': {
+    includes: [
+      'Washing and rinsing of the bedsheet',
+      'Basic drying arrangement',
+      'Basic folding after cleaning',
+    ],
+    excludes: [
+      'Dry cleaning and heavy stain treatment',
+      'Specialized machine drying',
+      'Repairs and ironing',
+    ],
+    faqItems: [
+      { question: 'Can all bedsheets be cleaned?', answer: 'Only when the bedsheet material and size are suitable for the service.' },
+      { question: 'Is drying included?', answer: 'Basic drying arrangement is included.' },
+      { question: 'Is ironing included?', answer: 'No, ironing is not included in bedsheet cleaning.' },
+    ],
+  },
+  'laundry-bedding-and-blankets::single-blanket-cleaning-per-piece': {
+    includes: [
+      'Washing and rinsing of the blanket',
+      'Basic drying arrangement',
+      'Basic folding after cleaning',
+    ],
+    excludes: [
+      'Dry cleaning and heavy stain treatment',
+      'Specialized drying',
+      'Repairs and ironing',
+    ],
+    faqItems: [
+      { question: 'Can all blankets be cleaned?', answer: 'No, the blanket material and size must be suitable for the service.' },
+      { question: 'Is drying included?', answer: 'Basic drying arrangement is included.' },
+      { question: 'Is ironing included?', answer: 'No, ironing is not included.' },
+    ],
+  },
+  'laundry-bedding-and-blankets::double-blanket-cleaning-per-piece': {
+    includes: [
+      'Washing and rinsing of the blanket',
+      'Basic drying arrangement',
+      'Basic folding after cleaning',
+    ],
+    excludes: [
+      'Dry cleaning and heavy stain treatment',
+      'Specialized drying',
+      'Repairs and ironing',
+    ],
+    faqItems: [
+      { question: 'Can all blankets be cleaned?', answer: 'No, the blanket material and size must be suitable for the service.' },
+      { question: 'Is drying included?', answer: 'Basic drying arrangement is included.' },
+      { question: 'Is ironing included?', answer: 'No, ironing is not included.' },
+    ],
+  },
+  'laundry-shoe-cleaning::shoe-cleaning-per-pair': {
+    includes: [
+      'Surface cleaning of shoes',
+      'Brushing and sole cleaning',
+      'Basic drying after cleaning',
+    ],
+    excludes: [
+      'Deep restoration and suede/leather restoration',
+      'Colour restoration and polishing restoration',
+      'Repairs',
+    ],
+    faqItems: [
+      { question: 'Can all shoes be cleaned?', answer: 'No, cleaning depends on the shoe material and condition.' },
+      { question: 'Are permanent stains guaranteed to disappear?', answer: 'No, permanent or deep stains may remain after cleaning.' },
+      { question: 'Does it include shoe repair?', answer: 'No, repair is not included in shoe cleaning.' },
+    ],
+  },
+};
+
 const SUPPLEMENTAL_BOOK_NOW_CONTENT = loadSupplementalBookNowContentSeed();
 
 function resolveBookNowSkuContentOverride(categorySlug: string, skuSlug: string) {
   return (
     BOOK_NOW_SKU_CONTENT_OVERRIDES[`${categorySlug}::${skuSlug}`] ||
+    LAUNDRY_SKU_CONTENT_OVERRIDES[`${categorySlug}::${skuSlug}`] ||
     SUPPLEMENTAL_BOOK_NOW_CONTENT.contentByCategoryAndSku[`${categorySlug}::${skuSlug}`] ||
     null
   );
@@ -607,15 +762,51 @@ async function seedBeautyOfferCatalog(): Promise<{ categoryCount: number; skuCou
   return { categoryCount, skuCount, contentCount };
 }
 
+async function seedPersonalAssistantCatalog(): Promise<{
+  categoryId: string;
+  skus: number;
+}> {
+  const isActive = personalAssistantCatalogIsActive();
+  const result = await BookNowCatalogBootstrap.seedPersonalAssistantCatalog();
+  const imageUrl = BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG[PERSONAL_ASSISTANT_CATEGORY_SLUG] || '';
+
+  await BookNowHubSection.findOneAndUpdate(
+    { slug: PERSONAL_ASSISTANT_CATEGORY.slug },
+    {
+      slug: PERSONAL_ASSISTANT_CATEGORY.slug,
+      title: 'Personal Assistance',
+      iconKey: 'User',
+      sortOrder: PERSONAL_ASSISTANT_CATEGORY.sortOrder,
+      services: [
+        {
+          serviceId: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+          label: PERSONAL_ASSISTANT_CATEGORY.name,
+          categorySlug: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+          sectionId: '',
+          imageUrl,
+          sortOrder: 10,
+          isActive,
+        },
+      ],
+      isActive,
+    },
+    { upsert: true, new: true },
+  );
+
+  return result;
+}
+
 async function main() {
   await Database.connectToDb();
 
-  const [csvSeed, skuCount, categoryCount, faqCount, beautySeed] = await Promise.all([
+  const [csvSeed, skuCount, categoryCount, faqCount, beautySeed, personalAssistantSeed] =
+    await Promise.all([
     seedBookNowCsvCatalog(),
     seedBookNowSkuContent(),
     seedBookNowCategoryContent(),
     seedHelpSupportContent(),
     seedBeautyOfferCatalog(),
+    seedPersonalAssistantCatalog(),
   ]);
 
   logger.info('Seeded Book Now content', {
@@ -628,6 +819,8 @@ async function main() {
     csvContentCount: csvSeed.contentCount,
     beautyCategoryCount: beautySeed.categoryCount,
     beautySkuCount: beautySeed.skuCount,
+    personalAssistantCategoryId: personalAssistantSeed.categoryId,
+    personalAssistantSkuCount: personalAssistantSeed.skus,
     beautyContentCount: beautySeed.contentCount,
     supplementalContentMatchedCount: SUPPLEMENTAL_BOOK_NOW_CONTENT.matchedCount,
     supplementalContentUnmatchedServices: SUPPLEMENTAL_BOOK_NOW_CONTENT.unmatchedServices,

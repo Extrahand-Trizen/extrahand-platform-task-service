@@ -116,6 +116,7 @@ export class CompletionService {
         updateFields,
         { new: true, runValidators: true }
       ).lean();
+      TaskService.invalidateTaskCache(taskId);
 
       logger.info(
         `Book Now task ${taskId} auto-completed on proof submit by profile ${performerProfileId}`
@@ -128,7 +129,6 @@ export class CompletionService {
         performerProfileId
       );
 
-      TaskService.invalidateTaskCache(taskId);
       return updatedTask;
     }
 
@@ -145,6 +145,7 @@ export class CompletionService {
       },
       { new: true, runValidators: true }
     ).lean();
+    TaskService.invalidateTaskCache(taskId);
 
     logger.info(`Task ${taskId} completion proof submitted by profile ${performerProfileId}`);
     emitProofSubmitted(taskId, updatedTask);
@@ -214,7 +215,6 @@ export class CompletionService {
       });
     }
 
-    TaskService.invalidateTaskCache(taskId);
     return updatedTask;
   }
 

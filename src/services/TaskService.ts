@@ -21,6 +21,7 @@ import TaskQuestion from "../models/TaskQuestion";
 import TaskFollow from "../models/TaskFollow";
 import TaskReport from "../models/TaskReport";
 import BookingOrder from "../models/BookingOrder";
+import BookingItem from "../models/BookingItem";
 import { PaymentClient } from "./PaymentClient";
 import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -43,6 +44,7 @@ import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
+import { resolveTaskStartForCancellationPolicy } from './cancellation/cancellationContext';
 import {
   MY_TASKS_LIST_SELECT,
   buildApplicationPreviewsForTasks,
@@ -50,6 +52,78 @@ import {
   parseMyTasksInclude,
   truncateDescription,
 } from './myTasksEnrichment';
+import {
+  evaluateBookingLineReschedulePolicy,
+  evaluateTaskReschedulePolicy,
+  resolveReschedulePartnerState,
+  resolveScheduledAt,
+} from '../utils/reschedulePolicy';
+
+const MAX_NORMAL_TASK_RESCHEDULES = 2;
+const NORMAL_TASK_RESCHEDULE_SLOTS = [
+  '8:00 AM',
+  '8:30 AM',
+  '9:00 AM',
+  '9:30 AM',
+  '10:00 AM',
+  '10:30 AM',
+  '11:00 AM',
+  '11:30 AM',
+  '12:00 PM',
+  '12:30 PM',
+  '1:00 PM',
+  '1:30 PM',
+  '2:00 PM',
+  '2:30 PM',
+  '3:00 PM',
+  '3:30 PM',
+  '4:00 PM',
+  '4:30 PM',
+  '5:00 PM',
+  '5:30 PM',
+  '6:00 PM',
+  '6:30 PM',
+  '7:00 PM',
+  '7:30 PM',
+  '8:00 PM',
+];
+
+function parseNormalTaskCalendarDate(date: string): Date {
+  const trimmed = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    throw new BadRequestError('scheduledDate must be YYYY-MM-DD');
+  }
+  return new Date(`${trimmed}T00:00:00.000+05:30`);
+}
+
+function parseNormalTaskSlotMinutes(slot: string): number | null {
+  const match = String(slot || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const period = match[3].toUpperCase();
+  if (period === 'PM' && hours !== 12) hours += 12;
+  if (period === 'AM' && hours === 12) hours = 0;
+  return hours * 60 + minutes;
+}
+
+function normalTaskMinutesToSlot(totalMinutes: number): string {
+  const h24 = Math.floor(totalMinutes / 60) % 24;
+  const minutes = totalMinutes % 60;
+  const period = h24 >= 12 ? 'PM' : 'AM';
+  const h12 = h24 % 12 || 12;
+  return `${h12}:${minutes.toString().padStart(2, '0')} ${period}`;
+}
+
+function normalTaskSlotEnd(start: string): string {
+  const minutes = parseNormalTaskSlotMinutes(start);
+  return minutes == null ? '' : normalTaskMinutesToSlot(minutes + 30);
+}
+
+function normalizeNormalTaskSlot(slot: string): string {
+  const minutes = parseNormalTaskSlotMinutes(slot);
+  return minutes == null ? String(slot || '').trim() : normalTaskMinutesToSlot(minutes);
+}
 
 // Helper function to map frontend category values to backend enum values
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
@@ -243,7 +317,47 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce';
+
+async function enrichBookNowTaskScheduleFromBooking(task: ITask): Promise<ITask> {
+  if (!isBookNowTaskForCompletion(task)) return task;
+
+  const record = task as unknown as Record<string, any>;
+  if (String(record.scheduledTimeStart || '').trim()) return task;
+
+  const taskId = String(record._id || '').trim();
+  const bookingOrderId = String(record.bookingOrderId || '').trim();
+  if (!taskId && !bookingOrderId) return task;
+
+  const item =
+    taskId && mongoose.Types.ObjectId.isValid(taskId)
+      ? await BookingItem.findOne({ taskId: new mongoose.Types.ObjectId(taskId) })
+          .select('scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot durationMinutes')
+          .lean()
+      : null;
+
+  if (item) {
+    record.scheduledDate = record.scheduledDate ?? item.scheduledDate;
+    record.scheduledTimeStart = record.scheduledTimeStart ?? item.scheduledTimeStart;
+    record.scheduledTimeEnd = record.scheduledTimeEnd ?? item.scheduledTimeEnd;
+    record.timeSlot = record.timeSlot ?? item.timeSlot;
+    record.estimatedDuration = record.estimatedDuration ?? item.durationMinutes;
+  }
+
+  if (!String(record.scheduledTimeStart || '').trim() && bookingOrderId) {
+    const order = await BookingOrder.findOne({ orderId: bookingOrderId })
+      .select('scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot')
+      .lean();
+    if (order) {
+      record.scheduledDate = record.scheduledDate ?? order.scheduledDate;
+      record.scheduledTimeStart = record.scheduledTimeStart ?? order.scheduledTimeStart;
+      record.scheduledTimeEnd = record.scheduledTimeEnd ?? order.scheduledTimeEnd;
+      record.timeSlot = record.timeSlot ?? order.timeSlot;
+    }
+  }
+
+  return task;
+}
 
 /** Post & Choose only â€” Book Now tasks are assigned via ops, not helper browse. */
 function buildMarketplaceBrowseClause(): Record<string, unknown> {
@@ -920,6 +1034,8 @@ export class TaskService {
     if (!task) {
       throw new NotFoundError("Task not found");
     }
+
+    task = await enrichBookNowTaskScheduleFromBooking(task);
 
     // Book Now must never linger in `review` after proof — heal stale rows from older deploys.
     if (
@@ -1744,6 +1860,194 @@ export class TaskService {
     return updatedTask as unknown as ITask;
   }
 
+  static async getRescheduleEligibility(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+  ) {
+    const task = await Task.findById(taskId).select(
+      'requesterId status assigneeId assigneeUid executionPhase startedAt arrivedAt isRecurringWork recurringPlan rescheduleCount scheduledDate scheduledTimeStart bookingSource categorySlug serviceType bookingKind serviceFlowType consultationState budget',
+    );
+    if (!task) throw new NotFoundError('Task not found');
+    if (!task.requesterId.equals(profileId)) {
+      throw new ForbiddenError('Not authorized to reschedule this task');
+    }
+
+    const rescheduleCount = Number(task.rescheduleCount || 0);
+    const remainingReschedules = Math.max(0, MAX_NORMAL_TASK_RESCHEDULES - rescheduleCount);
+    if ((task as any).isRecurringWork || isRecurringVisitPlanTask(task as any)) {
+      return {
+        allowed: false,
+        chargeRequired: false,
+        reasonCode: 'RECURRING_ONLY',
+        partnerState: 'unassigned',
+        message: 'Use recurring visit controls for recurring work.',
+        rescheduleCount,
+        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+      };
+    }
+    if (!['open', 'paid', 'assigning', 'assigned'].includes(String(task.status || '').toLowerCase())) {
+      return {
+        allowed: false,
+        chargeRequired: false,
+        reasonCode: 'STATUS_BLOCKED',
+        partnerState: 'unassigned',
+        message: `Cannot reschedule work in status ${task.status}`,
+        rescheduleCount,
+        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+      };
+    }
+    if (rescheduleCount >= MAX_NORMAL_TASK_RESCHEDULES) {
+      return {
+        allowed: false,
+        chargeRequired: false,
+        reasonCode: 'RESCHEDULE_LIMIT_REACHED',
+        partnerState: 'unassigned',
+        message: 'This work has already been rescheduled twice. Please contact support.',
+        rescheduleCount,
+        rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+      };
+    }
+    const partnerState = resolveReschedulePartnerState({
+      assigneeId: task.assigneeId,
+      assigneeUid: task.assigneeUid,
+      executionPhase: task.executionPhase,
+      startedAt: task.startedAt,
+      arrivedAt: task.arrivedAt,
+      status: task.status,
+    });
+    const scheduledAt = resolveScheduledAt({
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+    });
+    const isBookNowTask = String((task as any).bookingSource || '').trim().toLowerCase() === 'book_now';
+    const isHourlyBookNowTask =
+      isBookNowTask &&
+      String((task as any).categorySlug || '').trim().toLowerCase() === 'hourly-helper';
+    const policyDecision = isBookNowTask
+      ? evaluateBookingLineReschedulePolicy({
+          kind:
+            String((task as any).bookingKind || '').trim().toLowerCase() === 'consultation'
+              ? 'consultation'
+              : isHourlyBookNowTask
+                ? 'hourly'
+                : 'standard',
+          partnerState,
+          scheduledAt,
+          categorySlug: (task as any).categorySlug,
+          serviceType: (task as any).serviceType,
+          bookingKind: (task as any).bookingKind,
+          consultationFee: (task as any).consultationState?.consultationFee ?? null,
+          lineTotal: Number((task as any).budget?.amount || 0),
+        })
+      : evaluateTaskReschedulePolicy({
+          partnerState,
+          scheduledAt,
+        });
+
+    return {
+      allowed: policyDecision.allowed,
+      chargeRequired: policyDecision.chargeRequired,
+      chargeAmount: policyDecision.chargeAmount,
+      reasonCode: policyDecision.reasonCode,
+      partnerState: policyDecision.partnerState,
+      policyWindowLabel: policyDecision.policyWindowLabel,
+      message: policyDecision.message,
+      rescheduleCount,
+      rescheduleLimit: MAX_NORMAL_TASK_RESCHEDULES,
+      remainingReschedules,
+      maxReschedules: MAX_NORMAL_TASK_RESCHEDULES,
+    };
+  }
+
+  static async getRescheduleSlots(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    date: string,
+  ) {
+    const eligibility = await TaskService.getRescheduleEligibility(taskId, profileId);
+    if (!eligibility.allowed) {
+      throw new BadRequestError(eligibility.message || 'This work cannot be rescheduled');
+    }
+    const task = await Task.findById(taskId).select('requesterId').lean();
+    if (!task) throw new NotFoundError('Task not found');
+    if (!task.requesterId.equals(profileId)) {
+      throw new ForbiddenError('Not authorized to reschedule this task');
+    }
+    const dateKey = String(date || '').trim();
+    parseNormalTaskCalendarDate(dateKey);
+    return {
+      date: dateKey,
+      slots: NORMAL_TASK_RESCHEDULE_SLOTS.map((start) => ({
+        id: start,
+        label: start,
+        startTime: start,
+        endTime: normalTaskSlotEnd(start),
+        available: true,
+      })),
+    };
+  }
+
+  static async rescheduleTask(
+    taskId: string,
+    profileId: mongoose.Types.ObjectId,
+    params: {
+      scheduledDate?: string;
+      scheduledTimeStart?: string;
+      scheduledTimeEnd?: string;
+      reason?: string;
+    },
+  ): Promise<ITask> {
+    const eligibility = await TaskService.getRescheduleEligibility(taskId, profileId);
+    if (!eligibility.allowed) {
+      throw new BadRequestError(eligibility.message || 'This work cannot be rescheduled');
+    }
+
+    const scheduledDate = parseNormalTaskCalendarDate(String(params.scheduledDate || '').trim());
+    const scheduledTimeStart = normalizeNormalTaskSlot(String(params.scheduledTimeStart || '').trim());
+    if (!scheduledTimeStart) throw new BadRequestError('scheduledTimeStart is required');
+    const scheduledTimeEnd =
+      String(params.scheduledTimeEnd || '').trim() || normalTaskSlotEnd(scheduledTimeStart);
+
+    const task = await Task.findById(taskId);
+    if (!task) throw new NotFoundError('Task not found');
+    if (!task.requesterId.equals(profileId)) {
+      throw new ForbiddenError('Not authorized to reschedule this task');
+    }
+
+    task.scheduledDate = scheduledDate;
+    task.scheduledTimeStart = scheduledTimeStart;
+    task.scheduledTimeEnd = scheduledTimeEnd;
+    task.dateOption = 'on-date';
+    task.rescheduleCount = Number(task.rescheduleCount || 0) + 1;
+    task.lastRescheduledAt = new Date();
+    const helperCommitted = Boolean(task.assigneeId || task.assigneeUid || task.executionPhase);
+    if (helperCommitted) {
+      task.executionPhase = 'assigned';
+      (task as any).executionPhaseUpdatedAt = task.lastRescheduledAt;
+    }
+    (task as any).startOtp = undefined;
+    (task as any).onTheWayAt = undefined;
+    (task as any).arrivedAt = undefined;
+    await task.save();
+
+    logger.info('Task rescheduled by customer', {
+      taskId,
+      profileId: String(profileId),
+      scheduledDate: params.scheduledDate,
+      scheduledTimeStart,
+      reason: params.reason,
+    });
+
+    TaskService.invalidateTaskCache(taskId);
+    return task;
+  }
+
   /** Collect parent task plus recurring visit child tasks linked in schedule or RecurringVisit collection. */
   private static async collectTaskTreeIds(root: ITask): Promise<mongoose.Types.ObjectId[]> {
     const idSet = new Set<string>();
@@ -1952,26 +2256,13 @@ export class TaskService {
     await Task.findByIdAndUpdate(taskId, { $inc: { views: 1 } });
   }
 
-  /** Scheduled start for cancellation fee policy (aligned with web tracking UI). */
+  /** Scheduled start for cancellation fee policy (IST calendar day + slot). */
   private static getTaskStartDateForCancellationPolicy(task: ITask): Date {
-    const now = Date.now();
-    if (!task.scheduledDate) {
-      return new Date(now + 999 * 60 * 60 * 1000);
-    }
-    const d = new Date(task.scheduledDate);
-    const ts = task.scheduledTimeStart;
-    if (ts && typeof ts === "string") {
-      const timeMatch = ts.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
-      if (timeMatch) {
-        let hours = parseInt(timeMatch[1], 10);
-        const mins = parseInt(timeMatch[2], 10);
-        const mod = timeMatch[3]?.toLowerCase();
-        if (mod === "pm" && hours < 12) hours += 12;
-        if (mod === "am" && hours === 12) hours = 0;
-        d.setHours(hours, mins, 0, 0);
-      }
-    }
-    return d;
+    return resolveTaskStartForCancellationPolicy({
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+      timeSlot: task.timeSlot,
+    });
   }
 
   /**
@@ -2307,6 +2598,12 @@ export class TaskService {
 
     if (!updatedTask) {
       throw new NotFoundError("Task not found");
+    }
+
+    TaskService.invalidateTaskCache(taskId);
+    const parentTaskIdForCache = updatedTask.parentTaskId ? String(updatedTask.parentTaskId) : "";
+    if (parentTaskIdForCache) {
+      TaskService.invalidateTaskCache(parentTaskIdForCache);
     }
 
     logger.info(`Task ${taskId} status updated to ${status} by ${profileId.toString()}`);
@@ -3004,6 +3301,10 @@ export class TaskService {
     workTask.executionPhase = "on_the_way";
 
     await workTask.save();
+    TaskService.invalidateTaskCache(effectiveTaskId);
+    if (effectiveTaskId !== taskId) {
+      TaskService.invalidateTaskCache(taskId);
+    }
 
     const { workTitle: workTitleForOtp, visitNumber } =
       await RecurringVisitService.resolveStartOtpWorkTitle(workTask);
@@ -3134,7 +3435,6 @@ export class TaskService {
     });
 
     logger.info(`[OTP SUCCESS] Generated and successfully dispatched 4-digit start OTP: ${otp} for task: ${effectiveTaskId} to poster: ${requesterName}`);
-    TaskService.invalidateTaskCache(taskId);
 
     return {
       sentTo: requesterName,
@@ -3643,6 +3943,9 @@ export class TaskService {
 
     if (!updated) throw new NotFoundError("Task not found");
     TaskService.invalidateTaskCache(effectiveTaskId);
+    if (effectiveTaskId !== taskId) {
+      TaskService.invalidateTaskCache(taskId);
+    }
     return updated as unknown as ITask;
   }
 

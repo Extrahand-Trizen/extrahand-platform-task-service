@@ -4,11 +4,11 @@ import Task from '../models/Task';
 import { AuthenticatedRequest } from '../types';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
-import { emitBookNowLeadRemoved } from '../socket/socketHandlers';
 import logger from '../config/logger';
 import { CatalogService } from '../services/CatalogService';
 import { resolvePartnerMatchConditions, normalizeCategory } from '../services/partnerVisibility';
 import { CancellationPassService } from '../services/CancellationPassService';
+import { serializeBookNowLeadExecutionFields } from '../utils/bookNowLeadSerialization';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -55,6 +55,8 @@ export class PartnerBookNowController {
       status: 'open',
       partnerId: null,
       partnerUid: null,
+      assigneeId: null,
+      assigneeUid: null,
     };
 
     // Server-side visibility guard: the requesting partner can only ever see
@@ -167,6 +169,7 @@ export class PartnerBookNowController {
           serviceIncludes: serviceContent?.includes || [],
           serviceNotIncludes: serviceContent?.excludes || [],
           isOverdue,
+          ...serializeBookNowLeadExecutionFields(task),
         };
       }),
     );
@@ -243,103 +246,13 @@ export class PartnerBookNowController {
 
   /**
    * POST /api/v1/book-now/tasks/:id/partner-accept
-   * Atomically accept a Book Now lead. The first partner to call wins.
-   * On success the task transitions to status === 'assigned'.
+   * Partner-side self-accept is intentionally disabled.
+   * Book Now jobs must be assigned by auto-assignment or operations.
    */
-  static async acceptLead(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { id } = req.params;
-
-    // Gateway sends X-User-Id (not X-User-Uid). Auth middleware populates req.user.uid from it.
-    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
-    let profileId: mongoose.Types.ObjectId | undefined = req.user?.profileId;
-
-    // If profileId wasn't resolved by auth middleware (gateway couldn't look it up),
-    // fall back to querying the DB directly by uid.
-    if (!profileId && uid) {
-      const Profile = mongoose.connection.collection('profiles');
-      const found = await Profile.findOne({ uid }, { projection: { _id: 1 } });
-      if (found) {
-        profileId = found._id as mongoose.Types.ObjectId;
-        console.log(`[PartnerBookNow] Resolved profileId from uid fallback: uid=${uid} profileId=${profileId}`);
-      }
-    }
-
-    if (!profileId || !uid) {
-      throw new BadRequestError('Profile ID and UID required');
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(String(id))) {
-      throw new BadRequestError('Invalid task ID');
-    }
-
-    // Resolve profileId to ObjectId
-    const partnerOid =
-      profileId instanceof mongoose.Types.ObjectId
-        ? profileId
-        : new mongoose.Types.ObjectId(profileId as string);
-
-    // Check partner is enrolled in book_now supply program
-    const Profile = mongoose.connection.collection('profiles');
-    const profile = await Profile.findOne(
-      { _id: partnerOid },
-      { projection: { supplyPrograms: 1, partnerProfile: 1, roles: 1 } },
+  static async acceptLead(_req: AuthenticatedRequest, _res: Response): Promise<void> {
+    throw new ForbiddenError(
+      'Book Now jobs are assigned automatically by ExtraHand or manually by operations.',
     );
-
-    if (!profile) {
-      throw new NotFoundError('Profile not found');
-    }
-
-    const p = profile as Record<string, any>;
-    const roles: string[] = p.roles || [];
-    const supplyPrograms: string[] = p.supplyPrograms || [];
-
-    // In development mode, allow any performer/partner role to accept. In production, require book_now supply program.
-    const isBookNowPartner =
-      process.env.NODE_ENV === 'development' ||
-      ((roles.includes('tasker') || roles.includes('helper') || roles.includes('partner')) &&
-        supplyPrograms.includes('book_now'));
-
-    if (!isBookNowPartner) {
-      throw new ForbiddenError('Not enrolled as a Book Now partner');
-    }
-
-    // Atomically claim the task — findOneAndUpdate guarantees only one partner wins
-    const task = await Task.findOneAndUpdate(
-      {
-        _id: new mongoose.Types.ObjectId(String(id)),
-        bookingSource: 'book_now',
-        status: 'open',      // overdue tasks are still status === 'open' in DB
-        partnerId: null,
-        partnerUid: null,
-      },
-      {
-        $set: {
-          status: 'assigned',
-          partnerId: partnerOid,
-          partnerUid: uid,
-          assigneeId: partnerOid,
-          assigneeUid: uid,
-          partnerAcceptedAt: new Date(),
-          assignedAt: new Date(),
-        },
-      },
-      { new: true },
-    ).lean();
-
-    if (!task) {
-      throw new BadRequestError('Lead is no longer available or already accepted');
-    }
-
-    const taskDoc = task as Record<string, any>;
-
-    // Notify other connected partners that this lead is gone
-    try {
-      emitBookNowLeadRemoved(String(taskDoc._id), String(taskDoc.category || ''), String(partnerOid));
-    } catch {
-      // best-effort socket emit
-    }
-
-    ApiResponse.success(res, task, 'Lead accepted successfully');
   }
 
   /**
@@ -371,7 +284,7 @@ export class PartnerBookNowController {
 
     const tasks = await Task.find({
       bookingSource: 'book_now',
-      partnerId: partnerOid,
+      $or: [{ partnerId: partnerOid }, { assigneeId: partnerOid }],
       status: { $in: ['assigned', 'started', 'in_progress', 'review', 'completed', 'cancelled'] },
     })
       .sort({ partnerAcceptedAt: -1 })
@@ -425,6 +338,7 @@ export class PartnerBookNowController {
           bookingItemId: task.bookingItemId,
           serviceIncludes: serviceContent?.includes || [],
           serviceNotIncludes: serviceContent?.excludes || [],
+          ...serializeBookNowLeadExecutionFields(task),
         };
       }),
     );

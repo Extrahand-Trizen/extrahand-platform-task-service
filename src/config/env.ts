@@ -92,6 +92,19 @@ const envSchema = z.object({
   /** Instant Hourly Helper window in Asia/Kolkata (hour 0–23). Inclusive start, exclusive end. */
   HOURLY_INSTANT_START_HOUR: z.string().transform(Number).default('8'),
   HOURLY_INSTANT_END_HOUR: z.string().transform(Number).default('20'),
+
+  /**
+   * Book Now Personal Assistant catalog visibility.
+   * Default false — seed + public APIs hide the category until launch.
+   * Set to true (or run setPersonalAssistantCatalogPublished script) when shipping mobile.
+   */
+  BOOK_NOW_PERSONAL_ASSISTANT_PUBLISHED: z.string().default('false'),
+
+  /** Comma-separated Firebase UIDs that can see PA before public launch (optional). */
+  BOOK_NOW_PERSONAL_ASSISTANT_PREVIEW_UIDS: z.string().optional(),
+
+  /** Dev only: force painting consultation auto-assign to this partner phone (last 10 digits). */
+  BOOK_NOW_PAINTING_CONSULTATION_PREFERRED_PHONE: z.string().optional(),
 });
 
 // Extend global type for CORS config logging
@@ -311,10 +324,21 @@ export class Config {
   static get HOURLY_INSTANT_END_HOUR(): number {
     return this.env.HOURLY_INSTANT_END_HOUR;
   }
+
+  static get BOOK_NOW_PERSONAL_ASSISTANT_PUBLISHED(): string {
+    return this.env.BOOK_NOW_PERSONAL_ASSISTANT_PUBLISHED;
+  }
+
+  static get BOOK_NOW_PERSONAL_ASSISTANT_PREVIEW_UIDS(): string | undefined {
+    return this.env.BOOK_NOW_PERSONAL_ASSISTANT_PREVIEW_UIDS;
+  }
+
+  static get BOOK_NOW_PAINTING_CONSULTATION_PREFERRED_PHONE(): string | undefined {
+    return this.env.BOOK_NOW_PAINTING_CONSULTATION_PREFERRED_PHONE;
+  }
 }
 
 // Initialize config on module load
 Config.initialize();
 
 export const config = Config;
-

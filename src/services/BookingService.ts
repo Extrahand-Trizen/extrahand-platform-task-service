@@ -1,11 +1,12 @@
 import crypto from 'crypto';
 import mongoose from 'mongoose';
-import Task from '../models/Task';
+import Task, { type ITask } from '../models/Task';
 import BookingOrder from '../models/BookingOrder';
 import BookingItem from '../models/BookingItem';
+import ServiceQuotation from '../models/ServiceQuotation';
 import { CatalogService } from './CatalogService';
 import { PaymentClient } from './PaymentClient';
-import { computeLinePrice } from '../utils/bookingPricing';
+import { computeBookingTotals, computeLinePrice } from '../utils/bookingPricing';
 import {
   normalizeBookNowTaskCategory,
   resolveBookNowCategoryLabel,
@@ -16,7 +17,10 @@ import logger from '../config/logger';
 import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
 import {
   assertBookNowSlotAvailable,
+  deriveBookNowTimeSlot,
   getOccupiedBookNowSlots,
+  isBookNowSlotWithinLeadTime,
+  normalizeBookNowSlotLabel,
   type BookNowTimeBucket,
 } from '../utils/bookNowSlotAvailability';
 import {
@@ -40,15 +44,42 @@ import {
   isHourlyResolvedLine,
   parseBookingFulfillmentType,
 } from '../utils/hourlyBookingGuards';
+import { assertBookNowFixedPriceMinimumCheckout } from '../utils/bookNowFixedPriceMinimum';
 import { BookNowCatalogBootstrap } from './BookNowCatalogBootstrap';
 import { abandonUnpaidBookingOrder } from './bookingAbandonUnpaid';
 import { cancelHourlyBooking } from './cancellation/cancellationOrchestrator';
+import { evaluateProjectCancellation } from './cancellation/projectCancellationPolicy';
+import {
+  applyBookingFlowDefaults,
+  buildConsultationTaskState,
+  isConsultationBookingKind,
+  resolveBookingFlowDefaults,
+  type BookingKind,
+  type ConsultationBookingMeta,
+  type ServiceFlowType,
+} from '../utils/consultationBooking';
+import { resolveBookNowServiceFlowConfig } from '../utils/bookNowServiceFlowConfig';
+import {
+  buildConsultationProjectPlan,
+  buildConsultationTaskProjectTransitionPatch,
+} from '../utils/consultationProject';
 import {
   isHourlyBookingFromHints,
+  resolveTaskStartForCancellationPolicy,
 } from './cancellation/cancellationContext';
 import { config } from '../config/env';
 import type { BookingFulfillmentType } from '../models/BookingOrder';
-import type { HourlyCancellationOrchestratorResult } from './cancellation/cancellationTypes';
+import {
+  isHelperAssignedOnTask,
+  type HourlyCancellationOrchestratorResult,
+} from './cancellation/cancellationTypes';
+import {
+  evaluateBookingLineReschedulePolicy,
+  resolveReschedulePartnerState,
+  resolveScheduledAt,
+  type ReschedulePartnerState,
+} from '../utils/reschedulePolicy';
+import { ProfileUtils } from '../utils/ProfileUtils';
 
 
 type BookingAddress = {
@@ -75,11 +106,16 @@ export type BookingLineInput = {
   unitPrice?: number;
   lineTotal?: number;
   taskDescription?: string;
+  images?: string[];
   scheduledDate?: string;
   scheduledTimeStart?: string;
   scheduledTimeEnd?: string;
   timeSlot?: BookNowTimeBucket;
   durationMinutes?: number;
+  serviceFlowType?: ServiceFlowType;
+  bookingKind?: BookingKind;
+  serviceType?: string;
+  consultationMeta?: ConsultationBookingMeta;
 };
 
 type ResolvedLine = {
@@ -96,7 +132,12 @@ type ResolvedLine = {
   durationMinutes: number;
   title: string;
   snapshotName: string;
+  images?: string[];
   schedule?: ResolvedBookNowLineSchedule;
+  serviceFlowType?: ServiceFlowType;
+  bookingKind?: BookingKind;
+  serviceType?: string;
+  consultationMeta?: ConsultationBookingMeta;
 };
 
 type PendingBookingLine = {
@@ -113,11 +154,117 @@ type PendingBookingLine = {
   durationMinutes: number;
   title: string;
   snapshotName: string;
+  images?: string[];
   scheduledDate?: string;
   scheduledTimeStart?: string;
   scheduledTimeEnd?: string;
   timeSlot?: BookNowTimeBucket;
+  serviceFlowType?: ServiceFlowType;
+  bookingKind?: BookingKind;
+  serviceType?: string;
+  consultationMeta?: ConsultationBookingMeta;
 };
+
+const MAX_ONE_TIME_RESCHEDULES = 2;
+const CONSULTATION_PROJECT_TAX_RATE = Number(process.env.CONSULTATION_PROJECT_TAX_RATE || '0');
+const RESCHEDULE_SLOT_STARTS = [
+  '8:00 AM',
+  '8:30 AM',
+  '9:00 AM',
+  '9:30 AM',
+  '10:00 AM',
+  '10:30 AM',
+  '11:00 AM',
+  '11:30 AM',
+  '12:00 PM',
+  '12:30 PM',
+  '1:00 PM',
+  '1:30 PM',
+  '2:00 PM',
+  '2:30 PM',
+  '3:00 PM',
+  '3:30 PM',
+  '4:00 PM',
+  '4:30 PM',
+  '5:00 PM',
+  '5:30 PM',
+  '6:00 PM',
+  '6:30 PM',
+  '7:00 PM',
+  '7:30 PM',
+  '8:00 PM',
+];
+
+function partnerStateSeverity(state: ReschedulePartnerState): number {
+  switch (state) {
+    case 'started':
+      return 5;
+    case 'arrived':
+      return 4;
+    case 'on_the_way':
+      return 3;
+    case 'assigned':
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function parseCalendarDate(date: string): Date {
+  const trimmed = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    throw new BadRequestError('scheduledDate must be YYYY-MM-DD');
+  }
+  return new Date(`${trimmed}T00:00:00.000+05:30`);
+}
+
+function parseSlotMinutes(slot: string): number | null {
+  const match = String(slot || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const period = match[3].toUpperCase();
+  if (period === 'PM' && hours !== 12) hours += 12;
+  if (period === 'AM' && hours === 12) hours = 0;
+  return hours * 60 + minutes;
+}
+
+function minutesToSlot(totalMinutes: number): string {
+  const h24 = Math.floor(totalMinutes / 60) % 24;
+  const minutes = totalMinutes % 60;
+  const period = h24 >= 12 ? 'PM' : 'AM';
+  const h12 = h24 % 12 || 12;
+  return `${h12}:${minutes.toString().padStart(2, '0')} ${period}`;
+}
+
+function defaultSlotEnd(start: string): string {
+  const minutes = parseSlotMinutes(start);
+  return minutes == null ? '' : minutesToSlot(minutes + 30);
+}
+
+function roundCurrency(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function resolveConsultationProjectPaymentTotals(quotation: InstanceType<typeof ServiceQuotation>) {
+  const subtotal = Math.max(
+    0,
+    Number(quotation.subtotal || 0) || Number(quotation.total || 0) || 0,
+  );
+  const normalizedTaxRate =
+    Number.isFinite(CONSULTATION_PROJECT_TAX_RATE) && CONSULTATION_PROJECT_TAX_RATE > 0
+      ? CONSULTATION_PROJECT_TAX_RATE
+      : 0;
+  const gst =
+    Number(quotation.gst || 0) > 0
+      ? roundCurrency(Number(quotation.gst || 0))
+      : roundCurrency(subtotal * normalizedTaxRate);
+  return {
+    subtotal,
+    gst,
+    total: roundCurrency(subtotal + gst),
+  };
+}
 
 function pendingBookNowTaskId(orderId: string): string {
   return `booknow-pending-${orderId}`;
@@ -136,6 +283,7 @@ function serializePendingLine(line: ResolvedLine): PendingBookingLine {
     durationMinutes: line.durationMinutes,
     title: line.title,
     snapshotName: line.snapshotName,
+    images: Array.isArray(line.images) ? line.images.filter(Boolean) : undefined,
     skuId: line.skuId ? String(line.skuId) : undefined,
     variantId: line.variantId ? String(line.variantId) : undefined,
     addonIds: line.addonIds.map((id) => String(id)),
@@ -143,6 +291,10 @@ function serializePendingLine(line: ResolvedLine): PendingBookingLine {
     scheduledTimeStart: schedule?.scheduledTimeStart,
     scheduledTimeEnd: schedule?.scheduledTimeEnd,
     timeSlot: schedule?.timeSlot,
+    serviceFlowType: line.serviceFlowType,
+    bookingKind: line.bookingKind,
+    serviceType: line.serviceType,
+    consultationMeta: line.consultationMeta,
   };
 }
 
@@ -169,7 +321,12 @@ function deserializePendingLine(line: PendingBookingLine): ResolvedLine {
     durationMinutes: line.durationMinutes,
     title: line.title,
     snapshotName: line.snapshotName,
+    images: Array.isArray(line.images) ? line.images.filter(Boolean) : undefined,
     schedule: schedule ?? undefined,
+    serviceFlowType: line.serviceFlowType,
+    bookingKind: line.bookingKind,
+    serviceType: line.serviceType,
+    consultationMeta: line.consultationMeta,
     skuId: line.skuId && mongoose.Types.ObjectId.isValid(line.skuId)
       ? new mongoose.Types.ObjectId(line.skuId)
       : undefined,
@@ -212,10 +369,41 @@ function orderScheduleFromLine(line: ResolvedLine | undefined) {
 }
 
 export class BookingService {
-  /** Helper on site — highest Book Now cancellation tier. */
-  static isBookNowPartnerReached(task: { status?: string }): boolean {
+  static async getFirstBookingEligibleCustomerUids(uids: string[]): Promise<string[]> {
+    const normalizedUids = Array.from(
+      new Set(
+        (uids || [])
+          .map((uid) => String(uid || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (normalizedUids.length === 0) {
+      return [];
+    }
+
+    const priorPaidStatuses = ['paid', 'assigning', 'assigned', 'cancelled', 'refunded'];
+    const ineligibleUids = await BookingOrder.distinct('customerUid', {
+      customerUid: { $in: normalizedUids },
+      status: { $in: priorPaidStatuses },
+    });
+
+    const ineligibleSet = new Set(ineligibleUids.map((uid) => String(uid)));
+    return normalizedUids.filter((uid) => !ineligibleSet.has(uid));
+  }
+
+  /** Helper has effectively reached / started service — highest Book Now cancellation tier. */
+  static isBookNowPartnerReached(task: {
+    status?: string;
+    executionPhase?: 'assigned' | 'on_the_way' | 'arrived' | string | null;
+  }): boolean {
     const status = String(task.status || '').toLowerCase();
-    return status === 'started' || status === 'in_progress';
+    const executionPhase = String(task.executionPhase || '').toLowerCase();
+    return (
+      status === 'started' ||
+      status === 'in_progress' ||
+      executionPhase === 'arrived'
+    );
   }
 
   private static normalizeLineInput(line: BookingLineInput): BookingLineInput {
@@ -248,8 +436,23 @@ export class BookingService {
   /** Use package name + price from the mobile app (source of truth). */
   private static resolveLineFromClient(line: BookingLineInput): ResolvedLine {
     const normalized = this.normalizeLineInput(line);
-    const catalogId = normalized.categorySlug!;
-    const packageId = normalized.skuSlug!;
+    const lineFlowConfig = resolveBookNowServiceFlowConfig({
+      categorySlug: normalized.categorySlug,
+      catalogId: normalized.catalogId,
+      skuSlug: normalized.skuSlug,
+      packageId: normalized.packageId,
+      serviceFlowType: normalized.serviceFlowType,
+      bookingKind: normalized.bookingKind,
+      serviceType: normalized.serviceType,
+    });
+    const enriched = applyBookingFlowDefaults(normalized, {
+      serviceFlowType: normalized.serviceFlowType || lineFlowConfig.serviceFlowType,
+      bookingKind: normalized.bookingKind || lineFlowConfig.bookingKind,
+      serviceType: normalized.serviceType || lineFlowConfig.serviceType,
+      consultationMeta: normalized.consultationMeta,
+    });
+    const catalogId = enriched.categorySlug!;
+    const packageId = enriched.skuSlug!;
     const name = String(line.name || '').trim();
     const quantity = normalized.quantity || 1;
 
@@ -279,7 +482,12 @@ export class BookingService {
       durationMinutes,
       title: name,
       snapshotName: name,
+      images: Array.isArray(normalized.images) ? normalized.images.filter(Boolean) : undefined,
       addonIds: [],
+      serviceFlowType: enriched.serviceFlowType,
+      bookingKind: enriched.bookingKind,
+      serviceType: enriched.serviceType,
+      consultationMeta: enriched.consultationMeta,
     };
   }
 
@@ -352,6 +560,11 @@ export class BookingService {
       durationMinutes,
       title,
       snapshotName: sku.name,
+      images: Array.isArray(normalized.images) ? normalized.images.filter(Boolean) : undefined,
+      serviceFlowType: normalized.serviceFlowType,
+      bookingKind: normalized.bookingKind,
+      serviceType: normalized.serviceType,
+      consultationMeta: normalized.consultationMeta,
     };
   }
 
@@ -388,6 +601,11 @@ export class BookingService {
     requestedCoinDiscountRupees?: number;
     fulfillmentType?: BookingFulfillmentType | string;
     couponCode?: string;
+    serviceFlowType?: ServiceFlowType;
+    bookingKind?: BookingKind;
+    serviceType?: string;
+    consultationMeta?: ConsultationBookingMeta;
+    gstExempt?: boolean;
   }) {
     const {
       customerUid,
@@ -404,9 +622,22 @@ export class BookingService {
       useExtraCoins,
       requestedCoinDiscountRupees,
       couponCode,
+      consultationMeta,
     } = params;
 
     const fulfillmentType = parseBookingFulfillmentType(params.fulfillmentType);
+    const {
+      serviceFlowType,
+      bookingKind,
+      serviceType,
+      gstExempt,
+    } = resolveBookingFlowDefaults({
+      serviceFlowType: params.serviceFlowType,
+      bookingKind: params.bookingKind,
+      serviceType: params.serviceType,
+      consultationMeta,
+      gstExempt: params.gstExempt,
+    });
 
     const serviceable = await CatalogService.isPinCodeServiceable(
       address.pinCode,
@@ -436,10 +667,56 @@ export class BookingService {
               name,
               unitPrice,
               lineTotal,
+              serviceFlowType,
+              bookingKind,
+              serviceType,
+              consultationMeta,
             },
           ];
+    const normalizedRawLines = rawLines.map((line) => {
+      const lineFlowConfig = resolveBookNowServiceFlowConfig({
+        categorySlug: line.categorySlug,
+        skuSlug: line.skuSlug,
+        catalogId: line.catalogId,
+        packageId: line.packageId,
+      });
 
-    if (!rawLines[0]?.skuSlug && !rawLines[0]?.packageId) {
+      return applyBookingFlowDefaults(line, {
+        serviceFlowType:
+          line.serviceFlowType || serviceFlowType || lineFlowConfig.serviceFlowType,
+        bookingKind: line.bookingKind || bookingKind || lineFlowConfig.bookingKind,
+        serviceType: line.serviceType || serviceType || lineFlowConfig.serviceType,
+        consultationMeta: line.consultationMeta || consultationMeta,
+      });
+    });
+
+    const normalizedOrderBookingKind =
+      bookingKind === 'standard' && normalizedRawLines.length === 1
+        ? normalizedRawLines[0]?.bookingKind || bookingKind
+        : bookingKind;
+    const normalizedOrderServiceFlowType =
+      serviceFlowType === 'standard' && normalizedRawLines.length === 1
+        ? normalizedRawLines[0]?.serviceFlowType || serviceFlowType
+        : serviceFlowType;
+    const normalizedOrderServiceType =
+      serviceType ||
+      (normalizedRawLines.length === 1 ? normalizedRawLines[0]?.serviceType : undefined);
+    const normalizedOrderGstExempt =
+      gstExempt ||
+      normalizedOrderBookingKind === 'consultation' ||
+      (normalizedRawLines.length === 1 &&
+        resolveBookNowServiceFlowConfig({
+          categorySlug: normalizedRawLines[0]?.categorySlug,
+          skuSlug: normalizedRawLines[0]?.skuSlug,
+          catalogId: normalizedRawLines[0]?.catalogId,
+          packageId: normalizedRawLines[0]?.packageId,
+        }).gstExempt);
+
+    if (isConsultationBookingKind(normalizedOrderBookingKind) && normalizedRawLines.length !== 1) {
+      throw new BadRequestError('Consultation checkout currently supports exactly one service');
+    }
+
+    if (!normalizedRawLines[0]?.skuSlug && !normalizedRawLines[0]?.packageId) {
       throw new BadRequestError('At least one service item is required');
     }
 
@@ -450,7 +727,7 @@ export class BookingService {
       timeSlot,
     };
 
-    const looksHourlyInput = rawLines.some((line) => isHourlyCatalogLineInput(line));
+    const looksHourlyInput = normalizedRawLines.some((line) => isHourlyCatalogLineInput(line));
     const isInstantHourly = looksHourlyInput && fulfillmentType === 'instant';
 
     if (isInstantHourly) {
@@ -461,10 +738,10 @@ export class BookingService {
     }
 
     const perItemScheduling =
-      !isInstantHourly && usesPerItemBookNowScheduling(rawLines, rawLines.length);
+      !isInstantHourly && usesPerItemBookNowScheduling(normalizedRawLines, normalizedRawLines.length);
 
     if (perItemScheduling) {
-      rawLines.forEach((line, index) => {
+      normalizedRawLines.forEach((line, index) => {
         try {
           assertPerItemScheduleFieldsComplete(line, index);
         } catch (error) {
@@ -483,7 +760,7 @@ export class BookingService {
 
     // Scheduled Hourly: require a complete schedule (order-level or on the single line).
     if (looksHourlyInput && fulfillmentType === 'scheduled') {
-      const line0 = rawLines[0];
+      const line0 = normalizedRawLines[0];
       const hasLineSchedule = Boolean(
         line0?.scheduledDate && (line0.scheduledTimeStart || line0.timeSlot),
       );
@@ -495,7 +772,7 @@ export class BookingService {
       }
     }
 
-    const resolvedLines = await Promise.all(rawLines.map((line) => this.resolveLine(line)));
+    const resolvedLines = await Promise.all(normalizedRawLines.map((line) => this.resolveLine(line)));
 
     assertHourlySingleVisitCheckout({
       lines: resolvedLines,
@@ -503,6 +780,8 @@ export class BookingService {
         ? fulfillmentType
         : undefined,
     });
+
+    assertBookNowFixedPriceMinimumCheckout(resolvedLines);
 
     const isHourlyOrder = resolvedLines.some(isHourlyResolvedLine);
 
@@ -518,7 +797,7 @@ export class BookingService {
       }
 
       const schedule = resolveBookNowLineSchedule({
-        lineSchedule: rawLines[index],
+        lineSchedule: normalizedRawLines[index],
         legacySchedule,
         catalogDurationMinutes: line.durationMinutes,
       });
@@ -564,20 +843,34 @@ export class BookingService {
       }
     }
 
-    const pricingResult = await PaymentClient.calculateBookNowOrderTotals(
-      resolvedLinesWithSchedule.map((line) => ({
-        categorySlug: line.categorySlug,
-        lineTotal: line.lineTotal,
-      })),
-    );
+    const pricing = normalizedOrderGstExempt
+      ? {
+          ...computeBookingTotals(
+            resolvedLinesWithSchedule.reduce((sum, line) => sum + line.lineTotal, 0),
+          ),
+          categories: resolvedLinesWithSchedule.map((line) => ({
+            categoryKey: line.categorySlug,
+            subtotal: line.lineTotal,
+            gstPercentage: 0,
+            gstAmount: 0,
+          })),
+        }
+      : await (async () => {
+          const pricingResult = await PaymentClient.calculateBookNowOrderTotals(
+            resolvedLinesWithSchedule.map((line) => ({
+              categorySlug: line.categorySlug,
+              lineTotal: line.lineTotal,
+            })),
+          );
 
-    if (!pricingResult.success || !pricingResult.totals) {
-      throw new BadRequestError(
-        pricingResult.error || 'Failed to calculate Book Now payment totals',
-      );
-    }
+          if (!pricingResult.success || !pricingResult.totals) {
+            throw new BadRequestError(
+              pricingResult.error || 'Failed to calculate Book Now payment totals',
+            );
+          }
 
-    const pricing = pricingResult.totals;
+          return pricingResult.totals;
+        })();
     const addonsTotal = pricing.addonsTotal ?? 0;
 
     const orderId = crypto.randomUUID();
@@ -599,6 +892,11 @@ export class BookingService {
       total: pricing.total,
       pendingLines: resolvedLinesWithSchedule.map(serializePendingLine),
       bookingNotes: notes?.trim() || undefined,
+      serviceFlowType: normalizedOrderServiceFlowType,
+      bookingKind: normalizedOrderBookingKind,
+      serviceType: normalizedOrderServiceType,
+      pricingProfile: normalizedOrderGstExempt ? { gstExempt: true } : undefined,
+      consultationMeta: consultationMeta || resolvedLinesWithSchedule[0]?.consultationMeta,
     });
 
     const createdItems: InstanceType<typeof BookingItem>[] = [];
@@ -619,6 +917,10 @@ export class BookingService {
             slug: line.packageSlug,
             categorySlug: line.categorySlug,
           },
+          serviceFlowType: line.serviceFlowType || normalizedOrderServiceFlowType,
+          bookingKind: line.bookingKind || normalizedOrderBookingKind,
+          serviceType: line.serviceType || normalizedOrderServiceType,
+          consultationMeta: line.consultationMeta || consultationMeta,
           ...bookingItemScheduleFields(line),
         });
         createdItems.push(item);
@@ -649,6 +951,10 @@ export class BookingService {
           bookingMode: 'book_now',
           ...(fulfillmentType ? { fulfillmentType } : {}),
           ...(isHourlyOrder ? { hourlyHelper: true } : {}),
+          serviceFlowType: normalizedOrderServiceFlowType,
+          bookingKind: normalizedOrderBookingKind,
+          ...(normalizedOrderServiceType ? { serviceType: normalizedOrderServiceType } : {}),
+          ...(normalizedOrderGstExempt ? { gstExempt: true } : {}),
           itemCount: resolvedLinesWithSchedule.length,
           skuSlugs: resolvedLinesWithSchedule.map((l) => l.packageSlug),
           couponServiceIds: resolvedLinesWithSchedule.map((l) => l.categorySlug || l.packageSlug),
@@ -798,16 +1104,533 @@ export class BookingService {
     }
   }
 
+  static async createConsultationProjectOrderFromQuotation(params: {
+    consultationTask: InstanceType<typeof Task>;
+    quotation: InstanceType<typeof ServiceQuotation>;
+    projectTitle?: string;
+    projectStartDate?: string | Date;
+  }) {
+    const { consultationTask, quotation } = params;
+
+    const customerUid =
+      String(consultationTask.requesterUid || '').trim() ||
+      (consultationTask.requesterId
+        ? String(await ProfileUtils.getUidByProfileId(consultationTask.requesterId) || '').trim()
+        : '');
+
+    if (!customerUid) {
+      throw new BadRequestError('Unable to resolve consultation customer for project payment');
+    }
+
+    if (!consultationTask.requesterUid) {
+      consultationTask.requesterUid = customerUid;
+      await consultationTask.save();
+    }
+
+    if (quotation.projectBookingOrderId) {
+      const existingOrder = await BookingOrder.findOne({
+        orderId: quotation.projectBookingOrderId,
+      });
+      if (existingOrder) {
+        const items = await BookingItem.find({ orderId: existingOrder.orderId }).sort({ createdAt: 1 });
+        const taskIds = items.map((item) => item.taskId).filter(Boolean);
+        const tasks = taskIds.length
+          ? await Task.find({ _id: { $in: taskIds } }).sort({ createdAt: 1 })
+          : [];
+        const escrow = existingOrder.paymentEscrowId
+          ? await PaymentClient.getEscrowByEscrowId(existingOrder.paymentEscrowId)
+          : null;
+
+        return {
+          order: existingOrder,
+          item: items[0] || null,
+          items,
+          task: tasks[0] || null,
+          tasks,
+          escrow: escrow || undefined,
+          razorpayOrder: existingOrder.razorpayOrderId
+            ? {
+                id: existingOrder.razorpayOrderId,
+                amount: Math.round(Number(existingOrder.total || 0) * 100),
+                currency: 'INR',
+              }
+            : undefined,
+        };
+      }
+    }
+
+    const plan = buildConsultationProjectPlan({
+      task: consultationTask,
+      quotation,
+      projectTitle: params.projectTitle,
+      projectStartDate: params.projectStartDate,
+    });
+    const paymentTotals = resolveConsultationProjectPaymentTotals(quotation);
+    const orderId = crypto.randomUUID();
+    const categorySlug =
+      String(consultationTask.categorySlug || '').trim() ||
+      (String(consultationTask.serviceType || '').trim().toLowerCase() === 'painting'
+        ? 'painting'
+        : '') ||
+      String(consultationTask.category || '').trim();
+    const categoryLabel =
+      String(consultationTask.categoryLabel || '').trim() ||
+      resolveBookNowCategoryLabel(categorySlug);
+    const pendingLine: ResolvedLine = {
+      addonIds: [],
+      packageSlug: `consultation-project-${quotation._id}`,
+      categorySlug,
+      categoryLabel,
+      taskCategory:
+        String(consultationTask.category || '').trim() ||
+        resolveBookNowTaskCategory(categorySlug),
+      pricingUnit: 'fixed',
+      quantity: 1,
+      lineTotal: paymentTotals.total,
+      durationMinutes: Math.max(30, Number(plan.estimatedDuration || 0)),
+      title: plan.projectTitle,
+      snapshotName: plan.projectTitle,
+      schedule: resolveBookNowLineSchedule({
+        lineSchedule: {
+          scheduledDate: plan.scheduledDate,
+          scheduledTimeStart: plan.scheduledTimeStart,
+          scheduledTimeEnd: plan.scheduledTimeEnd,
+          timeSlot: plan.timeSlot,
+          durationMinutes: Math.max(30, Number(plan.estimatedDuration || 0)),
+        },
+        catalogDurationMinutes: Math.max(30, Number(plan.estimatedDuration || 0)),
+      }) ?? undefined,
+      serviceFlowType: 'consultation_project',
+      bookingKind: 'project',
+      serviceType: consultationTask.serviceType || 'painting',
+      consultationMeta: {
+        samePartnerPreferred: consultationTask.consultationState?.samePartnerPreferred,
+        consultationFee: consultationTask.consultationState?.consultationFee,
+        customerRequirements: consultationTask.consultationState?.customerRequirements,
+        estimateSnapshot: consultationTask.consultationState?.estimateSnapshot,
+        sourceTaskId: String(consultationTask._id),
+        sourceQuotationId: String(quotation._id),
+        projectTitle: plan.projectTitle,
+      },
+    };
+
+    const orderSchedule = orderScheduleFromLine(pendingLine);
+    const address = {
+      label: undefined,
+      line1: String(consultationTask.location?.address || 'Consultation address').trim(),
+      line2: undefined,
+      city: String(consultationTask.location?.city || '').trim() || 'Unknown',
+      state: String(consultationTask.location?.state || '').trim() || undefined,
+      pinCode: String(consultationTask.location?.pinCode || '').trim() || '000000',
+      coordinates:
+        Array.isArray(consultationTask.location?.coordinates) &&
+        consultationTask.location.coordinates.length === 2
+          ? (consultationTask.location.coordinates as [number, number])
+          : undefined,
+    };
+
+    const order = await BookingOrder.create({
+      orderId,
+      customerUid,
+      customerProfileId: consultationTask.requesterId,
+      status: 'awaiting_payment',
+      address,
+      scheduledDate: orderSchedule.scheduledDate,
+      scheduledTimeStart: orderSchedule.scheduledTimeStart,
+      scheduledTimeEnd: orderSchedule.scheduledTimeEnd,
+      timeSlot: orderSchedule.timeSlot,
+      subtotal: paymentTotals.subtotal,
+      addonsTotal: 0,
+      platformFee: 0,
+      gst: paymentTotals.gst,
+      total: paymentTotals.total,
+      pendingLines: [serializePendingLine(pendingLine)],
+      bookingNotes: quotation.scopeSummary || quotation.notes || consultationTask.description,
+      serviceFlowType: 'consultation_project',
+      bookingKind: 'project',
+      serviceType: consultationTask.serviceType || 'painting',
+      pricingProfile: { gstExempt: false },
+      consultationMeta: pendingLine.consultationMeta,
+    });
+
+    const item = await BookingItem.create({
+      orderId,
+      addonIds: [],
+      quantity: 1,
+      unitPrice: paymentTotals.total,
+      lineTotal: paymentTotals.total,
+      skuSnapshot: {
+        name: plan.projectTitle,
+        slug: pendingLine.packageSlug,
+        categorySlug,
+      },
+      serviceFlowType: 'consultation_project',
+      bookingKind: 'project',
+      serviceType: consultationTask.serviceType || 'painting',
+      consultationMeta: pendingLine.consultationMeta,
+      ...bookingItemScheduleFields(pendingLine),
+    });
+
+    try {
+      const placeholderTaskId = pendingBookNowTaskId(orderId);
+      const escrowResult = await PaymentClient.createBookingEscrow({
+        taskId: placeholderTaskId,
+        bookingOrderId: orderId,
+        posterUid: customerUid,
+        amount: paymentTotals.total,
+        taskAmount: paymentTotals.subtotal,
+        taskCategory: pendingLine.taskCategory,
+        taskTitle: plan.projectTitle,
+        metadata: {
+          bookingOrderId: orderId,
+          bookingMode: 'consultation_project',
+          serviceFlowType: 'consultation_project',
+          bookingKind: 'project',
+          serviceType: consultationTask.serviceType || 'painting',
+          sourceTaskId: String(consultationTask._id),
+          sourceQuotationId: String(quotation._id),
+          projectTitle: plan.projectTitle,
+	          amountBreakdown: {
+	            taskAmount: paymentTotals.subtotal,
+	            gst: paymentTotals.gst,
+	            platformFee: 0,
+	            totalPaid: paymentTotals.total,
+	          },
+          bookNowLineItems: [
+            {
+	              taskId: `${placeholderTaskId}:${pendingLine.packageSlug}`,
+	              taskTitle: plan.projectTitle,
+	              lineAmountRupees: paymentTotals.total,
+              catalogId: categorySlug,
+              categorySlug,
+              pricingUnit: 'fixed',
+              scheduledDate: pendingLine.schedule?.scheduledDate,
+              scheduledTimeStart: pendingLine.schedule?.scheduledTimeStart,
+              scheduledTimeEnd: pendingLine.schedule?.scheduledTimeEnd,
+              timeSlot: pendingLine.schedule?.timeSlot,
+              durationMinutes: pendingLine.schedule?.durationMinutes ?? pendingLine.durationMinutes,
+            },
+          ],
+        },
+      });
+
+      if (!escrowResult.success || !escrowResult.order?.id || !escrowResult.escrow?.escrowId) {
+        throw new BadRequestError(escrowResult.error || 'Failed to create project payment order');
+      }
+
+      order.paymentEscrowId = escrowResult.escrow.escrowId;
+      order.razorpayOrderId = escrowResult.order.id || escrowResult.escrow?.razorpayOrderId;
+      await order.save();
+
+      quotation.status = 'accepted';
+      quotation.acceptedAt = quotation.acceptedAt || new Date();
+      quotation.projectBookingOrderId = order.orderId;
+      quotation.projectPaymentStatus = 'awaiting_payment';
+      await quotation.save();
+
+      await Task.findByIdAndUpdate(consultationTask._id, {
+        $set: {
+          'consultationState.currentStage': 'quotation_accepted',
+          'consultationState.currentQuotationId': quotation._id,
+          'consultationState.projectBookingOrderId': order.orderId,
+          'consultationState.lastUpdatedAt': new Date(),
+        },
+      });
+
+      const rawOrder =
+        escrowResult.order && typeof escrowResult.order === 'object'
+          ? (escrowResult.order as Record<string, unknown>)
+          : null;
+      const razorpayOrder = rawOrder
+        ? {
+            ...rawOrder,
+            id: rawOrder.id,
+            amount: rawOrder.amount,
+            currency: rawOrder.currency || 'INR',
+            ...(typeof rawOrder.keyId === 'string' ? { keyId: rawOrder.keyId } : {}),
+          }
+        : escrowResult.order;
+
+      return {
+        order,
+        item,
+        items: [item],
+        task: null,
+        tasks: [],
+        escrow: escrowResult.escrow,
+        razorpayOrder,
+      };
+    } catch (error) {
+      await BookingItem.findByIdAndDelete(item._id);
+      await BookingOrder.findByIdAndDelete(order._id);
+      throw error;
+    }
+  }
+
+  private static mergeTaskForAutoAssign(
+    task: InstanceType<typeof Task>,
+    line: ResolvedLine,
+    order: InstanceType<typeof BookingOrder>,
+  ): InstanceType<typeof Task> {
+    const hydrated = {
+      ...(task.toObject() as ITask),
+    } as ITask;
+    const paintingFlow =
+      line.serviceFlowType === 'consultation_project' ||
+      order.serviceFlowType === 'consultation_project';
+
+    if (!hydrated.categorySlug && line.categorySlug) {
+      hydrated.categorySlug = line.categorySlug;
+    }
+    if (
+      !hydrated.categorySlug &&
+      (String(line.serviceType || order.serviceType || '')
+        .trim()
+        .toLowerCase() === 'painting' ||
+        paintingFlow)
+    ) {
+      hydrated.categorySlug = 'painting';
+    }
+    if (!hydrated.serviceType) {
+      hydrated.serviceType =
+        line.serviceType || order.serviceType || (paintingFlow ? 'painting' : undefined);
+    }
+    if (!hydrated.serviceFlowType) {
+      hydrated.serviceFlowType = line.serviceFlowType || order.serviceFlowType;
+    }
+    if (!hydrated.bookingKind) {
+      hydrated.bookingKind = line.bookingKind || order.bookingKind;
+    }
+    if (!hydrated.subcategory && line.packageSlug) {
+      hydrated.subcategory = line.packageSlug;
+    }
+
+    return hydrated as unknown as InstanceType<typeof Task>;
+  }
+
+  private static scheduleBookNowAutoAssign(
+    task: InstanceType<typeof Task>,
+    line: ResolvedLine,
+    order: InstanceType<typeof BookingOrder>,
+    options?: { preferredPartnerUid?: string },
+  ): void {
+    const taskId = String(task._id);
+    const orderId = order.orderId;
+    const escrowId = String(order.paymentEscrowId || '').trim();
+
+    setImmediate(() => {
+      void (async () => {
+        try {
+          const freshTask = await Task.findById(taskId);
+          if (!freshTask || freshTask.assigneeUid) return;
+
+          const taskForAssign = BookingService.mergeTaskForAutoAssign(freshTask, line, order);
+          const result = await BookNowAutoAssignService.autoAssign(taskForAssign as any, {
+            preferredPartnerUid: options?.preferredPartnerUid,
+          });
+
+          const postedArea =
+            freshTask.location?.taskArea ||
+            (freshTask.location as { locality?: string })?.locality ||
+            freshTask.location?.city ||
+            'N/A';
+          const timeInfo = freshTask.scheduledTimeStart || freshTask.timeSlot || 'Flexible';
+          const catInfo = line.categoryLabel || freshTask.category || 'N/A';
+
+          logger.info(`================================================================================`);
+          logger.info(`📢 [BookNowWorkPosted] NEW BOOK NOW WORK POSTED!`);
+          logger.info(`   Task ID           : ${taskId}`);
+          logger.info(`   Task Title        : "${freshTask.title}"`);
+          logger.info(`   Category          : ${catInfo}`);
+          logger.info(`   Work Posted Area  : ${postedArea}`);
+          logger.info(`   Work Scheduled    : ${timeInfo}`);
+          logger.info(`--------------------------------------------------------------------------------`);
+          if (result.assigned && result.partner) {
+            const distStr =
+              result.partner.distKm != null
+                ? `${result.partner.distKm.toFixed(2)} km`
+                : 'Location Not Set';
+            logger.info(`✅ AUTO-ASSIGNMENT STATUS: SUCCESS`);
+            logger.info(`   Partner Name      : ${result.partner.name}`);
+            logger.info(`   Partner UID       : ${result.partner.uid}`);
+            logger.info(`   Partner Profile ID: ${result.partner.profileId}`);
+            logger.info(
+              `   Assigned Work Area: "${result.partner.workArea}" (${result.partner.workAreaDistKm.toFixed(2)} km from task)`,
+            );
+            logger.info(`   Partner Distance  : ${distStr}`);
+
+            const items = await BookingItem.find({ orderId }).select('taskId').lean();
+            const linkedTaskIds = items.map((item) => item.taskId).filter(Boolean);
+            const linkedTasks = linkedTaskIds.length
+              ? await Task.find({ _id: { $in: linkedTaskIds } }).select('assigneeUid').lean()
+              : [];
+            const allAssigned =
+              linkedTasks.length > 0 && linkedTasks.every((row) => Boolean(row.assigneeUid));
+            if (allAssigned) {
+              await BookingOrder.updateOne(
+                { orderId, status: { $in: ['assigning', 'paid'] } },
+                { $set: { status: 'assigned' } },
+              );
+            }
+
+            if (escrowId && result.partner.uid) {
+              try {
+                await PaymentClient.attachPerformerToEscrow({
+                  escrowId,
+                  performerUid: result.partner.uid,
+                });
+              } catch (attachErr) {
+                logger.warn('[BookNowAutoAssign] Deferred escrow attach failed', {
+                  orderId,
+                  escrowId,
+                  taskId,
+                  error: attachErr instanceof Error ? attachErr.message : String(attachErr),
+                });
+              }
+            }
+          } else {
+            logger.info(`⚠️ AUTO-ASSIGNMENT STATUS: UNASSIGNED`);
+            logger.info(
+              `   Reason            : ${result.reason ?? 'No matching approved partner found within 5km'}`,
+            );
+            logger.info(`   Action Required   : Operations team manual assignment`);
+          }
+          logger.info(`================================================================================`);
+        } catch (autoAssignErr) {
+          logger.error('[BookNowAutoAssign] ❌ Deferred auto-assignment error', {
+            taskId,
+            orderId,
+            error: autoAssignErr instanceof Error ? autoAssignErr.message : String(autoAssignErr),
+          });
+        }
+      })();
+    });
+  }
+
+  private static async selfHealUnassignedBookNowTasks(
+    order: InstanceType<typeof BookingOrder>,
+    items: InstanceType<typeof BookingItem>[],
+    tasks: InstanceType<typeof Task>[],
+  ): Promise<void> {
+    for (const task of tasks) {
+      if (task.assigneeUid || task.bookingSource !== 'book_now') continue;
+      const item = items.find((row) => String(row.taskId) === String(task._id));
+      if (!item) continue;
+
+      const pseudoLine: ResolvedLine = {
+        addonIds: [],
+        packageSlug: String(item.skuSnapshot?.slug || ''),
+        categorySlug: String(item.skuSnapshot?.categorySlug || ''),
+        categoryLabel: String(item.skuSnapshot?.name || ''),
+        taskCategory: 'other',
+        pricingUnit: 'fixed',
+        quantity: 1,
+        lineTotal: Number(item.lineTotal || 0),
+        durationMinutes: Number(item.durationMinutes || 60),
+        title: String(item.skuSnapshot?.name || task.title || 'Book Now'),
+        snapshotName: String(item.skuSnapshot?.name || ''),
+        serviceFlowType: item.serviceFlowType || order.serviceFlowType,
+        bookingKind: item.bookingKind || order.bookingKind,
+        serviceType: item.serviceType || order.serviceType,
+      };
+
+      try {
+        await BookNowAutoAssignService.autoAssign(
+          BookingService.mergeTaskForAutoAssign(task, pseudoLine, order) as any,
+        );
+      } catch (err) {
+        logger.error('[BookNowAutoAssign] Self-heal auto-assign failed', {
+          taskId: task._id,
+          orderId: order.orderId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   private static async materializeBookingTasks(
     order: InstanceType<typeof BookingOrder>,
   ): Promise<InstanceType<typeof Task>[]> {
     const items = await BookingItem.find({ orderId: order.orderId }).sort({ createdAt: 1 });
     const existingTaskIds = items.map((item) => item.taskId).filter(Boolean);
-    if (existingTaskIds.length > 0) {
-      return Task.find({ _id: { $in: existingTaskIds } }).sort({ createdAt: 1 });
-    }
 
     const rawPending = (order.pendingLines || []) as PendingBookingLine[];
+    const consultationSourceTaskId = String(order.consultationMeta?.sourceTaskId || '').trim();
+    const consultationSourceQuotationId = String(order.consultationMeta?.sourceQuotationId || '').trim();
+    const isConsultationProjectOrder =
+      order.serviceFlowType === 'consultation_project' &&
+      order.bookingKind === 'project' &&
+      consultationSourceTaskId.length > 0 &&
+      consultationSourceQuotationId.length > 0;
+    const sourceConsultationTask = isConsultationProjectOrder
+      ? await Task.findById(consultationSourceTaskId)
+      : null;
+    const sourceQuotation = isConsultationProjectOrder
+      ? await ServiceQuotation.findById(consultationSourceQuotationId)
+      : null;
+    if (isConsultationProjectOrder && (!sourceConsultationTask || !sourceQuotation)) {
+      throw new BadRequestError('Consultation project order is missing its source quotation data');
+    }
+
+    if (existingTaskIds.length > 0) {
+      const existingTasks = await Task.find({ _id: { $in: existingTaskIds } }).sort({ createdAt: 1 });
+      if (
+        isConsultationProjectOrder &&
+        sourceConsultationTask &&
+        sourceQuotation &&
+        existingTasks.some((task) => String(task._id) === String(sourceConsultationTask._id))
+      ) {
+        const transitionPatch = buildConsultationTaskProjectTransitionPatch({
+          task: sourceConsultationTask as any,
+          quotation: sourceQuotation as any,
+          projectTitle: order.consultationMeta?.projectTitle,
+          projectStartDate: order.scheduledDate,
+          projectBookingOrderId: order.orderId,
+          bookingItemId: items[0]?._id ? String(items[0]._id) : undefined,
+          requesterUid: order.customerUid,
+        });
+
+        await Task.updateOne(
+          { _id: sourceConsultationTask._id },
+          {
+            $set: transitionPatch,
+            $unset: {
+              startOtp: '',
+              onTheWayAt: '',
+              arrivedAt: '',
+              startedAt: '',
+              completedAt: '',
+              completionSubmittedAt: '',
+              completionApprovedAt: '',
+              completionProof: '',
+              completionNotes: '',
+              completionStatus: '',
+              cancelledAt: '',
+              cancelledById: '',
+              cancellationReason: '',
+              reviewAt: '',
+              firstCompletedAt: '',
+            },
+          },
+        );
+        await ServiceQuotation.updateOne(
+          { _id: sourceQuotation._id },
+          {
+            $set: {
+              projectTaskId: sourceConsultationTask._id,
+              projectPaymentStatus: order.status === 'awaiting_payment' ? 'awaiting_payment' : 'paid',
+              updatedAt: new Date(),
+            },
+          },
+        );
+        const refreshedTasks = await Task.find({ _id: { $in: existingTaskIds } }).sort({ createdAt: 1 });
+        await BookingService.selfHealUnassignedBookNowTasks(order, items, refreshedTasks);
+        return Task.find({ _id: { $in: existingTaskIds } }).sort({ createdAt: 1 });
+      }
+      await BookingService.selfHealUnassignedBookNowTasks(order, items, existingTasks);
+      return existingTasks;
+    }
+
     const lines = rawPending.map((line) => deserializePendingLine(line));
     if (!lines.length) {
       throw new BadRequestError('Booking has no services to post after payment');
@@ -821,46 +1644,150 @@ export class BookingService {
       const description =
         order.bookingNotes?.trim() ||
         `Book Now: ${line.title}. Address: ${address.line1}, ${address.city} ${address.pinCode}.`;
-
-      const task = await Task.create({
-        title: line.title,
-        description,
-        category: normalizeBookNowTaskCategory(line.taskCategory),
-        categorySlug: line.categorySlug,
-        categoryLabel: line.categoryLabel,
-        subcategory: line.packageSlug,
-        budget: { amount: line.lineTotal, currency: 'INR', type: line.pricingUnit },
-        isNegotiable: false,
-        location: applyTaskAreaToLocation({
-          type: 'Point',
-          coordinates: address.coordinates,
-          address: [address.line1, address.line2].filter(Boolean).join(', '),
-          city: address.city,
-          state: address.state,
-          pinCode: address.pinCode,
-          country: 'IN',
-        }),
-        urgency: 'medium',
-        priority: 'normal',
-        status: 'open',
-        requesterId: order.customerProfileId,
-        scheduledDate: line.schedule?.scheduledDateValue ?? order.scheduledDate,
-        scheduledTimeStart: line.schedule?.scheduledTimeStart ?? order.scheduledTimeStart,
-        scheduledTimeEnd: line.schedule?.scheduledTimeEnd ?? order.scheduledTimeEnd,
-        timeSlot: line.schedule?.timeSlot ?? order.timeSlot,
-        flexibility: 'strict',
-        estimatedDuration: line.schedule?.durationMinutes ?? line.durationMinutes,
-        views: 0,
-        isFeatured: false,
-        currentRevisionRound: 0,
-        negotiationStatus: 'closed',
-        bookingSource: 'book_now',
-        bookingOrderId: order.orderId,
-        assignmentStatus: 'pending',
-      });
-      createdTasks.push(task);
+      const taskPayload =
+        isConsultationProjectOrder && sourceConsultationTask && sourceQuotation
+          ? null
+          : {
+              title: line.title,
+              description,
+              category: normalizeBookNowTaskCategory(line.taskCategory),
+              categorySlug:
+                line.categorySlug ||
+                (String(line.serviceType || order.serviceType || '')
+                  .trim()
+                  .toLowerCase() === 'painting'
+                  ? 'painting'
+                  : undefined),
+              categoryLabel: line.categoryLabel,
+              subcategory: line.packageSlug,
+              budget: { amount: line.lineTotal, currency: 'INR', type: line.pricingUnit },
+              isNegotiable: false,
+              location: applyTaskAreaToLocation({
+                type: 'Point',
+                coordinates: address.coordinates,
+                address: [address.line1, address.line2].filter(Boolean).join(', '),
+                city: address.city,
+                state: address.state,
+                pinCode: address.pinCode,
+                country: 'IN',
+              }),
+              urgency: 'medium' as const,
+              priority: 'normal' as const,
+              status: 'open' as const,
+              requesterId: order.customerProfileId,
+              scheduledDate: line.schedule?.scheduledDateValue ?? order.scheduledDate,
+              scheduledTimeStart: line.schedule?.scheduledTimeStart ?? order.scheduledTimeStart,
+              scheduledTimeEnd: line.schedule?.scheduledTimeEnd ?? order.scheduledTimeEnd,
+              timeSlot: line.schedule?.timeSlot ?? order.timeSlot,
+              flexibility: 'strict' as const,
+              estimatedDuration: line.schedule?.durationMinutes ?? line.durationMinutes,
+              images: Array.isArray(line.images) ? line.images.filter(Boolean) : undefined,
+              views: 0,
+              isFeatured: false,
+              currentRevisionRound: 0,
+              negotiationStatus: 'closed' as const,
+              bookingSource: 'book_now' as const,
+              bookingOrderId: order.orderId,
+              assignmentStatus: 'pending' as const,
+              serviceFlowType: line.serviceFlowType || order.serviceFlowType || 'standard',
+              bookingKind: line.bookingKind || order.bookingKind || 'standard',
+              serviceType:
+                line.serviceType ||
+                order.serviceType ||
+                (line.serviceFlowType === 'consultation_project' ||
+                order.serviceFlowType === 'consultation_project'
+                  ? 'painting'
+                  : undefined),
+              consultationState:
+                isConsultationBookingKind(line.bookingKind || order.bookingKind)
+                  ? buildConsultationTaskState({
+                      lineTotal: line.lineTotal,
+                      lineConsultationMeta: line.consultationMeta,
+                      orderConsultationMeta: order.consultationMeta,
+                    })
+                  : undefined,
+            };
 
       const item = items[index];
+
+      if (isConsultationProjectOrder && sourceConsultationTask && sourceQuotation) {
+        if (item) {
+          item.taskId = sourceConsultationTask._id;
+          await item.save();
+        }
+
+        const transitionPatch = buildConsultationTaskProjectTransitionPatch({
+          task: sourceConsultationTask as any,
+          quotation: sourceQuotation as any,
+          projectTitle: order.consultationMeta?.projectTitle,
+          projectStartDate: line.schedule?.scheduledDateValue ?? order.scheduledDate,
+          projectBookingOrderId: order.orderId,
+          bookingItemId: item ? String(item._id) : undefined,
+          requesterUid: order.customerUid,
+        });
+
+        const transitionedTask = await Task.findByIdAndUpdate(
+          sourceConsultationTask._id,
+          {
+            $set: transitionPatch,
+            $unset: {
+              startOtp: '',
+              onTheWayAt: '',
+              arrivedAt: '',
+              startedAt: '',
+              completedAt: '',
+              completionSubmittedAt: '',
+              completionApprovedAt: '',
+              completionProof: '',
+              completionNotes: '',
+              completionStatus: '',
+              cancelledAt: '',
+              cancelledById: '',
+              cancellationReason: '',
+              reviewAt: '',
+              firstCompletedAt: '',
+            },
+          },
+          { new: true, runValidators: true },
+        );
+
+        if (!transitionedTask) {
+          throw new BadRequestError('Failed to transition consultation task into project execution');
+        }
+
+        createdTasks.push(transitionedTask);
+
+        try {
+          const preferredPartnerUid =
+            String(
+              sourceConsultationTask.assigneeUid || sourceConsultationTask.partnerUid || '',
+            ).trim() || undefined;
+          BookingService.scheduleBookNowAutoAssign(transitionedTask, line, order, {
+            preferredPartnerUid,
+          });
+        } catch (autoAssignErr) {
+          logger.error(
+            '[BookNowAutoAssign] ❌ Failed to schedule auto-assignment (consultation project):',
+            autoAssignErr,
+          );
+        }
+
+        await ServiceQuotation.updateOne(
+          { _id: sourceQuotation._id },
+          {
+            $set: {
+              projectTaskId: sourceConsultationTask._id,
+              projectPaymentStatus: 'paid',
+              updatedAt: new Date(),
+            },
+          },
+        );
+        continue;
+      }
+
+      const task = await Task.create(taskPayload);
+      createdTasks.push(task);
+
       if (item) {
         item.taskId = task._id;
         await item.save();
@@ -880,43 +1807,17 @@ export class BookingService {
             slug: line.packageSlug,
             categorySlug: line.categorySlug,
           },
+          serviceFlowType: line.serviceFlowType || order.serviceFlowType || 'standard',
+          bookingKind: line.bookingKind || order.bookingKind || 'standard',
+          serviceType: line.serviceType || order.serviceType,
+          consultationMeta: line.consultationMeta || order.consultationMeta,
           ...bookingItemScheduleFields(line),
         });
         await Task.findByIdAndUpdate(task._id, { bookingItemId: String(createdItem._id) });
       }
 
-      // ─── AUTO-ASSIGN: Immediately find nearest partner and assign ───────────
-      try {
-        const result = await BookNowAutoAssignService.autoAssign(task as any);
-        const postedArea = task.location?.taskArea || (task.location as any)?.locality || task.location?.city || 'N/A';
-        const timeInfo = task.scheduledTimeStart || task.timeSlot || 'Flexible';
-        const catInfo = line.categoryLabel || task.category || 'N/A';
-
-        logger.info(`================================================================================`);
-        logger.info(`📢 [BookNowWorkPosted] NEW BOOK NOW WORK POSTED!`);
-        logger.info(`   Task ID           : ${task._id}`);
-        logger.info(`   Task Title        : "${task.title}"`);
-        logger.info(`   Category          : ${catInfo}`);
-        logger.info(`   Work Posted Area  : ${postedArea}`);
-        logger.info(`   Work Scheduled    : ${timeInfo}`);
-        logger.info(`--------------------------------------------------------------------------------`);
-        if (result.assigned && result.partner) {
-          const distStr = result.partner.distKm !== null ? `${result.partner.distKm.toFixed(2)} km` : 'Location Not Set';
-          logger.info(`✅ AUTO-ASSIGNMENT STATUS: SUCCESS`);
-          logger.info(`   Partner Name      : ${result.partner.name}`);
-          logger.info(`   Partner UID       : ${result.partner.uid}`);
-          logger.info(`   Partner Profile ID: ${result.partner.profileId}`);
-          logger.info(`   Assigned Work Area: "${result.partner.workArea}" (${result.partner.workAreaDistKm.toFixed(2)} km from task)`);
-          logger.info(`   Partner Distance  : ${distStr}`);
-        } else {
-          logger.info(`⚠️ AUTO-ASSIGNMENT STATUS: UNASSIGNED`);
-          logger.info(`   Reason            : ${result.reason ?? 'No matching approved partner found within 5km'}`);
-          logger.info(`   Action Required   : Operations team manual assignment`);
-        }
-        logger.info(`================================================================================`);
-      } catch (autoAssignErr) {
-        logger.error('[BookNowAutoAssign] ❌ Auto-assignment error:', autoAssignErr);
-      }
+      // Auto-assign off the payment HTTP path — payment callback must return quickly.
+      BookingService.scheduleBookNowAutoAssign(task, line, order);
 
       try {
         schedulePostCreateNotifications(task, {
@@ -955,6 +1856,266 @@ export class BookingService {
       city: String(city || '').trim(),
       ...occupied,
     };
+  }
+
+  static async getRescheduleEligibility(orderId: string, customerUid: string) {
+    const order = await BookingOrder.findOne({ orderId }).select(
+      'orderId customerUid status address scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount bookingKind serviceType consultationMeta fulfillmentType total',
+    );
+    if (!order) throw new NotFoundError('Booking not found');
+    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
+
+    const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
+      .select('taskId skuSnapshot serviceFlowType bookingKind serviceType consultationMeta lineTotal durationMinutes')
+      .lean();
+    const taskIds = items.map((item) => item.taskId).filter(Boolean);
+    const tasks = taskIds.length
+      ? await Task.find({ _id: { $in: taskIds } })
+          .select('status assigneeId assigneeUid executionPhase startedAt arrivedAt')
+          .lean()
+      : [];
+    const rescheduleCount = Number(order.rescheduleCount || 0);
+    const remainingReschedules = Math.max(0, MAX_ONE_TIME_RESCHEDULES - rescheduleCount);
+    const scheduledAt = resolveScheduledAt({
+      scheduledDate: order.scheduledDate,
+      scheduledTimeStart: order.scheduledTimeStart,
+    });
+
+    if (!['paid', 'assigning', 'assigned'].includes(String(order.status || '').toLowerCase())) {
+      return {
+        allowed: false,
+        chargeRequired: false,
+        reasonCode: 'STATUS_BLOCKED',
+        partnerState: 'unassigned',
+        message: `Cannot reschedule booking in status ${order.status}`,
+        rescheduleCount,
+        rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+      };
+    }
+    if (rescheduleCount >= MAX_ONE_TIME_RESCHEDULES) {
+      return {
+        allowed: false,
+        chargeRequired: false,
+        reasonCode: 'RESCHEDULE_LIMIT_REACHED',
+        partnerState: 'unassigned',
+        message: 'This booking has already been rescheduled twice. Please contact support.',
+        rescheduleCount,
+        rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+      };
+    }
+    const tasksById = new Map(tasks.map((task) => [String(task._id), task]));
+    const evaluatedLines = items.length
+      ? items.map((item) => {
+          const linkedTask = item.taskId ? tasksById.get(String(item.taskId)) : null;
+          const partnerState = resolveReschedulePartnerState({
+            assigneeId: linkedTask?.assigneeId,
+            assigneeUid: linkedTask?.assigneeUid,
+            executionPhase: linkedTask?.executionPhase,
+            startedAt: linkedTask?.startedAt,
+            arrivedAt: linkedTask?.arrivedAt,
+            status: linkedTask?.status,
+          });
+          const isHourlyLine = Boolean(
+            item.durationMinutes && Number(item.durationMinutes) > 0 &&
+            String(item.skuSnapshot?.categorySlug || '').trim().toLowerCase() === 'hourly-helper',
+          );
+          return evaluateBookingLineReschedulePolicy({
+            kind:
+              String(item.bookingKind || order.bookingKind || '').trim().toLowerCase() === 'consultation'
+                ? 'consultation'
+                : isHourlyLine || String(order.fulfillmentType || '').trim().toLowerCase() === 'instant'
+                  ? 'hourly'
+                  : 'standard',
+            partnerState,
+            scheduledAt,
+            categorySlug: item.skuSnapshot?.categorySlug,
+            serviceType: item.serviceType || order.serviceType,
+            bookingKind: item.bookingKind || order.bookingKind,
+            consultationFee:
+              item.consultationMeta?.consultationFee ??
+              order.consultationMeta?.consultationFee ??
+              null,
+            lineTotal: Number(item.lineTotal || 0),
+          });
+        })
+      : [
+          evaluateBookingLineReschedulePolicy({
+            kind:
+              String(order.bookingKind || '').trim().toLowerCase() === 'consultation'
+                ? 'consultation'
+                : String(order.fulfillmentType || '').trim().toLowerCase() === 'instant'
+                  ? 'hourly'
+                  : 'standard',
+            partnerState: resolveReschedulePartnerState({
+              assigneeId: undefined,
+              assigneeUid: undefined,
+              executionPhase: undefined,
+              startedAt: undefined,
+              arrivedAt: undefined,
+              status: order.status,
+            }),
+            scheduledAt,
+            serviceType: order.serviceType,
+            bookingKind: order.bookingKind,
+            consultationFee: order.consultationMeta?.consultationFee ?? null,
+            lineTotal: Number(order.total || 0),
+          }),
+        ];
+
+    const blockedDecision = evaluatedLines.find((decision) => !decision.allowed);
+    const mostSeverePartnerState = evaluatedLines.reduce<ReschedulePartnerState>(
+      (current, decision) =>
+        partnerStateSeverity(decision.partnerState) > partnerStateSeverity(current)
+          ? decision.partnerState
+          : current,
+      'unassigned',
+    );
+    const totalChargeAmount = evaluatedLines.reduce(
+      (sum, decision) => sum + Number(decision.chargeAmount || 0),
+      0,
+    );
+    const leadDecision =
+      blockedDecision ||
+      evaluatedLines.find((decision) => decision.partnerState === 'on_the_way') ||
+      evaluatedLines.find((decision) => decision.chargeRequired) ||
+      evaluatedLines[0];
+
+    return {
+      allowed: !blockedDecision,
+      chargeRequired: !blockedDecision && totalChargeAmount > 0,
+      chargeAmount: !blockedDecision && totalChargeAmount > 0 ? totalChargeAmount : undefined,
+      reasonCode: leadDecision.reasonCode,
+      partnerState: mostSeverePartnerState,
+      policyWindowLabel: leadDecision.policyWindowLabel,
+      message: blockedDecision
+        ? blockedDecision.message
+        : totalChargeAmount > 0
+          ? `Existing cancellation charge applies: ₹${totalChargeAmount.toLocaleString('en-IN')}.`
+          : leadDecision.message,
+      rescheduleCount,
+      rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+      remainingReschedules,
+      maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+    };
+  }
+
+  static async getRescheduleSlots(orderId: string, customerUid: string, date: string) {
+    const eligibility = await BookingService.getRescheduleEligibility(orderId, customerUid);
+    if (!eligibility.allowed) {
+      throw new BadRequestError(eligibility.message || 'This booking cannot be rescheduled');
+    }
+    const order = await BookingOrder.findOne({ orderId }).select('customerUid address').lean();
+    if (!order) throw new NotFoundError('Booking not found');
+    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
+
+    const dateKey = String(date || '').trim();
+    parseCalendarDate(dateKey);
+    const city = String(order.address?.city || '').trim();
+    const occupied = await getOccupiedBookNowSlots(dateKey, city);
+    const blocked = new Set(occupied.occupiedTimeStarts.map(normalizeBookNowSlotLabel));
+    const slots = RESCHEDULE_SLOT_STARTS.map((start) => {
+      const normalized = normalizeBookNowSlotLabel(start);
+      const unavailable = blocked.has(normalized) || isBookNowSlotWithinLeadTime(normalized, dateKey);
+      return {
+        id: normalized,
+        label: normalized,
+        startTime: normalized,
+        endTime: defaultSlotEnd(normalized),
+        available: !unavailable,
+      };
+    });
+
+    return { date: dateKey, slots };
+  }
+
+  static async rescheduleOrder(
+    orderId: string,
+    customerUid: string,
+    params: {
+      scheduledDate?: string;
+      scheduledTimeStart?: string;
+      scheduledTimeEnd?: string;
+      reason?: string;
+    },
+  ) {
+    const eligibility = await BookingService.getRescheduleEligibility(orderId, customerUid);
+    if (!eligibility.allowed) {
+      throw new BadRequestError(eligibility.message || 'This booking cannot be rescheduled');
+    }
+
+    const dateKey = String(params.scheduledDate || '').trim();
+    const scheduledDate = parseCalendarDate(dateKey);
+    const scheduledTimeStart = normalizeBookNowSlotLabel(String(params.scheduledTimeStart || '').trim());
+    if (!scheduledTimeStart) throw new BadRequestError('scheduledTimeStart is required');
+    const scheduledTimeEnd =
+      String(params.scheduledTimeEnd || '').trim() || defaultSlotEnd(scheduledTimeStart);
+    const timeSlot = deriveBookNowTimeSlot(scheduledTimeStart);
+
+    const order = await BookingOrder.findOne({ orderId });
+    if (!order) throw new NotFoundError('Booking not found');
+    await assertBookNowSlotAvailable({
+      date: dateKey,
+      city: order.address.city,
+      scheduledTimeStart,
+      timeSlot,
+    });
+
+    order.scheduledDate = scheduledDate;
+    order.scheduledTimeStart = scheduledTimeStart;
+    order.scheduledTimeEnd = scheduledTimeEnd;
+    order.timeSlot = timeSlot;
+    order.rescheduleCount = Number(order.rescheduleCount || 0) + 1;
+    order.lastRescheduledAt = new Date();
+    await order.save();
+
+    const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } });
+    const taskIds = items.map((item) => item.taskId).filter(Boolean);
+    await Promise.all([
+      ...items.map((item) => {
+        item.scheduledDate = scheduledDate;
+        item.scheduledTimeStart = scheduledTimeStart;
+        item.scheduledTimeEnd = scheduledTimeEnd;
+        item.timeSlot = timeSlot;
+        return item.save();
+      }),
+      taskIds.length
+        ? Task.updateMany(
+            { _id: { $in: taskIds } },
+            {
+              $set: {
+                scheduledDate,
+                scheduledTimeStart,
+                scheduledTimeEnd,
+                timeSlot,
+                dateOption: 'on-date',
+                lastRescheduledAt: order.lastRescheduledAt,
+                executionPhase: 'assigned',
+                executionPhaseUpdatedAt: order.lastRescheduledAt,
+              },
+              $unset: {
+                startOtp: 1,
+                onTheWayAt: 1,
+                arrivedAt: 1,
+              },
+              $inc: { rescheduleCount: 1 },
+            },
+          )
+        : Promise.resolve(),
+    ]);
+
+    logger.info('Booking rescheduled by customer', {
+      orderId,
+      customerUid,
+      scheduledDate: dateKey,
+      scheduledTimeStart,
+      reason: params.reason,
+    });
+
+    return { order, items };
   }
 
   /**
@@ -1087,7 +2248,15 @@ export class BookingService {
 
       // If already assigned, automatically link performer to escrow
       if (order.status === 'assigned') {
-        const task = await Task.findById(params.taskId).lean();
+        const task =
+          (await Task.findById(params.taskId).lean()) ||
+          (await (async () => {
+            const linkedItems = await BookingItem.find({ orderId: order.orderId })
+              .select('taskId')
+              .lean();
+            const linkedTaskId = linkedItems.find((item) => item.taskId)?.taskId;
+            return linkedTaskId ? Task.findById(linkedTaskId).lean() : null;
+          })());
         if (task && task.assigneeUid && params.escrowId) {
           try {
             const attach = await PaymentClient.attachPerformerToEscrow({
@@ -1125,13 +2294,30 @@ export class BookingService {
     order.paidAt = new Date();
     const tasks = await this.materializeBookingTasks(order);
 
-    order.status = 'assigning';
+    const autoAssigned = tasks.length > 0 && tasks.every((task) => Boolean(task.assigneeUid));
+    order.status = autoAssigned ? 'assigned' : 'assigning';
     await order.save();
 
     const primaryTaskId = tasks[0] ? String(tasks[0]._id) : params.taskId;
 
-    logger.info('Book Now order marked paid/assigning', {
+    if (autoAssigned && params.escrowId && tasks[0]?.assigneeUid) {
+      try {
+        await PaymentClient.attachPerformerToEscrow({
+          escrowId: params.escrowId,
+          performerUid: tasks[0].assigneeUid,
+        });
+      } catch (err: any) {
+        logger.warn('Failed to attach performer to consultation project escrow after payment', {
+          orderId: order.orderId,
+          escrowId: params.escrowId,
+          error: err.message,
+        });
+      }
+    }
+
+    logger.info('Book Now order marked paid', {
       orderId: order.orderId,
+      status: order.status,
       taskId: primaryTaskId,
       taskCount: tasks.length,
     });
@@ -1166,6 +2352,178 @@ export class BookingService {
         pricingUnit: task.budget?.type,
       })),
     ]);
+  }
+
+  /** Multi-day consultation project order (bookingKind project on order or task). */
+  static async isProjectBookingOrder(orderId: string): Promise<boolean> {
+    const order = await BookingOrder.findOne({ orderId }).select('bookingKind').lean();
+    if (String(order?.bookingKind || '').trim().toLowerCase() === 'project') {
+      return true;
+    }
+    const items = await BookingItem.find({ orderId }).select('taskId bookingKind').lean();
+    if (items.some((i) => String(i.bookingKind || '').trim().toLowerCase() === 'project')) {
+      return true;
+    }
+    const taskIds = items.map((i) => i.taskId).filter(Boolean);
+    if (!taskIds.length) return false;
+    const projectTask = await Task.findOne({
+      _id: { $in: taskIds },
+      $or: [
+        { bookingKind: 'project' },
+        { projectExecution: { $exists: true, $ne: null } },
+      ],
+    })
+      .select('_id')
+      .lean();
+    return Boolean(projectTask);
+  }
+
+  /**
+   * Multi-day project cancel — evaluate proration, settle via payment precomputed settlement,
+   * then cancel booking/tasks. Allows cancel while in_progress (unlike standard Book Now).
+   */
+  static async cancelProjectBookingOrder(
+    orderId: string,
+    customerUid: string,
+    reason?: string,
+  ) {
+    const order = await BookingOrder.findOne({ orderId });
+    if (!order) throw new NotFoundError('Booking not found');
+    if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
+    if (['cancelled', 'refunded'].includes(order.status)) {
+      throw new BadRequestError(`Cannot cancel booking in status ${order.status}`);
+    }
+
+    const items = await BookingItem.find({ orderId });
+    const taskIds = items.map((i) => i.taskId).filter(Boolean);
+    const tasks = taskIds.length ? await Task.find({ _id: { $in: taskIds } }) : [];
+    const primaryTask =
+      tasks.find((t) => String((t as { bookingKind?: string }).bookingKind || '') === 'project') ||
+      tasks.find((t) => Boolean((t as { projectExecution?: unknown }).projectExecution)) ||
+      tasks[0];
+
+    if (!primaryTask) {
+      throw new NotFoundError('Project task not found for this booking');
+    }
+
+    const execution = (primaryTask as {
+      projectExecution?: {
+        status?: string;
+        totalPlannedDays?: number;
+        completedDayCount?: number;
+        activeDayNumber?: number | null;
+        plannedStartDate?: Date;
+      };
+    }).projectExecution;
+
+    const partnerAssigned = isHelperAssignedOnTask(primaryTask);
+    const partnerReachedLocation =
+      partnerAssigned && BookingService.isBookNowPartnerReached(primaryTask);
+
+    const projectStartDate = new Date(
+      execution?.plannedStartDate ||
+        primaryTask.scheduledDate ||
+        order.scheduledDate ||
+        order.createdAt,
+    );
+    const cancelledAt = new Date();
+    const paidRupees = Number(order.total || order.subtotal || 0);
+    const paidAmountPaise = Math.max(0, Math.round(paidRupees * 100));
+
+    const evaluation = evaluateProjectCancellation({
+      paidAmountPaise,
+      cancelledAt,
+      projectStartDate,
+      partnerAssigned,
+      partnerReachedLocation,
+      projectStatus: execution?.status || null,
+      totalPlannedDays: Number(execution?.totalPlannedDays || 1),
+      completedDayCount: Number(execution?.completedDayCount || 0),
+      activeDayNumber:
+        execution?.activeDayNumber == null ? null : Number(execution.activeDayNumber),
+      taskStatus: String(primaryTask.status || ''),
+    });
+
+    if (evaluation.status === 'DENIED') {
+      throw new BadRequestError(
+        evaluation.reason || 'Cannot cancel this project',
+        evaluation.reasonCode || 'PROJECT_CANCEL_DENIED',
+      );
+    }
+
+    const cancelReason =
+      reason || evaluation.reason || 'Multi-day project cancelled by customer';
+
+    if (order.paidAt) {
+      const payResult = await PaymentClient.cancelHourlyWithSettlement({
+        bookingOrderId: orderId,
+        escrowId: order.paymentEscrowId || undefined,
+        taskId: String(primaryTask._id),
+        reason: cancelReason,
+        userId: customerUid,
+        cancelledBy: 'poster',
+        taskStartDate: projectStartDate.toISOString(),
+        assignedAt: primaryTask.assignedAt
+          ? new Date(primaryTask.assignedAt).toISOString()
+          : null,
+        settlement: evaluation.settlement,
+      });
+      if (!payResult.success) {
+        throw new BadRequestError(
+          payResult.error || 'Failed to settle project cancellation payment',
+          'PROJECT_SETTLEMENT_FAILED',
+        );
+      }
+    }
+
+    for (const task of tasks) {
+      if (String(task.status || '') === 'cancelled') continue;
+      task.status = 'cancelled';
+      task.cancelledAt = cancelledAt;
+      task.cancellationReason = cancelReason;
+      if (task.projectExecution) {
+        const pe = task.projectExecution as {
+          status?: string;
+          activeDayNumber?: number | null;
+          completedAt?: Date;
+        };
+        if (pe.status !== 'completed' && pe.status !== 'ended_early') {
+          pe.status = 'ended_early';
+          pe.activeDayNumber = null;
+          pe.completedAt = cancelledAt;
+          task.markModified('projectExecution');
+        }
+      }
+      await task.save();
+    }
+
+    for (const item of items) {
+      if (item.status === 'cancelled') continue;
+      item.status = 'cancelled';
+      item.cancelledAt = cancelledAt;
+      item.cancellationReason = cancelReason;
+      await item.save();
+    }
+
+    order.status = order.paidAt ? 'refunded' : 'cancelled';
+    order.cancelledAt = cancelledAt;
+    order.cancellationReason = cancelReason;
+    await order.save();
+
+    logger.info('Project booking cancelled', {
+      orderId,
+      taskId: String(primaryTask._id),
+      tier: evaluation.tier,
+      policyKey: evaluation.policyKey,
+      refundAmountPaise: evaluation.settlement.refundAmountPaise,
+      workDaysCounted: evaluation.workDaysCounted,
+    });
+
+    return {
+      order,
+      items,
+      projectCancellation: evaluation,
+    };
   }
 
   /**
@@ -1237,12 +2595,17 @@ export class BookingService {
     const primaryTask = tasks[0];
     const primaryItem = items.find((i) => i.status !== 'cancelled') || items[0];
 
-    const taskStartDate = (
-      primaryTask?.scheduledDate ||
-      primaryItem?.scheduledDate ||
-      order.scheduledDate ||
-      order.createdAt
-    ).toISOString();
+    const taskStartDate = resolveTaskStartForCancellationPolicy({
+      scheduledDate: primaryTask?.scheduledDate ?? primaryItem?.scheduledDate ?? order.scheduledDate,
+      scheduledTimeStart:
+        primaryTask?.scheduledTimeStart ??
+        primaryItem?.scheduledTimeStart ??
+        order.scheduledTimeStart,
+      timeSlot: primaryTask?.timeSlot ?? order.timeSlot,
+      orderScheduledDate: order.scheduledDate,
+      orderScheduledTimeStart: order.scheduledTimeStart ?? order.timeSlot,
+      orderTimeSlot: order.timeSlot,
+    }).toISOString();
     const assignedAtIso = primaryTask?.assignedAt
       ? new Date(primaryTask.assignedAt).toISOString()
       : null;
@@ -1328,6 +2691,11 @@ export class BookingService {
       return BookingService.cancelHourlyBookingOrder(orderId, customerUid, reason);
     }
 
+    // Multi-day consultation project — dedicated proration policy.
+    if (await BookingService.isProjectBookingOrder(orderId)) {
+      return BookingService.cancelProjectBookingOrder(orderId, customerUid, reason);
+    }
+
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
@@ -1344,7 +2712,7 @@ export class BookingService {
 
     const task = await Task.findById(taskId);
     if (!task) throw new NotFoundError('Task not found');
-    if (task.status !== 'open') {
+    if (task.status !== 'open' && task.status !== 'assigned') {
       throw new BadRequestError('This service can no longer be cancelled');
     }
 
@@ -1353,13 +2721,32 @@ export class BookingService {
     );
     const isLastActiveItem = remainingActive.length === 0;
     const isMultiItem = items.length > 1;
+    let paymentCancellationResult: unknown = null;
 
-    const taskStartIso = (task.scheduledDate || task.createdAt).toISOString();
+    const taskStartIso = resolveTaskStartForCancellationPolicy({
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+      timeSlot: task.timeSlot,
+      orderScheduledDate: item.scheduledDate ?? order.scheduledDate,
+      orderScheduledTimeStart:
+        item.scheduledTimeStart ?? order.scheduledTimeStart ?? order.timeSlot,
+      orderTimeSlot: order.timeSlot,
+    }).toISOString();
     const assignedAtIso = task.assignedAt
       ? new Date(task.assignedAt).toISOString()
       : null;
     const catalogId = item.skuSnapshot?.categorySlug || task.categorySlug;
-    const partnerReachedLocation = BookingService.isBookNowPartnerReached(task);
+    const partnerAssigned = isHelperAssignedOnTask(task);
+    const partnerReachedLocation =
+      partnerAssigned && BookingService.isBookNowPartnerReached(task);
+
+    logger.info('Book Now item cancel: assignment gate', {
+      orderId,
+      taskId: String(taskId),
+      partnerAssigned,
+      partnerReachedLocation,
+      paid: Boolean(order.paidAt),
+    });
 
     if (order.paidAt) {
       if (isMultiItem) {
@@ -1375,10 +2762,12 @@ export class BookingService {
           isLastActiveItem,
           catalogId,
           partnerReachedLocation,
+          partnerAssigned,
         });
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this service');
         }
+        paymentCancellationResult = refundResult;
       } else {
         const refundResult = await PaymentClient.cancelPaymentForTask({
           taskId: String(task._id),
@@ -1393,10 +2782,12 @@ export class BookingService {
           taskTitle: task.title,
           catalogId,
           partnerReachedLocation,
+          partnerAssigned,
         });
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this service');
         }
+        paymentCancellationResult = refundResult;
       }
     }
 
@@ -1418,7 +2809,7 @@ export class BookingService {
 
     await order.save();
 
-    return { order, item, remainingItems: remainingActive };
+    return { order, item, remainingItems: remainingActive, paymentCancellationResult };
   }
 
   static async cancelBooking(orderId: string, customerUid: string, reason?: string) {
@@ -1426,16 +2817,21 @@ export class BookingService {
       return BookingService.cancelHourlyBookingOrder(orderId, customerUid, reason);
     }
 
+    if (await BookingService.isProjectBookingOrder(orderId)) {
+      return BookingService.cancelProjectBookingOrder(orderId, customerUid, reason);
+    }
+
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
-    if (['cancelled', 'refunded', 'assigned'].includes(order.status)) {
+    if (['cancelled', 'refunded'].includes(order.status)) {
       throw new BadRequestError(`Cannot cancel booking in status ${order.status}`);
     }
 
     const items = await BookingItem.find({ orderId });
     const taskIds = items.map((i) => i.taskId).filter(Boolean);
     let refundInitiated = false;
+    let paymentCancellationResult: unknown = null;
 
     for (const taskId of taskIds) {
       const task = await Task.findById(taskId);
@@ -1444,25 +2840,50 @@ export class BookingService {
         throw new BadRequestError('Task already in progress');
       }
 
-      if (order.paidAt && task.status === 'open' && !refundInitiated) {
+      if (order.paidAt && !refundInitiated) {
         const firstItem = items.find((i) => String(i.taskId) === String(task._id)) || items[0];
+        const partnerAssigned = isHelperAssignedOnTask(task);
+        const assignedAtIso = task.assignedAt
+          ? new Date(task.assignedAt).toISOString()
+          : null;
+        const partnerReachedLocation =
+          partnerAssigned && BookingService.isBookNowPartnerReached(task);
+        logger.info('Book Now order cancel: assignment gate', {
+          orderId,
+          taskId: String(task._id),
+          partnerAssigned,
+          partnerReachedLocation,
+          paid: true,
+        });
         const refundResult = await PaymentClient.cancelPaymentForTask({
           taskId: String(task._id),
           bookingOrderId: orderId,
           escrowId: order.paymentEscrowId || undefined,
-          reason: reason || 'Book Now cancelled before assignment',
+          reason: reason || 'Book Now cancelled by customer',
           userId: customerUid,
           cancelledBy: 'poster',
-          taskStartDate: (task.scheduledDate || task.createdAt).toISOString(),
-          assignedAt: null,
+          taskStartDate: resolveTaskStartForCancellationPolicy({
+            scheduledDate: task.scheduledDate,
+            scheduledTimeStart: task.scheduledTimeStart,
+            timeSlot: task.timeSlot,
+            orderScheduledDate: firstItem?.scheduledDate ?? order.scheduledDate,
+            orderScheduledTimeStart:
+              firstItem?.scheduledTimeStart ??
+              order.scheduledTimeStart ??
+              order.timeSlot,
+            orderTimeSlot: order.timeSlot,
+          }).toISOString(),
+          assignedAt: assignedAtIso,
           feeBaseAmount: order.subtotal,
           taskTitle: task.title,
           catalogId: firstItem?.skuSnapshot?.categorySlug || task.categorySlug,
-          partnerReachedLocation: BookingService.isBookNowPartnerReached(task),
+          partnerReachedLocation,
+          partnerAssigned,
         });
         if (!refundResult.success) {
           throw new BadRequestError(refundResult.error || 'Refund failed for this booking');
         }
+        paymentCancellationResult = refundResult;
         refundInitiated = true;
       }
 
@@ -1477,6 +2898,6 @@ export class BookingService {
     order.cancellationReason = reason;
     await order.save();
 
-    return { order, items };
+    return { order, items, paymentCancellationResult };
   }
 }

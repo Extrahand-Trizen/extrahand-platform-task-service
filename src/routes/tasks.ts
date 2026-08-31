@@ -77,6 +77,90 @@ router.get(
   asyncHandler(TaskController.getMyApplication)
 );
 
+router.get(
+  "/:id/reschedule/eligibility",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getRescheduleEligibility)
+);
+
+router.get(
+  "/:id/reschedule/slots",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getRescheduleSlots)
+);
+
+router.post(
+  "/:id/reschedule",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.rescheduleTask)
+);
+
+router.get(
+  "/:id/consultation-flow",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getConsultationFlow)
+);
+
+router.post(
+  "/:id/consultation/assessment",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.submitConsultationAssessment)
+);
+
+router.post(
+  "/:id/consultation/quotation",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.createConsultationQuotation)
+);
+
+router.post(
+  "/:id/consultation/quotation/:quotationId/accept",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.acceptConsultationQuotation)
+);
+
+router.post(
+  "/:id/consultation/quotation/:quotationId/reject",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.rejectConsultationQuotation)
+);
+
+router.get(
+  "/:id/project-execution",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.getProjectExecution)
+);
+
+router.post(
+  "/:id/project-execution/start-day",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.startProjectDay)
+);
+
+router.post(
+  "/:id/project-execution/complete-day",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.completeProjectDay)
+);
+
+router.post(
+  "/:id/project-execution/complete",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.completeProjectExecution)
+);
+
 // GET /api/v1/tasks/:id - Get a single task (public route)
 router.get(
   "/:id",

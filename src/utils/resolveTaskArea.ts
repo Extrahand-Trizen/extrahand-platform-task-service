@@ -1,3 +1,5 @@
+import { findNearestHyderabadWorkArea } from '../constants/locations/hyderabadWorkAreaCoords';
+
 const PLUS_CODE_RE = /^[A-Z0-9]{2,8}\+[A-Z0-9]{2,}$/i;
 
 function isSkippableAddressToken(token: string): boolean {
@@ -66,11 +68,18 @@ export function applyTaskAreaToLocation<T extends Record<string, unknown>>(
 ): T | undefined {
   if (!location) return undefined;
 
-  const resolvedTaskArea = resolveTaskAreaForCreate({
+  let resolvedTaskArea = resolveTaskAreaForCreate({
     taskArea: taskAreaInput?.taskArea || taskAreaInput?.legacyTaskArea,
     address: String(location.address || ""),
     city: String(location.city || ""),
   });
+
+  if (!resolvedTaskArea) {
+    const coords = location.coordinates as [number, number] | undefined;
+    if (Array.isArray(coords) && coords.length === 2 && typeof coords[1] === 'number') {
+      resolvedTaskArea = findNearestHyderabadWorkArea(coords[1], coords[0]) || '';
+    }
+  }
 
   if (!resolvedTaskArea) return location;
   return { ...location, taskArea: resolvedTaskArea };

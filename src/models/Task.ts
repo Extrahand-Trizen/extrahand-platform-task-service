@@ -1,5 +1,34 @@
 import mongoose, { Schema, Model, Document } from "mongoose";
 
+export type ProjectExecutionStatus =
+  | 'not_started'
+  | 'active'
+  | 'completed'
+  | 'ended_early';
+
+export type ProjectDayStatus = 'planned' | 'active' | 'completed' | 'skipped';
+
+export interface IProjectExecutionDay {
+  dayNumber: number;
+  status: ProjectDayStatus;
+  startedAt?: Date;
+  completedAt?: Date;
+  notePreview?: string;
+  proofCount?: number;
+}
+
+export interface IProjectExecution {
+  status: ProjectExecutionStatus;
+  totalPlannedDays: number;
+  completedDayCount: number;
+  activeDayNumber?: number | null;
+  quotationId: mongoose.Types.ObjectId;
+  plannedStartDate?: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+  days: IProjectExecutionDay[];
+}
+
 export interface ITask extends Document {
   title: string;
   description: string;
@@ -141,6 +170,8 @@ export interface ITask extends Document {
   scheduledDate?: Date;
   scheduledTimeStart?: string;
   scheduledTimeEnd?: string;
+  rescheduleCount?: number;
+  lastRescheduledAt?: Date;
   dateOption?: "flexible" | "on-date" | "before-date";
   timeSlot?: "morning" | "midday" | "afternoon" | "evening";
   flexibility: "strict" | "flexible" | "anytime";
@@ -188,6 +219,35 @@ export interface ITask extends Document {
   parentTaskId?: mongoose.Types.ObjectId;
   recurringVisitId?: string;
   recurringParentPlan?: boolean;
+  serviceFlowType?: 'standard' | 'consultation_project';
+  bookingKind?: 'standard' | 'consultation' | 'project';
+  serviceType?: string;
+  projectExecution?: IProjectExecution;
+  consultationState?: {
+    currentStage?:
+      | 'consultation_booked'
+      | 'assessment_submitted'
+      | 'quotation_sent'
+      | 'quotation_accepted'
+      | 'quotation_rejected'
+      | 'project_created';
+    sourceTaskId?: mongoose.Types.ObjectId;
+    currentQuotationId?: mongoose.Types.ObjectId;
+    latestAssessmentId?: mongoose.Types.ObjectId;
+    projectTaskId?: mongoose.Types.ObjectId;
+    projectBookingOrderId?: string;
+    samePartnerPreferred?: boolean;
+    consultationFee?: number;
+    estimateSnapshot?: {
+      amount?: number;
+      currency?: string;
+      durationLabel?: string;
+      notes?: string;
+      selections?: Record<string, unknown>;
+    };
+    customerRequirements?: string;
+    lastUpdatedAt?: Date;
+  };
 
   schedule?: Array<{
     visitId?: string;
@@ -569,6 +629,8 @@ const TaskSchema = new Schema<ITask>(
     scheduledDate: Date,
     scheduledTimeStart: String,
     scheduledTimeEnd: String,
+    rescheduleCount: { type: Number, default: 0, min: 0 },
+    lastRescheduledAt: Date,
     dateOption: {
       type: String,
       enum: ["flexible", "on-date", "before-date"],
@@ -793,6 +855,94 @@ const TaskSchema = new Schema<ITask>(
       decisionReason: String,
     }],
     activeAdditionalQuoteRequestId: { type: String, default: null },
+    serviceFlowType: {
+      type: String,
+      enum: ['standard', 'consultation_project'],
+      default: 'standard',
+      index: true,
+    },
+    bookingKind: {
+      type: String,
+      enum: ['standard', 'consultation', 'project'],
+      default: 'standard',
+      index: true,
+    },
+    serviceType: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    projectExecution: {
+      status: {
+        type: String,
+        enum: ['not_started', 'active', 'completed', 'ended_early'],
+      },
+      totalPlannedDays: { type: Number, min: 1, max: 30 },
+      completedDayCount: { type: Number, min: 0, default: 0 },
+      activeDayNumber: { type: Number, min: 1, max: 30, default: null },
+      quotationId: {
+        type: Schema.Types.ObjectId,
+        ref: 'ServiceQuotation',
+      },
+      plannedStartDate: Date,
+      startedAt: Date,
+      completedAt: Date,
+      days: [
+        {
+          dayNumber: { type: Number, required: true, min: 1, max: 30 },
+          status: {
+            type: String,
+            enum: ['planned', 'active', 'completed', 'skipped'],
+            required: true,
+          },
+          startedAt: Date,
+          completedAt: Date,
+          notePreview: { type: String, maxlength: 120 },
+          proofCount: { type: Number, min: 0, default: 0 },
+        },
+      ],
+    },
+    consultationState: {
+      currentStage: {
+        type: String,
+        enum: [
+          'consultation_booked',
+          'assessment_submitted',
+          'quotation_sent',
+          'quotation_accepted',
+          'quotation_rejected',
+          'project_created',
+        ],
+      },
+      sourceTaskId: {
+        type: Schema.Types.ObjectId,
+        ref: 'Task',
+      },
+      currentQuotationId: {
+        type: Schema.Types.ObjectId,
+        ref: 'ServiceQuotation',
+      },
+      latestAssessmentId: {
+        type: Schema.Types.ObjectId,
+        ref: 'ConsultationAssessment',
+      },
+      projectTaskId: {
+        type: Schema.Types.ObjectId,
+        ref: 'Task',
+      },
+      projectBookingOrderId: String,
+      samePartnerPreferred: Boolean,
+      consultationFee: Number,
+      estimateSnapshot: {
+        amount: Number,
+        currency: String,
+        durationLabel: String,
+        notes: String,
+        selections: { type: Schema.Types.Mixed, default: undefined },
+      },
+      customerRequirements: String,
+      lastUpdatedAt: Date,
+    },
 
     // ── Global Budget Revision (Phase 1) ────────────────────────────────────
     currentRevisionRound: { type: Number, default: 0, min: 0, max: 1 },
@@ -937,6 +1087,11 @@ TaskSchema.index({ partnerId: 1, status: 1 });
 TaskSchema.index({ partnerUid: 1, status: 1 });
 TaskSchema.index({ partnerId: 1, bookingSource: 1, status: 1 });
 TaskSchema.index({ bookingOrderId: 1 });
+TaskSchema.index({ serviceFlowType: 1, bookingKind: 1, status: 1 });
+TaskSchema.index({ serviceType: 1, bookingKind: 1, status: 1 });
+TaskSchema.index({ 'consultationState.projectTaskId': 1 });
+TaskSchema.index({ 'consultationState.projectBookingOrderId': 1 });
+TaskSchema.index({ 'consultationState.sourceTaskId': 1 });
 TaskSchema.index(
   { parentTaskId: 1, status: 1, recurringVisitId: 1 },
   { name: 'recurring_child_visit_lookup' },

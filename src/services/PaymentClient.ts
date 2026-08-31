@@ -779,6 +779,8 @@ export class PaymentClient {
     isLastActiveItem: boolean;
     catalogId?: string;
     partnerReachedLocation?: boolean;
+    /** false => full line refund (no Book Now cancellation fee). */
+    partnerAssigned?: boolean;
   }): Promise<{ success: boolean; refund?: unknown; error?: string }> {
     try {
       if (!this.baseURL || !this.serviceAuthToken) {
@@ -840,6 +842,8 @@ export class PaymentClient {
     taskTitle?: string;
     catalogId?: string;
     partnerReachedLocation?: boolean;
+    /** false => full refund of amount paid (no Book Now cancellation fee). */
+    partnerAssigned?: boolean;
   }): Promise<{
     success: boolean;
     cancelled?: boolean;
@@ -861,6 +865,7 @@ export class PaymentClient {
         taskStartDate: params.taskStartDate,
         hasAssignedAt: Boolean(params.assignedAt),
         feeBaseAmount: params.feeBaseAmount,
+        partnerAssigned: params.partnerAssigned,
       });
 
       const response = await axios.post(
@@ -878,6 +883,7 @@ export class PaymentClient {
           taskTitle: params.taskTitle,
           catalogId: params.catalogId,
           partnerReachedLocation: params.partnerReachedLocation,
+          partnerAssigned: params.partnerAssigned,
         },
         {
           headers: {

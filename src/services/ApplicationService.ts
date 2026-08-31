@@ -26,6 +26,7 @@ import { RecurringVisitService } from "./RecurringVisitService";
 import { isRecurringVisitPlanTask } from "../utils/recurringVisitMeta";
 import { ApplicantProfileSnapshot, ProfileUtils } from "../utils/ProfileUtils";
 import { NegotiationUtils } from "../utils/NegotiationUtils";
+import { notifyBookNowAssignment } from "./AssignmentService";
 
 export class ApplicationService {
   /**
@@ -1056,6 +1057,22 @@ export class ApplicationService {
             },
             templateButtons: taskOpenAppButton(task._id.toString()),
             idempotencyKey: `assigned:${applicationId}`,
+          });
+
+          await notifyBookNowAssignment({
+            actorUid: taskOwnerUid,
+            taskId: task._id.toString(),
+            taskTitle: task.title || 'your task',
+            customerUid: taskOwnerUid,
+            helperUid: applicantUid,
+            helperName: ProfileUtils.resolveProfileDisplayName(applicantProfile) || 'Your professional',
+            helperRating:
+              typeof applicantProfile?.rating === 'number' && Number.isFinite(applicantProfile.rating)
+                ? Number(applicantProfile.rating)
+                : undefined,
+            notifyPartner: false,
+            notifyCustomer: true,
+            recipientRole: 'tasker',
           });
         } catch (error) {
           logger.error('Error sending APPLICATION_ACCEPTED notification', {

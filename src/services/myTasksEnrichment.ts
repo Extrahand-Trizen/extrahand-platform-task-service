@@ -7,7 +7,7 @@ const MAX_PREVIEW_AVATARS = 4;
 const DESCRIPTION_PREVIEW_MAX = 500;
 
 export const MY_TASKS_LIST_SELECT =
-  'title description category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce currentRevisionRound negotiationStatus budgetRevisions';
+  'title description category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce currentRevisionRound negotiationStatus budgetRevisions';
 
 export function truncateDescription(description: unknown): string | undefined {
   if (typeof description !== 'string') return undefined;

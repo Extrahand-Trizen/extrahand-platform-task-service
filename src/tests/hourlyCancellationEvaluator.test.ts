@@ -31,6 +31,8 @@ function baseCtx(
     bookingStatus: 'assigning',
     taskStatus: 'open',
     taskExecutionPhase: null,
+    // Default: helper assigned so existing time-window tests keep prior behavior.
+    helperAssigned: true,
     ...overrides,
   };
 }
@@ -102,12 +104,35 @@ function testCompletedDenied() {
 }
 
 function testCustomerFreeCancel() {
-  // cancelledAt 4h before scheduled → free
+  // cancelledAt 4h before scheduled → free (helper assigned)
   assertAllowedMoney(
     evaluateHourlyCancellation(baseCtx()),
     PAID_2H,
     0,
     'FREE_CANCEL',
+  );
+}
+
+function testNoHelperAssignedFullRefundOutsideLateWindow() {
+  assertAllowedMoney(
+    evaluateHourlyCancellation(baseCtx({ helperAssigned: false })),
+    PAID_2H,
+    0,
+    'NO_HELPER_ASSIGNED',
+  );
+}
+
+function testNoHelperAssignedFullRefundInsideLateWindow() {
+  // Existing ₹49 must NOT apply when no helper is assigned.
+  const scheduledAt = new Date('2026-08-03T12:00:00.000Z');
+  const cancelledAt = new Date('2026-08-03T11:00:00.000Z'); // 60 min before
+  assertAllowedMoney(
+    evaluateHourlyCancellation(
+      baseCtx({ helperAssigned: false, scheduledAt, cancelledAt }),
+    ),
+    PAID_2H,
+    0,
+    'NO_HELPER_ASSIGNED',
   );
 }
 
@@ -390,6 +415,8 @@ testUnpaidDenied();
 testAlreadyCancelledDenied();
 testCompletedDenied();
 testCustomerFreeCancel();
+testNoHelperAssignedFullRefundOutsideLateWindow();
+testNoHelperAssignedFullRefundInsideLateWindow();
 testCustomerLateFlatFee();
 testCustomerLateFeeClampedToPaid();
 testExactFreeWindowBoundary();

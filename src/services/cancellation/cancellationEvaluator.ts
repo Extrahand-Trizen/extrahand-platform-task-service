@@ -208,6 +208,16 @@ export function evaluateHourlyCancellation(
       );
     }
 
+    // No helper assigned yet → 100% refund of amount paid (no time-based fees).
+    if (!normalized.helperAssigned) {
+      return allowed(
+        'NO_HELPER_ASSIGNED',
+        'Cancelled before a helper was assigned — full refund',
+        paid,
+        0,
+      );
+    }
+
     if (isArrived(normalized)) {
       return allowed(
         'POST_ARRIVAL_FEE',

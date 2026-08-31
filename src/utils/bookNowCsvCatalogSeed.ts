@@ -169,6 +169,8 @@ type BeautyCsvItem = CsvItem & {
 };
 
 const PAINTING_PLACEHOLDER_IMAGE = cdnImage('general-home-cleaning');
+const CAR_WASH_PLACEHOLDER_IMAGE = cdnImage('sofa-booknow');
+const LAUNDRY_PLACEHOLDER_IMAGE = cdnImage('wachingmachinecheckup-booknow');
 
 const PEST_CONTROL_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
   'pest-control-ant-control::ant-control-kitchen-only': [
@@ -317,6 +319,44 @@ const PAINTING_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
   'painting-waterproofing::bathroom-kitchen-grouting': [uploadedCategoryImage('Bathroom  Kitchen Grouting.png')],
 };
 
+const CAR_WASH_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'car-wash-basic::hatchback': [uploadedCategoryImage('car-wash-hatchback.webp')],
+  'car-wash-basic::sedan': [uploadedCategoryImage('car-wash-sedan.webp')],
+  'car-wash-basic::premium-sedan': [uploadedCategoryImage('car-wash-premium-sedan.webp')],
+  'car-wash-basic::compact-suv': [uploadedCategoryImage('car-wash-compact-suv.webp')],
+  'car-wash-basic::suv-muv': [uploadedCategoryImage('car-wash-suv-muv.webp')],
+  'car-wash-basic::luxury-premium-car': [uploadedCategoryImage('car-wash-luxury-premium-car.webp')],
+  'car-wash-premium::hatchback': [uploadedCategoryImage('car-wash-hatchback.webp')],
+  'car-wash-premium::sedan': [uploadedCategoryImage('car-wash-sedan.webp')],
+  'car-wash-premium::premium-sedan': [uploadedCategoryImage('car-wash-premium-sedan.webp')],
+  'car-wash-premium::compact-suv': [uploadedCategoryImage('car-wash-compact-suv.webp')],
+  'car-wash-premium::suv-muv': [uploadedCategoryImage('car-wash-suv-muv.webp')],
+  'car-wash-premium::luxury-premium-car': [uploadedCategoryImage('car-wash-luxury-premium-car.webp')],
+  'car-wash-interior-deep-cleaning::hatchback': [uploadedCategoryImage('car-wash-hatchback.webp')],
+  'car-wash-interior-deep-cleaning::sedan': [uploadedCategoryImage('car-wash-sedan.webp')],
+  'car-wash-interior-deep-cleaning::premium-sedan': [uploadedCategoryImage('car-wash-premium-sedan.webp')],
+  'car-wash-interior-deep-cleaning::compact-suv': [uploadedCategoryImage('car-wash-compact-suv.webp')],
+  'car-wash-interior-deep-cleaning::suv-muv': [uploadedCategoryImage('car-wash-suv-muv.webp')],
+  'car-wash-interior-deep-cleaning::luxury-premium-car': [uploadedCategoryImage('car-wash-luxury-premium-car.webp')],
+  'car-wash-sanitization::hatchback': [uploadedCategoryImage('car-wash-hatchback.webp')],
+  'car-wash-sanitization::sedan': [uploadedCategoryImage('car-wash-sedan.webp')],
+  'car-wash-sanitization::premium-sedan': [uploadedCategoryImage('car-wash-premium-sedan.webp')],
+  'car-wash-sanitization::compact-suv': [uploadedCategoryImage('car-wash-compact-suv.webp')],
+  'car-wash-sanitization::suv-muv': [uploadedCategoryImage('car-wash-suv-muv.webp')],
+  'car-wash-sanitization::luxury-premium-car': [uploadedCategoryImage('car-wash-luxury-premium-car.webp')],
+};
+
+const LAUNDRY_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'laundry-wash-by-weight::clothes-washing-per-kg': [uploadedCategoryImage('laundry-clothes-washing.webp')],
+  'laundry-wash-by-weight::wash-and-iron-per-kg': [uploadedCategoryImage('laundry-wash-and-iron.webp')],
+  'laundry-ironing-services::ironing-steam-ironing-8-pieces': [uploadedCategoryImage('laundry-ironing-steam-ironing.webp')],
+  'laundry-traditional-wear::saree-and-traditional-wear-cleaning-per-piece': [uploadedCategoryImage('laundry-traditional-wear-cleaning.webp')],
+  'laundry-bedding-and-blankets::bedsheet-cleaning-per-piece': [uploadedCategoryImage('laundry-bedsheet-cleaning.webp')],
+  'laundry-bedding-and-blankets::single-blanket-cleaning-per-piece': [uploadedCategoryImage('laundry-single-blanket-cleaning.webp')],
+  'laundry-bedding-and-blankets::double-blanket-cleaning-per-piece': [uploadedCategoryImage('laundry-double-blanket-cleaning.webp')],
+  'laundry-shoe-cleaning::shoe-cleaning-per-pair': [uploadedCategoryImage('laundry-shoe-cleaning.webp')],
+};
+
 const CARPENTRY_PACKAGE_IMAGE_MISSING_NAMES = new Set([
   imageIdentity('Glass Floating Shelf Installation'),
   imageIdentity('Sliding Wardrobe Assembly'),
@@ -328,11 +368,168 @@ function resolveCarpentryPackageImageUrls(categorySlug: string, packageName?: st
   return [uploadedCategoryImage(carpentryPackageImageFileName(packageName))];
 }
 
+/** Plumbing package cards — uploaded via ADPT4EH scripts/upload-plumbing-package-images.mjs */
+const PLUMBING_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
+  'plumbing-basin-sink::kitchen-sink-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Kitchen%20Sink%20Blockage%20Removal.webp',
+  ],
+  'plumbing-basin-sink::wash-basin-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wash%20Basin%20Blockage%20Removal.webp',
+  ],
+  'plumbing-basin-sink::wash-basin-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wash%20Basin%20Installation.webp',
+  ],
+  'plumbing-basin-sink::wash-basin-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wash%20Basin%20Leakage%20Repair.webp',
+  ],
+  'plumbing-bath-shower::ceiling-mounted-shower-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Ceiling-Mounted%20Shower%20Installation.webp',
+  ],
+  'plumbing-bath-shower::handheld-shower-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Handheld%20Shower%20Installation.webp',
+  ],
+  'plumbing-bath-shower::shower-filter-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shower%20Filter%20Installation.webp',
+  ],
+  'plumbing-bath-shower::shower-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shower%20Repair.webp',
+  ],
+  'plumbing-bath-shower::wall-mounted-shower-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Wall-Mounted%20Shower%20Installation.webp',
+  ],
+  'plumbing-drainage-pipe::bathroom-balcony-drain-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Bathroom%20Balcony%20Drain%20Blockage%20Removal.webp',
+  ],
+  'plumbing-drainage-pipe::drain-cover-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Drain%20Cover%20Installation.webp',
+  ],
+  'plumbing-grouting::bathroom-grouting': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Bathroom%20Grouting.webp',
+  ],
+  'plumbing-grouting::kitchen-grouting': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Kitchen%20Grouting.webp',
+  ],
+  'plumbing-tap-mixer::hot-and-cold-mixer-repair-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Hot%20%26%20Cold%20Mixer%20Repair%20Installation.webp',
+  ],
+  'plumbing-tap-mixer::regular-tap-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Regular%20Tap%20Installation%20Replacement.webp',
+  ],
+  'plumbing-tap-mixer::regular-tap-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Regular%20Tap%20Repair.webp',
+  ],
+  'plumbing-tap-mixer::shower-mixer-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shower%20Mixer%20Installation%20Replacement.webp',
+  ],
+  'plumbing-tap-mixer::swan-tap-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Swan%20Tap%20Repair.webp',
+  ],
+  'plumbing-tap-mixer::tap-accessories-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tap%20Accessories%20Installation.webp',
+  ],
+  'plumbing-toilet::flush-tank-repair-ceramic': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Repair%20%E2%80%93%20Ceramic.webp',
+  ],
+  'plumbing-toilet::flush-tank-repair-concealed': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Repair%20%E2%80%93%20Concealed.webp',
+  ],
+  'plumbing-toilet::flush-tank-repair-pvc': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Repair%20%E2%80%93%20PVC.webp',
+  ],
+  'plumbing-toilet::flush-tank-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Flush%20Tank%20Replacement.webp',
+  ],
+  'plumbing-toilet::indian-toilet-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Indian%20Toilet%20Installation%20Replacement.webp',
+  ],
+  'plumbing-toilet::indian-toilet-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Indian%20Toilet%20Repair.webp',
+  ],
+  'plumbing-toilet::jet-spray-repair-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Jet%20Spray%20Repair%20Replacement.webp',
+  ],
+  'plumbing-toilet::toilet-pot-blockage-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Toilet%20Pot%20Blockage%20Removal.webp',
+  ],
+  'plumbing-toilet::toilet-seat-cover-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Toilet%20Seat%20Cover%20Installation%20Replacement.webp',
+  ],
+  'plumbing-toilet::western-toilet-installation-replacement-floor-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Installation%20Replacement%20%E2%80%93%20Floor%20Mounted.webp',
+  ],
+  'plumbing-toilet::western-toilet-installation-replacement-wall-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Installation%20Replacement%20%E2%80%93%20Wall%20Mounted.webp',
+  ],
+  'plumbing-toilet::western-toilet-repair-floor-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Repair%20%E2%80%93%20Floor%20Mounted.webp',
+  ],
+  'plumbing-toilet::western-toilet-repair-wall-mounted': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Western%20Toilet%20Repair%20%E2%80%93%20Wall%20Mounted.webp',
+  ],
+  'plumbing::bottle-trap-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Bottle%20Trap%20Installation.webp',
+  ],
+  'plumbing::connection-hose-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Connection%20Hose%20Installation.webp',
+  ],
+  'plumbing::geyser-connection-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Geyser%20Connection%20Leakage%20Repair.webp',
+  ],
+  'plumbing::motor-air-cavity-removal': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Motor%20Air%20Cavity%20Removal.webp',
+  ],
+  'plumbing::motor-installation-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Motor%20Installation%20Replacement.webp',
+  ],
+  'plumbing::overhead-tank-installation-5002-000l': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Overhead%20Tank%20Installation%20%E2%80%93%20500%E2%80%932%2C000L.webp',
+  ],
+  'plumbing::overhead-tank-installation-up-to-500l': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Overhead%20Tank%20Installation%20%E2%80%93%20Up%20to%20500L.webp',
+  ],
+  'plumbing::ro-water-connection': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-RO%20Water%20Connection.webp',
+  ],
+  'plumbing::shelf-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shelf%20Installation.webp',
+  ],
+  'plumbing::shutoff-valve-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Shutoff%20Valve%20Leakage%20Repair.webp',
+  ],
+  'plumbing::soap-holder-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Soap%20Holder%20Installation.webp',
+  ],
+  'plumbing::tank-connection-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tank%20Connection%20Leakage%20Repair.webp',
+  ],
+  'plumbing::tank-cover-replacement': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tank%20Cover%20Replacement.webp',
+  ],
+  'plumbing::tank-leakage-repair': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Tank%20Leakage%20Repair.webp',
+  ],
+  'plumbing::towel-holder-rack-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Towel%20Holder%20Rack%20Installation.webp',
+  ],
+  'plumbing::washing-machine-inlet-connection': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Washing%20Machine%20Inlet%20Connection.webp',
+  ],
+  'plumbing::waste-pipe-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Waste%20Pipe%20Installation.webp',
+  ],
+  'plumbing::water-meter-installation': [
+    'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/plumbing-pkg-Water%20Meter%20Installation.webp',
+  ],
+};
+
 const BOOK_NOW_PACKAGE_IMAGE_URLS: Record<string, string[]> = {
   ...PEST_CONTROL_PACKAGE_IMAGE_URLS,
   ...ELECTRICIAN_PACKAGE_IMAGE_URLS,
   ...BEAUTY_PACKAGE_IMAGE_URLS,
   ...PAINTING_PACKAGE_IMAGE_URLS,
+  ...CAR_WASH_PACKAGE_IMAGE_URLS,
+  ...LAUNDRY_PACKAGE_IMAGE_URLS,
+  ...PLUMBING_PACKAGE_IMAGE_URLS,
 };
 
 const BOOK_NOW_SERVICE_IMAGE_URLS: Record<string, string> = {
@@ -358,6 +555,15 @@ const BOOK_NOW_SERVICE_IMAGE_URLS: Record<string, string> = {
   'painting-exterior': uploadedCategoryImage('Exterior Wall Painting.png'),
   'painting-rental': uploadedCategoryImage('1 BHK Rental Painting.png'),
   'painting-waterproofing': uploadedCategoryImage('Wall Waterproofing.png'),
+  'car-wash-basic': uploadedCategoryImage('car-wash-basic.webp'),
+  'car-wash-premium': uploadedCategoryImage('car-wash-premium.webp'),
+  'car-wash-interior-deep-cleaning': uploadedCategoryImage('car-wash-interior-deep-cleaning.webp'),
+  'car-wash-sanitization': uploadedCategoryImage('car-wash-sanitization.webp'),
+  'laundry-wash-by-weight': uploadedCategoryImage('laundry-clothes-washing.webp'),
+  'laundry-ironing-services': uploadedCategoryImage('laundry-ironing-steam-ironing.webp'),
+  'laundry-traditional-wear': uploadedCategoryImage('laundry-traditional-wear-cleaning.webp'),
+  'laundry-bedding-and-blankets': uploadedCategoryImage('laundry-bedsheet-cleaning.webp'),
+  'laundry-shoe-cleaning': uploadedCategoryImage('laundry-shoe-cleaning.webp'),
   'carpenter-cupboard-drawer': uploadedCategoryImage('Cupboard Hinge Repair  Replacement.png'),
   'carpenter-kitchen-fittings': uploadedCategoryImage('Cabinet Hinge Repair  Replacement.png'),
   'carpenter-shelves-wall-decor': uploadedCategoryImage('Wooden Shelf Installation.png'),
@@ -367,6 +573,26 @@ const BOOK_NOW_SERVICE_IMAGE_URLS: Record<string, string> = {
   'carpenter-furniture-assembly': uploadedCategoryImage('Single Bed Assembly.png'),
   'carpenter-wardrobe': uploadedCategoryImage('Wardrobe Assembly – Single Door.png'),
   'carpenter-clothes-hangers': uploadedCategoryImage('Ceiling-Mounted Clothes Hanger – Fixed.png'),
+  // Plumbing service tiles — representative package image per sub-category
+  'plumbing-tap-mixer':
+    PLUMBING_PACKAGE_IMAGE_URLS['plumbing-tap-mixer::regular-tap-repair'][0],
+  'plumbing-toilet':
+    PLUMBING_PACKAGE_IMAGE_URLS['plumbing-toilet::western-toilet-repair-floor-mounted'][0],
+  'plumbing-basin-sink':
+    PLUMBING_PACKAGE_IMAGE_URLS['plumbing-basin-sink::wash-basin-installation'][0],
+  'plumbing-bath-shower':
+    PLUMBING_PACKAGE_IMAGE_URLS['plumbing-bath-shower::handheld-shower-installation'][0],
+  'plumbing-drainage-pipe':
+    PLUMBING_PACKAGE_IMAGE_URLS[
+      'plumbing-drainage-pipe::bathroom-balcony-drain-blockage-removal'
+    ][0],
+  'plumbing-water-pipe-connection':
+    PLUMBING_PACKAGE_IMAGE_URLS['plumbing::connection-hose-installation'][0],
+  'plumbing-water-tank':
+    PLUMBING_PACKAGE_IMAGE_URLS['plumbing::overhead-tank-installation-up-to-500l'][0],
+  'plumbing-grouting':
+    PLUMBING_PACKAGE_IMAGE_URLS['plumbing-grouting::bathroom-grouting'][0],
+  plumbing: PLUMBING_PACKAGE_IMAGE_URLS['plumbing::soap-holder-installation'][0],
 };
 
 function resolveBookNowServiceImageUrl(categorySlug: string, fallbackImageUrl: string): string {
@@ -567,6 +793,139 @@ const PAINTING_SERVICE_SEEDS: Array<{
       { name: 'Wall Waterproofing', offerPrice: 4999, originalPrice: 5999, durationLabel: '1 Day', durationMinutes: 480 },
       { name: 'Terrace Waterproofing', offerPrice: 5499, originalPrice: 6999, durationLabel: '2 Days', durationMinutes: 960 },
       { name: 'Bathroom / Kitchen Grouting', offerPrice: 2399, originalPrice: 2999, durationLabel: '4 Hours', durationMinutes: 240 },
+    ],
+  },
+];
+
+const CAR_WASH_SERVICE_SEEDS: Array<{
+  serviceId: string;
+  label: string;
+  categorySlug: string;
+  imageUrl: string;
+  serviceSortOrder: number;
+  packages: CsvItem[];
+}> = [
+  {
+    serviceId: 'basic-car-wash',
+    label: 'Basic Car Wash',
+    categorySlug: 'car-wash-basic',
+    imageUrl: resolveBookNowServiceImageUrl('car-wash-basic', CAR_WASH_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 1,
+    packages: [
+      { name: 'Hatchback', offerPrice: 499, originalPrice: 699, durationLabel: '45 mins', durationMinutes: 45 },
+      { name: 'Sedan', offerPrice: 549, originalPrice: 749, durationLabel: '45 mins', durationMinutes: 45 },
+      { name: 'Premium Sedan', offerPrice: 599, originalPrice: 799, durationLabel: '60 mins', durationMinutes: 60 },
+      { name: 'Compact SUV', offerPrice: 649, originalPrice: 849, durationLabel: '60 mins', durationMinutes: 60 },
+      { name: 'SUV / MUV', offerPrice: 699, originalPrice: 899, durationLabel: '60 mins', durationMinutes: 60 },
+      { name: 'Luxury / Premium Car', offerPrice: 799, originalPrice: 999, durationLabel: '75 mins', durationMinutes: 75 },
+    ],
+  },
+  {
+    serviceId: 'premium-car-wash',
+    label: 'Premium Car Wash',
+    categorySlug: 'car-wash-premium',
+    imageUrl: resolveBookNowServiceImageUrl('car-wash-premium', CAR_WASH_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 2,
+    packages: [
+      { name: 'Hatchback', offerPrice: 799, originalPrice: 999, durationLabel: '75 mins', durationMinutes: 75 },
+      { name: 'Sedan', offerPrice: 849, originalPrice: 1099, durationLabel: '75 mins', durationMinutes: 75 },
+      { name: 'Premium Sedan', offerPrice: 899, originalPrice: 1149, durationLabel: '90 mins', durationMinutes: 90 },
+      { name: 'Compact SUV', offerPrice: 949, originalPrice: 1199, durationLabel: '90 mins', durationMinutes: 90 },
+      { name: 'SUV / MUV', offerPrice: 999, originalPrice: 1249, durationLabel: '90 mins', durationMinutes: 90 },
+      { name: 'Luxury / Premium Car', offerPrice: 1099, originalPrice: 1399, durationLabel: '105 mins', durationMinutes: 105 },
+    ],
+  },
+  {
+    serviceId: 'car-interior-deep-cleaning',
+    label: 'Car Interior Deep Cleaning',
+    categorySlug: 'car-wash-interior-deep-cleaning',
+    imageUrl: resolveBookNowServiceImageUrl('car-wash-interior-deep-cleaning', CAR_WASH_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 3,
+    packages: [
+      { name: 'Hatchback', offerPrice: 1199, originalPrice: 1499, durationLabel: '90 mins', durationMinutes: 90 },
+      { name: 'Sedan', offerPrice: 1299, originalPrice: 1599, durationLabel: '90 mins', durationMinutes: 90 },
+      { name: 'Premium Sedan', offerPrice: 1399, originalPrice: 1699, durationLabel: '105 mins', durationMinutes: 105 },
+      { name: 'Compact SUV', offerPrice: 1499, originalPrice: 1799, durationLabel: '105 mins', durationMinutes: 105 },
+      { name: 'SUV / MUV', offerPrice: 1599, originalPrice: 1899, durationLabel: '120 mins', durationMinutes: 120 },
+      { name: 'Luxury / Premium Car', offerPrice: 1799, originalPrice: 2199, durationLabel: '120 mins', durationMinutes: 120 },
+    ],
+  },
+  {
+    serviceId: 'car-sanitization',
+    label: 'Car Sanitization',
+    categorySlug: 'car-wash-sanitization',
+    imageUrl: resolveBookNowServiceImageUrl('car-wash-sanitization', CAR_WASH_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 4,
+    packages: [
+      { name: 'Hatchback', offerPrice: 799, originalPrice: 999, durationLabel: '60 mins', durationMinutes: 60 },
+      { name: 'Sedan', offerPrice: 849, originalPrice: 1049, durationLabel: '60 mins', durationMinutes: 60 },
+      { name: 'Premium Sedan', offerPrice: 899, originalPrice: 1099, durationLabel: '75 mins', durationMinutes: 75 },
+      { name: 'Compact SUV', offerPrice: 949, originalPrice: 1149, durationLabel: '75 mins', durationMinutes: 75 },
+      { name: 'SUV / MUV', offerPrice: 999, originalPrice: 1199, durationLabel: '75 mins', durationMinutes: 75 },
+      { name: 'Luxury / Premium Car', offerPrice: 1099, originalPrice: 1299, durationLabel: '90 mins', durationMinutes: 90 },
+    ],
+  },
+];
+
+const LAUNDRY_SERVICE_SEEDS: Array<{
+  serviceId: string;
+  label: string;
+  categorySlug: string;
+  imageUrl: string;
+  serviceSortOrder: number;
+  packages: CsvItem[];
+}> = [
+  {
+    serviceId: 'wash-by-weight',
+    label: 'Wash by Weight',
+    categorySlug: 'laundry-wash-by-weight',
+    imageUrl: resolveBookNowServiceImageUrl('laundry-wash-by-weight', LAUNDRY_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 1,
+    packages: [
+      { name: 'Clothes Washing - per kg', offerPrice: 65, originalPrice: 85, durationLabel: '1.5 hours', durationMinutes: 90 },
+      { name: 'Wash & Iron - per kg', offerPrice: 90, originalPrice: 120, durationLabel: '2.5 hours', durationMinutes: 150 },
+    ],
+  },
+  {
+    serviceId: 'ironing-services',
+    label: 'Ironing Services',
+    categorySlug: 'laundry-ironing-services',
+    imageUrl: resolveBookNowServiceImageUrl('laundry-ironing-services', LAUNDRY_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 2,
+    packages: [
+      { name: 'Ironing / Steam Ironing - 8 pieces', offerPrice: 99, originalPrice: 149, durationLabel: '1 hour', durationMinutes: 60 },
+    ],
+  },
+  {
+    serviceId: 'traditional-wear',
+    label: 'Traditional Wear',
+    categorySlug: 'laundry-traditional-wear',
+    imageUrl: resolveBookNowServiceImageUrl('laundry-traditional-wear', LAUNDRY_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 3,
+    packages: [
+      { name: 'Saree & Traditional Wear Cleaning - per piece', offerPrice: 99, originalPrice: 149, durationLabel: '1 hour', durationMinutes: 60 },
+    ],
+  },
+  {
+    serviceId: 'bedding-and-blankets',
+    label: 'Bedding & Blankets',
+    categorySlug: 'laundry-bedding-and-blankets',
+    imageUrl: resolveBookNowServiceImageUrl('laundry-bedding-and-blankets', LAUNDRY_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 4,
+    packages: [
+      { name: 'Bedsheet Cleaning - per piece', offerPrice: 99, originalPrice: 199, durationLabel: '1.5-2 hours', durationMinutes: 105 },
+      { name: 'Single Blanket Cleaning - per piece', offerPrice: 179, originalPrice: 249, durationLabel: '2-2.5 hours', durationMinutes: 135 },
+      { name: 'Double Blanket Cleaning - per piece', offerPrice: 249, originalPrice: 349, durationLabel: '2.5-3 hours', durationMinutes: 165 },
+    ],
+  },
+  {
+    serviceId: 'shoe-cleaning',
+    label: 'Shoe Cleaning',
+    categorySlug: 'laundry-shoe-cleaning',
+    imageUrl: resolveBookNowServiceImageUrl('laundry-shoe-cleaning', LAUNDRY_PLACEHOLDER_IMAGE),
+    serviceSortOrder: 5,
+    packages: [
+      { name: 'Shoe Cleaning - per pair', offerPrice: 99, originalPrice: 149, durationLabel: '30-45 minutes', durationMinutes: 38 },
     ],
   },
 ];
@@ -1143,6 +1502,40 @@ function buildPaintingServices(): BookNowCsvHubSectionSeed {
   };
 }
 
+function buildCarWashServices(): BookNowCsvHubSectionSeed {
+  return {
+    slug: 'car-wash',
+    title: 'Car Wash',
+    iconKey: 'CarFront',
+    sortOrder: 90,
+    services: CAR_WASH_SERVICE_SEEDS.map((service) => ({
+      serviceId: service.serviceId,
+      label: service.label,
+      categorySlug: service.categorySlug,
+      imageUrl: service.imageUrl,
+      serviceSortOrder: service.serviceSortOrder,
+      packages: service.packages,
+    })),
+  };
+}
+
+function buildLaundryServices(): BookNowCsvHubSectionSeed {
+  return {
+    slug: 'laundry',
+    title: 'Laundry',
+    iconKey: 'Shirt',
+    sortOrder: 95,
+    services: LAUNDRY_SERVICE_SEEDS.map((service) => ({
+      serviceId: service.serviceId,
+      label: service.label,
+      categorySlug: service.categorySlug,
+      imageUrl: service.imageUrl,
+      serviceSortOrder: service.serviceSortOrder,
+      packages: service.packages,
+    })),
+  };
+}
+
 export function buildBookNowCsvSeed(): BookNowCsvSeed {
   const rawSections = loadRawSections();
   const sectionMap = new Map(rawSections.map((section) => [section.title, section] as const));
@@ -1200,6 +1593,8 @@ export function buildBookNowCsvSeed(): BookNowCsvSeed {
     buildPlumbingServices(sectionMap.get('PLUMBING') || { title: 'PLUMBING', items: [] }),
     buildCarpentryServices(sectionMap),
     buildPaintingServices(),
+    buildCarWashServices(),
+    buildLaundryServices(),
     buildBeautyServices(),
   ].filter((section) => section.services.length > 0);
 
@@ -1218,6 +1613,10 @@ export function buildBookNowCsvSeed(): BookNowCsvSeed {
         taskCategory:
           hubSection.slug === 'home-cleaning' || hubSection.slug === 'pest-control'
             ? 'cleaning'
+            : hubSection.slug === 'car-wash'
+              ? 'cleaning'
+            : hubSection.slug === 'laundry'
+              ? 'cleaning'
             : hubSection.slug === 'painting'
               ? 'other'
             : hubSection.slug === 'beauty-services'

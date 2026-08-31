@@ -18,6 +18,24 @@ export interface IBookingItem extends Document {
     slug: string;
     categorySlug?: string;
   };
+  serviceFlowType?: 'standard' | 'consultation_project';
+  bookingKind?: 'standard' | 'consultation' | 'project';
+  serviceType?: string;
+  consultationMeta?: {
+    samePartnerPreferred?: boolean;
+    consultationFee?: number;
+    customerRequirements?: string;
+    sourceTaskId?: string;
+    sourceQuotationId?: string;
+    projectTitle?: string;
+    estimateSnapshot?: {
+      amount?: number;
+      currency?: string;
+      durationLabel?: string;
+      notes?: string;
+      selections?: Record<string, unknown>;
+    };
+  };
   scheduledDate?: Date;
   scheduledTimeStart?: string;
   scheduledTimeEnd?: string;
@@ -49,6 +67,38 @@ const BookingItemSchema = new Schema<IBookingItem>(
       name: String,
       slug: String,
       categorySlug: String,
+    },
+    serviceFlowType: {
+      type: String,
+      enum: ['standard', 'consultation_project'],
+      default: 'standard',
+      index: true,
+    },
+    bookingKind: {
+      type: String,
+      enum: ['standard', 'consultation', 'project'],
+      default: 'standard',
+      index: true,
+    },
+    serviceType: {
+      type: String,
+      trim: true,
+      index: true,
+    },
+    consultationMeta: {
+      samePartnerPreferred: Boolean,
+      consultationFee: Number,
+      customerRequirements: String,
+      sourceTaskId: String,
+      sourceQuotationId: String,
+      projectTitle: String,
+      estimateSnapshot: {
+        amount: Number,
+        currency: String,
+        durationLabel: String,
+        notes: String,
+        selections: { type: Schema.Types.Mixed, default: undefined },
+      },
     },
     scheduledDate: Date,
     scheduledTimeStart: String,

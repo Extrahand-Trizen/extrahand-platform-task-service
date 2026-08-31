@@ -3,6 +3,14 @@ import {
   HOURLY_HELPER_CATEGORY,
   HOURLY_HELPER_CATEGORY_SLUG,
 } from '../constants/hourlyBooking';
+import {
+  PERSONAL_ASSISTANT_CATEGORY,
+  PERSONAL_ASSISTANT_CATEGORY_SLUG,
+  PERSONAL_ASSISTANT_DURATION_SKUS,
+} from '../constants/personalAssistantBooking';
+import { personalAssistantCatalogIsActive } from '../utils/personalAssistantCatalogVisibility';
+import { BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG } from '../constants/bookNowHubCatalog';
+import BookNowCategoryContent from '../models/BookNowCategoryContent';
 import fs from 'fs';
 import path from 'path';
 import mongoose from 'mongoose';
@@ -134,6 +142,83 @@ export class BookNowCatalogBootstrap {
     logger.info('Hourly Helper catalog seed complete', {
       categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
       skus,
+    });
+
+    return { categoryId: String(category._id), skus };
+  }
+
+  /** Seed Personal Assistant category + duration SKUs. Idempotent. */
+  static async seedPersonalAssistantCatalog(): Promise<{ categoryId: string; skus: number }> {
+    const isActive = personalAssistantCatalogIsActive();
+    const heroImageUrl =
+      BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG[PERSONAL_ASSISTANT_CATEGORY_SLUG] || '';
+
+    const category = await ServiceCategory.findOneAndUpdate(
+      { slug: PERSONAL_ASSISTANT_CATEGORY.slug },
+      {
+        slug: PERSONAL_ASSISTANT_CATEGORY.slug,
+        name: PERSONAL_ASSISTANT_CATEGORY.name,
+        description: PERSONAL_ASSISTANT_CATEGORY.description,
+        iconUrl: heroImageUrl,
+        sortOrder: PERSONAL_ASSISTANT_CATEGORY.sortOrder,
+        isActive,
+      },
+      { upsert: true, new: true },
+    );
+
+    await BookNowCategoryContent.findOneAndUpdate(
+      { categorySlug: PERSONAL_ASSISTANT_CATEGORY.slug },
+      {
+        categorySlug: PERSONAL_ASSISTANT_CATEGORY.slug,
+        title: PERSONAL_ASSISTANT_CATEGORY.name,
+        subtitle: 'Personal Assistance',
+        description: PERSONAL_ASSISTANT_CATEGORY.description,
+        heroImageUrl,
+        faqCategoryKeys: [],
+        sortOrder: PERSONAL_ASSISTANT_CATEGORY.sortOrder,
+        isActive,
+      },
+      { upsert: true, new: true },
+    );
+
+    let skus = 0;
+    for (const def of PERSONAL_ASSISTANT_DURATION_SKUS) {
+      const sku = await ServiceSku.findOneAndUpdate(
+        { categoryId: category._id, slug: def.slug },
+        {
+          categoryId: category._id,
+          slug: def.slug,
+          name: def.name,
+          description: def.description,
+          basePrice: def.basePrice,
+          pricingUnit: 'hourly',
+          durationMinutes: def.durationMinutes,
+          taskCategory: 'other',
+          isActive,
+        },
+        { upsert: true, new: true },
+      );
+      skus += 1;
+
+      await ServiceVariant.findOneAndUpdate(
+        { skuId: sku._id, slug: 'default' },
+        {
+          skuId: sku._id,
+          slug: 'default',
+          name: 'Standard',
+          priceDelta: 0,
+          durationDeltaMinutes: 0,
+          isDefault: true,
+          isActive,
+        },
+        { upsert: true, new: true },
+      );
+    }
+
+    logger.info('Personal Assistant catalog seed complete', {
+      categorySlug: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+      skus,
+      isActive,
     });
 
     return { categoryId: String(category._id), skus };

@@ -28,6 +28,11 @@ import type {
 } from '../schemas/catalogContent';
 import type { IServiceSku } from '../models/ServiceSku';
 import type { PatchOperationalSkuOfferInput } from '../schemas/catalogContent';
+import { resolveBookNowServiceFlowConfig } from '../utils/bookNowServiceFlowConfig';
+import {
+  canAccessPersonalAssistantCatalog,
+  isPersonalAssistantCategorySlug,
+} from '../utils/personalAssistantCatalogVisibility';
 
 function assertObjectId(id: string, label = 'id'): string {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -93,6 +98,13 @@ type BookNowPackageListItem = {
     sortOrder: number;
   } | null;
   primaryImageUrl: string;
+  serviceFlow: {
+    serviceFlowType: 'standard' | 'consultation_project';
+    bookingKind: 'standard' | 'consultation';
+    serviceType?: string;
+    consultationEnabled: boolean;
+    gstExempt: boolean;
+  };
 };
 
 function normalizeHubSectionServices(services: UpsertHubSectionInput['services'] | PatchHubSectionInput['services']) {
@@ -194,22 +206,78 @@ export type BookNowAreaCheckResult = {
   resolvedCity: string | null;
 };
 
+function assertPersonalAssistantAccessible(
+  categorySlug: string,
+  customerUid?: string | null,
+): void {
+  if (!isPersonalAssistantCategorySlug(categorySlug)) return;
+  if (!canAccessPersonalAssistantCatalog(customerUid)) {
+    throw new NotFoundError('Book Now service not found');
+  }
+}
+
+function filterPersonalAssistantCategories<T extends { slug?: string }>(
+  categories: T[],
+  customerUid?: string | null,
+): T[] {
+  if (canAccessPersonalAssistantCatalog(customerUid)) return categories;
+  return categories.filter((category) => !isPersonalAssistantCategorySlug(String(category.slug || '')));
+}
+
+function filterPersonalAssistantFromHubResponse(
+  sections: Array<{
+    id: string;
+    slug: string;
+    title: string;
+    iconKey: string;
+    sortOrder: number;
+    services: Array<{
+      id: string;
+      label: string;
+      categorySlug: string;
+      categoryName: string;
+      sectionId: string;
+      imageUrl: string;
+      previewPackages: BookNowPackageListItem[];
+      totalPackages: number;
+    }>;
+  }>,
+  customerUid?: string | null,
+) {
+  if (canAccessPersonalAssistantCatalog(customerUid)) return sections;
+
+  return sections
+    .map((section) => {
+      if (isPersonalAssistantCategorySlug(section.id) || isPersonalAssistantCategorySlug(section.slug)) {
+        return null;
+      }
+      const services = section.services.filter(
+        (service) => !isPersonalAssistantCategorySlug(service.categorySlug),
+      );
+      if (services.length === 0) return null;
+      return { ...section, services };
+    })
+    .filter((section): section is NonNullable<typeof section> => section !== null);
+}
+
 export class CatalogService {
-  static async listCategories() {
+  static async listCategories(customerUid?: string | null) {
     const categories = await ServiceCategory.find({ isActive: true })
       .sort({ sortOrder: 1, name: 1 })
       .lean();
-    return categories;
+    return filterPersonalAssistantCategories(categories, customerUid);
   }
 
-  static async getCategoryBySlug(slug: string) {
+  static async getCategoryBySlug(slug: string, customerUid?: string | null) {
+    assertPersonalAssistantAccessible(slug, customerUid);
     const normalized = resolveCategoryAlias(slug);
     const category = await ServiceCategory.findOne({ slug: normalized, isActive: true }).lean();
     if (!category) throw new NotFoundError('Category not found');
     return category;
   }
 
-  static async getCategoryContent(categorySlug: string) {
+  static async getCategoryContent(categorySlug: string, customerUid?: string | null) {
+    assertPersonalAssistantAccessible(categorySlug, customerUid);
     const content = await BookNowCategoryContent.findOne({
       categorySlug: normalizeCatalogLookup(resolveCategoryAlias(categorySlug)),
       isActive: true,
@@ -345,8 +413,8 @@ export class CatalogService {
     return content;
   }
 
-  static async listSkusByCategorySlug(categorySlug: string) {
-    const category = await this.getCategoryBySlug(categorySlug);
+  static async listSkusByCategorySlug(categorySlug: string, customerUid?: string | null) {
+    const category = await this.getCategoryBySlug(categorySlug, customerUid);
     const [skus, content] = await Promise.all([
       ServiceSku.find({ categoryId: category._id, isActive: true }).sort({ name: 1 }).lean(),
       BookNowCategoryContent.findOne({
@@ -390,6 +458,10 @@ export class CatalogService {
         const shortDescription = String(content?.shortDescription || '').trim();
         const fallbackDescription = String(sku.description || '').trim();
         const durationLabel = toDurationLabel(Number(sku.durationMinutes || 0));
+        const serviceFlow = resolveBookNowServiceFlowConfig({
+          categorySlug: category.slug,
+          skuSlug: String(sku.slug || ''),
+        });
 
         return {
           _id: sku._id,
@@ -413,6 +485,7 @@ export class CatalogService {
               }
             : null,
           primaryImageUrl: Array.isArray(content?.imageUrls) ? String(content?.imageUrls?.[0] || '').trim() : '',
+          serviceFlow,
         };
       })
       .filter((item) => item.name.trim().length > 0);
@@ -431,7 +504,7 @@ export class CatalogService {
     return Array.from(dedupedByName.values()).sort(comparePackageListItems);
   }
 
-  static async getBookNowHubCatalog(previewLimit = 5) {
+  static async getBookNowHubCatalog(previewLimit = 5, customerUid?: string | null) {
     const limit = Math.max(1, Math.min(Number(previewLimit || 5), 8));
     const [categories, skuContents, categoryContents] = await Promise.all([
       ServiceCategory.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).lean(),
@@ -439,9 +512,11 @@ export class CatalogService {
       BookNowCategoryContent.find({}).sort({ sortOrder: 1, title: 1 }).lean(),
     ]);
 
-    if (categories.length === 0) return [];
+    const visibleCategories = filterPersonalAssistantCategories(categories, customerUid);
+    if (visibleCategories.length === 0) return [];
 
-    const categoryIds = categories.map((category) => category._id);
+    const categoriesForHub = visibleCategories;
+    const categoryIds = categoriesForHub.map((category) => category._id);
     const skus = await ServiceSku.find({ categoryId: { $in: categoryIds }, isActive: true }).lean();
     const contentBySkuKey = new Map<string, (typeof skuContents)[number]>();
     skuContents.forEach((content) => {
@@ -467,11 +542,11 @@ export class CatalogService {
     );
 
     const categoryBySlug = new Map(
-      categories.map((category) => [normalizeCatalogLookup(category.slug), category] as const),
+      categoriesForHub.map((category) => [normalizeCatalogLookup(category.slug), category] as const),
     );
     const packageItemsByCategorySlug = new Map<string, BookNowPackageListItem[]>();
 
-    categories.forEach((category) => {
+    categoriesForHub.forEach((category) => {
       const normalizedCategorySlug = normalizeCatalogLookup(category.slug);
       const categorySkus = skus.filter((sku) => String(sku.categoryId) === String(category._id));
       const contentBySkuSlug = new Map<string, (typeof skuContents)[number]>();
@@ -614,11 +689,16 @@ export class CatalogService {
         };
       });
 
-    return [...groupedSections, ...fallbackSections].sort((a, b) => a.sortOrder - b.sortOrder);
+    const hubResponse = [...groupedSections, ...fallbackSections].sort((a, b) => a.sortOrder - b.sortOrder);
+
+    return filterPersonalAssistantFromHubResponse(
+      hubResponse as Parameters<typeof filterPersonalAssistantFromHubResponse>[0],
+      customerUid,
+    );
   }
 
-  static async getBookNowCategoryPackages(categorySlug: string) {
-    const category = await this.getCategoryBySlug(categorySlug);
+  static async getBookNowCategoryPackages(categorySlug: string, customerUid?: string | null) {
+    const category = await this.getCategoryBySlug(categorySlug, customerUid);
     const normalizedCategorySlug = normalizeCatalogLookup(category.slug);
     const [skus, skuContents, categoryContent] = await Promise.all([
       ServiceSku.find({ categoryId: category._id, isActive: true }).lean(),
@@ -667,7 +747,7 @@ export class CatalogService {
     };
   }
 
-  static async getSkuDetail(skuSlug: string, categorySlug?: string) {
+  static async getSkuDetail(skuSlug: string, categorySlug?: string, customerUid?: string | null) {
     const skuQuery: Record<string, unknown> = { slug: skuSlug, isActive: true };
     let categoryFilterApplied = false;
 
@@ -701,8 +781,12 @@ export class CatalogService {
       ServiceVariant.find({ skuId: sku._id, isActive: true }).sort({ isDefault: -1, name: 1 }).lean(),
       ServiceAddon.find({ skuId: sku._id, isActive: true }).sort({ name: 1 }).lean(),
       ServiceCategory.findById(sku.categoryId).lean(),
-      this.getSkuContent(sku.slug, categorySlug).catch(() => null),
+      this.getSkuContent(sku.slug, categorySlug, customerUid).catch(() => null),
     ]);
+
+    if (category?.slug) {
+      assertPersonalAssistantAccessible(category.slug, customerUid);
+    }
 
     return { sku: enrichSkuPricing(sku), variants, addons, category, content };
   }
@@ -764,7 +848,10 @@ export class CatalogService {
     });
   }
 
-  static async getSkuContent(skuSlug: string, categorySlug?: string) {
+  static async getSkuContent(skuSlug: string, categorySlug?: string, customerUid?: string | null) {
+    if (categorySlug) {
+      assertPersonalAssistantAccessible(categorySlug, customerUid);
+    }
     const query: Record<string, unknown> = {
       skuSlug: normalizeCatalogLookup(skuSlug),
       isActive: true,
@@ -778,6 +865,8 @@ export class CatalogService {
     if (!content) {
       throw new NotFoundError('Book Now service content not found');
     }
+
+    assertPersonalAssistantAccessible(content.categorySlug, customerUid);
 
     return content;
   }
