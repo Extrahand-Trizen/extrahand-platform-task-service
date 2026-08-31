@@ -35,7 +35,8 @@ export class MainAdminNotificationClient {
       return;
     }
 
-    const url = `${config.MAIN_ADMIN_SERVICE_URL}/api/v1/notifications/events`;
+    const baseUrl = config.MAIN_ADMIN_SERVICE_URL.replace(/\/+$/, '');
+    const url = `${baseUrl}/api/v1/notifications/events`;
 
     logger.info(`${LOG_PREFIX} Sending task_posted event to main-admin-server`, {
       service: 'extrahand-platform-task-service',

@@ -64,8 +64,24 @@ export async function runPostCreateNotifications(
       const Profile = mongoose.connection.collection("profiles");
       const requesterId = task.requesterId instanceof mongoose.Types.ObjectId
         ? task.requesterId
-        : new mongoose.Types.ObjectId(task.requesterId);
-      requesterProfile = await Profile.findOne({ _id: requesterId });
+        : mongoose.Types.ObjectId.isValid(String(task.requesterId))
+          ? new mongoose.Types.ObjectId(String(task.requesterId))
+          : null;
+      const profileQueries = [
+        ...(requesterId ? [{ _id: requesterId }] : []),
+        ...(ctx.uid ? [{ uid: ctx.uid }] : []),
+      ];
+      requesterProfile = profileQueries.length > 0
+        ? await Profile.findOne({ $or: profileQueries })
+        : null;
+
+      logger.info("[TaskService.postCreateNotifications] Resolved requester profile", {
+        taskId: task._id,
+        requesterId: task.requesterId?.toString?.() ?? task.requesterId,
+        requesterUid: ctx.uid,
+        profileName: requesterProfile?.name || requesterProfile?.fullName || 'NOT FOUND',
+        profileEmail: requesterProfile?.email || 'NOT FOUND',
+      });
     } catch (profileLookupError) {
       logger.warn("[TaskService.postCreateNotifications] Requester profile lookup failed", {
         taskId: task._id,
