@@ -21,6 +21,7 @@ import { CascadeDeleteController } from '../controllers/CascadeDeleteController'
 import { BookingController } from '../controllers/BookingController';
 import { RecurringVisitController } from '../controllers/RecurringVisitController';
 import { CatalogController } from '../controllers/CatalogController';
+import { QcOrderAutoAssignController } from '../controllers/QcOrderAutoAssignController';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
 import { gatewayAuthMiddleware } from '../middleware/gatewayAuth';
 
@@ -53,6 +54,13 @@ router.post(
   '/recurring/internal/visit-payment-captured',
   serviceAuthMiddleware,
   asyncHandler(RecurringVisitController.visitPaymentCaptured)
+);
+
+// Quick Commerce: auto-assign partner to order after payment (service-to-service)
+router.post(
+  '/qc/internal/auto-assign',
+  serviceAuthMiddleware,
+  asyncHandler(QcOrderAutoAssignController.autoAssign)
 );
 
 // Book Now area check — service auth only (customer uid via ?firebaseUid= from gateway)

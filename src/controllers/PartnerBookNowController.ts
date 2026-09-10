@@ -9,6 +9,8 @@ import { CatalogService } from '../services/CatalogService';
 import { resolvePartnerMatchConditions, normalizeCategory } from '../services/partnerVisibility';
 import { CancellationPassService } from '../services/CancellationPassService';
 import { serializeBookNowLeadExecutionFields } from '../utils/bookNowLeadSerialization';
+import { normalizeQcOrderToTask, findQcOrdersForPartner } from '../utils/qcOrderTaskAdapter';
+import { QcDatabase } from '../config/qcDatabase';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -282,13 +284,16 @@ export class PartnerBookNowController {
         ? profileId
         : new mongoose.Types.ObjectId(profileId as string);
 
-    const tasks = await Task.find({
-      bookingSource: 'book_now',
-      $or: [{ partnerId: partnerOid }, { assigneeId: partnerOid }],
-      status: { $in: ['assigned', 'started', 'in_progress', 'review', 'completed', 'cancelled'] },
-    })
-      .sort({ partnerAcceptedAt: -1 })
-      .lean() as Record<string, any>[];
+    const [tasks, qcOrders] = await Promise.all([
+      Task.find({
+        bookingSource: 'book_now',
+        $or: [{ partnerId: partnerOid }, { assigneeId: partnerOid }],
+        status: { $in: ['assigned', 'started', 'in_progress', 'review', 'completed', 'cancelled'] },
+      })
+        .sort({ partnerAcceptedAt: -1 })
+        .lean() as Promise<Record<string, any>[]>,
+      findQcOrdersForPartner(partnerOid, uid || ''),
+    ]);
 
     const enriched = await Promise.all(
       tasks.map(async (task) => {
@@ -343,7 +348,54 @@ export class PartnerBookNowController {
       }),
     );
 
-    ApiResponse.success(res, enriched, 'My leads retrieved');
+    const qcLeads = qcOrders.map((order) => {
+      const task = normalizeQcOrderToTask(order);
+      const itemsList = Array.isArray(order.items)
+        ? order.items.map((i: any) => `${i.quantity || 1}x ${i.name}`)
+        : [];
+
+      return {
+        id: String(task._id),
+        title: task.title,
+        category: task.category,
+        categoryLabel: task.categoryLabel,
+        status: task.status,
+        budget: task.budget,
+        location: task.location,
+        scheduledDate: task.scheduledDate,
+        scheduledTimeStart: task.scheduledTimeStart,
+        scheduledTimeEnd: task.scheduledTimeEnd,
+        createdAt: task.createdAt,
+        partnerAcceptedAt: task.partnerAcceptedAt,
+        confirmed: Boolean(task.confirmed),
+        confirmedAt: task.confirmedAt,
+        confirmed_at: task.confirmed_at,
+        requesterName: order.address?.name || 'Customer',
+        bookingOrderId: task.bookingOrderId,
+        bookingItemId: task.bookingItemId,
+        serviceIncludes: itemsList,
+        serviceNotIncludes: [],
+        isQCommerce: true,
+        items: task.items || order.items || [],
+        shopName: task.shopName || order.shopName,
+        shopAddress: task.shopAddress || order.shopAddress,
+        shopCoordinates: task.shopCoordinates || order.shopCoordinates,
+        customerName: task.customerName || order.address?.name || 'Customer',
+        customerAddress: task.customerAddress || task.location?.address,
+        customerCoordinates: task.customerCoordinates || task.location?.coordinates,
+        orderNumber: task.orderNumber || order.orderNumber,
+        deliveryFee: task.deliveryFee || task.budget?.amount || 45,
+        ...serializeBookNowLeadExecutionFields(task),
+      };
+    });
+
+    const combined = [...enriched, ...qcLeads].sort((a, b) => {
+      const timeA = new Date(a.partnerAcceptedAt || a.createdAt || 0).getTime();
+      const timeB = new Date(b.partnerAcceptedAt || b.createdAt || 0).getTime();
+      return timeB - timeA;
+    });
+
+    ApiResponse.success(res, combined, 'My leads retrieved');
   }
 
   /**
@@ -398,7 +450,66 @@ export class PartnerBookNowController {
       }).lean();
 
       if (!task) {
-        throw new BadRequestError('Task can only be cancelled before the journey is started');
+        // Fallback: check quick commerce customerorders collection
+        const CustomerOrders = mongoose.connection.collection('customerorders');
+        const qcOrder = await CustomerOrders.findOne({
+          _id: new mongoose.Types.ObjectId(String(id)),
+          $or: [
+            { partnerId: partnerOid },
+            { partnerUid: uid },
+            { assigneeId: partnerOid },
+            { assigneeUid: uid },
+            { 'assignedTo.userId': uid },
+            { 'assignedTo.profileId': String(partnerOid) },
+          ],
+          status: { $in: ['assigned', 'open', 'PAID'] },
+        });
+
+        if (!qcOrder) {
+          throw new BadRequestError('Task can only be cancelled before the journey is started');
+        }
+
+        try {
+          await CancellationPassService.consumePass(uid);
+        } catch (passError: any) {
+          logger.error('[PartnerBookNow] Cancellation pass tracking failed for QC order:', {
+            taskId: id,
+            error: passError?.message || passError,
+          });
+        }
+
+        await CustomerOrders.updateOne(
+          { _id: qcOrder._id },
+          {
+            $set: {
+              status: 'open',
+              partnerId: null,
+              partnerUid: null,
+              assigneeId: null,
+              assigneeUid: null,
+              assignedTo: null,
+              assignedHelperName: null,
+              assignedToName: null,
+              assigneeName: null,
+              assignmentStatus: 'pending',
+              confirmed: false,
+              partnerAcceptedAt: null,
+              assignedAt: null,
+              cancelledAt: new Date(),
+              cancelledById: partnerOid,
+              cancellationReason: cancellationReason || null,
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        console.log(`[PartnerBookNow] updateLeadStatus: QC task=${id} uid=${uid} CANCELLED → returned to pool`);
+        ApiResponse.success(
+          res,
+          { id: String(qcOrder._id), status: 'open', cancelled: true },
+          'Job cancelled and returned to the pool',
+        );
+        return;
       }
 
       // Track cancellation pass usage (best-effort, non-blocking).
@@ -464,18 +575,96 @@ export class PartnerBookNowController {
       updateFields.completionApprovedAt = new Date();
     }
 
-    const task = await Task.findOneAndUpdate(
-      {
-        _id: new mongoose.Types.ObjectId(String(id)),
-        bookingSource: 'book_now',
-        partnerId: partnerOid,           // Only the assigned partner can update
-        status: { $ne: 'completed' },    // Prevent double-completion
-      },
-      { $set: updateFields },
-      { new: true },
-    );
+    const task = mongoose.Types.ObjectId.isValid(String(id))
+      ? await Task.findOneAndUpdate(
+          {
+            _id: new mongoose.Types.ObjectId(String(id)),
+            bookingSource: 'book_now',
+            partnerId: partnerOid,           // Only the assigned partner can update
+            status: { $ne: 'completed' },    // Prevent double-completion
+          },
+          { $set: updateFields },
+          { new: true },
+        )
+      : null;
 
     if (!task) {
+      // Fallback: update quick commerce customerorders collection
+      const qcConnection = await QcDatabase.getQcConnection();
+      const CustomerOrders = qcConnection.collection('customerorders');
+      const qcIdQuery = mongoose.Types.ObjectId.isValid(String(id))
+        ? [{ _id: new mongoose.Types.ObjectId(String(id)) }, { orderNumber: String(id).replace(/^#/, '') }]
+        : [{ orderNumber: String(id).replace(/^#/, '') }];
+      const order = await CustomerOrders.findOne({
+        $and: [
+          { $or: qcIdQuery },
+          {
+            $or: [
+              { partnerId: partnerOid },
+              { partnerUid: uid },
+              { assigneeId: partnerOid },
+              { assigneeUid: uid },
+              { 'assignedTo.userId': uid },
+              { 'assignedTo.profileId': String(partnerOid) },
+            ],
+          },
+          { status: { $ne: 'completed' } },
+        ],
+      });
+
+      if (order) {
+        const now = new Date();
+        const qcUpdate: Record<string, any> = {
+          status: newStatus,
+          updatedAt: now,
+        };
+        if (newStatus === 'started') {
+          qcUpdate.startedAt = now;
+          qcUpdate.executionPhase = 'on_the_way';
+          qcUpdate.onTheWayAt = now;
+        } else if (newStatus === 'in_progress') {
+          qcUpdate.inProgressAt = now;
+          qcUpdate.executionPhase = 'arrived';
+          qcUpdate.arrivedAt = now;
+        } else if (newStatus === 'completed') {
+          qcUpdate.completedAt = now;
+          qcUpdate.completionStatus = 'approved';
+          qcUpdate.completionApprovedAt = now;
+          qcUpdate.fulfillmentStatus = 'HANDED_OVER';
+        }
+
+        await CustomerOrders.updateOne({ _id: order._id }, { $set: qcUpdate });
+
+        console.log(`[PartnerBookNow] updateLeadStatus: QC task=${id} uid=${uid} newStatus=${newStatus}`);
+
+        // Auto-payout on QC order completion
+        if (newStatus === 'completed') {
+          try {
+            const { PaymentClient } = await import('../services/PaymentClient');
+            const payoutAmount =
+              typeof order.budget === 'object' && order.budget?.amount
+                ? order.budget.amount
+                : typeof order.budget === 'object' && order.budget?.max
+                  ? order.budget.max
+                  : (order.deliveryFeePaise ? order.deliveryFeePaise / 100 : 50);
+            await PaymentClient.processTaskCompletionPayout({
+              taskId: String(order._id),
+              performerUid: uid,
+              amount: payoutAmount,
+              taskTitle: order.title || `Quick Commerce Order #${order.orderNumber || String(order._id).slice(-6)}`,
+            });
+          } catch (payoutError: any) {
+            logger.error('[PartnerBookNow] Auto-payout failed on QC completion:', {
+              taskId: id,
+              error: payoutError?.message || payoutError,
+            });
+          }
+        }
+
+        ApiResponse.success(res, { id: String(order._id), status: newStatus }, 'Status updated');
+        return;
+      }
+
       throw new NotFoundError('Task not found or you are not the assigned partner');
     }
 
@@ -542,6 +731,51 @@ export class PartnerBookNowController {
     });
 
     if (!task) {
+      // Fallback: check quick commerce customerorders collection
+      const CustomerOrders = mongoose.connection.collection('customerorders');
+      const order = await CustomerOrders.findOne({
+        _id: new mongoose.Types.ObjectId(id),
+        $or: [
+          { partnerId: partnerOid },
+          { partnerUid: uid },
+          { assigneeId: partnerOid },
+          { assigneeUid: uid },
+          { 'assignedTo.userId': uid },
+          { 'assignedTo.profileId': String(partnerOid) },
+        ],
+      });
+
+      if (order) {
+        const now = new Date();
+        await CustomerOrders.updateOne(
+          { _id: order._id },
+          {
+            $set: {
+              confirmed: true,
+              confirmedAt: now,
+              confirmed_at: now,
+              updatedAt: now,
+            },
+          },
+        );
+
+        logger.info(
+          `[PartnerBookNow] QC Order ${id} assignment confirmed by partner ${uid} at ${now.toISOString()}`,
+        );
+
+        ApiResponse.success(
+          res,
+          {
+            id: String(order._id),
+            confirmed: true,
+            confirmedAt: now,
+            confirmed_at: now,
+          },
+          'Assignment confirmed successfully',
+        );
+        return;
+      }
+
       throw new NotFoundError('Assigned Book Now lead not found or not assigned to partner');
     }
 

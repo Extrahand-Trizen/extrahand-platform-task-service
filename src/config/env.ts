@@ -14,6 +14,8 @@ const envSchema = z.object({
   // MongoDB
   MONGODB_URI: z.string().url('Invalid MongoDB URI').optional(),
   MONGODB_DB: z.string().default('extrahand'),
+  QC_MONGODB_URI: z.string().optional(),
+  QC_MONGODB_DB: z.string().default('extrahand'),
   
   // Firebase
   FIREBASE_PROJECT_ID: z.string().optional(),
@@ -251,6 +253,17 @@ export class Config {
 
   static get MONGODB_URI(): string {
     return this.env.MONGODB_URI || '';
+  }
+
+  static get QC_MONGODB_URI(): string {
+    return (
+      this.env.QC_MONGODB_URI ||
+      'mongodb+srv://user:user@cluster0.tfvlujk.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0'
+    );
+  }
+
+  static get QC_MONGODB_DB(): string {
+    return this.env.QC_MONGODB_DB || 'extrahand';
   }
 
   static get LOG_LEVEL(): string {

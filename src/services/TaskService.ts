@@ -43,6 +43,7 @@ import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse'
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
+import { normalizeQcOrderToTask, findQcOrderById, updateQcOrderById } from '../utils/qcOrderTaskAdapter';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 import { resolveTaskStartForCancellationPolicy } from './cancellation/cancellationContext';
 import {
@@ -1028,6 +1029,13 @@ export class TaskService {
       if (recovered) {
         TaskService.invalidateTaskCache(taskId);
         task = recovered as unknown as ITask;
+      }
+    }
+
+    if (!task) {
+      const qcOrder = await findQcOrderById(taskId);
+      if (qcOrder) {
+        task = normalizeQcOrderToTask(qcOrder) as unknown as ITask;
       }
     }
 
@@ -2345,6 +2353,47 @@ export class TaskService {
 
     const task = await Task.findById(taskId);
     if (!task) {
+      const qcOrder = await findQcOrderById(taskId);
+      if (qcOrder) {
+        const isCreator = qcOrder.requesterId && String(qcOrder.requesterId) === String(profileId);
+        const isPerformer =
+          (qcOrder.assigneeId && String(qcOrder.assigneeId) === String(profileId)) ||
+          (qcOrder.partnerId && String(qcOrder.partnerId) === String(profileId)) ||
+          (qcOrder.assignedTo?.profileId && String(qcOrder.assignedTo.profileId) === String(profileId));
+
+        if (!isCreator && !isPerformer) {
+          throw new ForbiddenError("You are not authorized to update this task");
+        }
+
+        const now = new Date();
+        const qcUpdate: Record<string, any> = {
+          status,
+          updatedAt: now,
+        };
+        if (status === 'started') {
+          qcUpdate.startedAt = now;
+          qcUpdate.executionPhase = 'on_the_way';
+          qcUpdate.onTheWayAt = now;
+        } else if (status === 'in_progress') {
+          qcUpdate.inProgressAt = now;
+          qcUpdate.executionPhase = 'arrived';
+          qcUpdate.arrivedAt = now;
+        } else if (status === 'completed') {
+          qcUpdate.completedAt = now;
+          qcUpdate.completionStatus = 'approved';
+          qcUpdate.completionApprovedAt = now;
+          qcUpdate.fulfillmentStatus = 'HANDED_OVER';
+        } else if (status === 'cancelled') {
+          qcUpdate.cancelledAt = now;
+          qcUpdate.cancelledById = profileId;
+          qcUpdate.cancellationReason = options?.cancellationReason || null;
+        }
+
+        await updateQcOrderById(qcOrder._id, qcUpdate);
+        const updated = await findQcOrderById(qcOrder._id);
+        return normalizeQcOrderToTask(updated) as unknown as ITask;
+      }
+
       throw new NotFoundError("Task not found");
     }
 
@@ -3253,6 +3302,39 @@ export class TaskService {
   ): Promise<{ sentTo: string }> {
     const task = await Task.findById(taskId);
     if (!task) {
+      const qcOrder = await findQcOrderById(taskId);
+      if (qcOrder) {
+        const isPerformer =
+          (qcOrder.assigneeId && String(qcOrder.assigneeId) === String(profileId)) ||
+          (qcOrder.partnerId && String(qcOrder.partnerId) === String(profileId)) ||
+          (qcOrder.assignedTo?.profileId && String(qcOrder.assignedTo.profileId) === String(profileId));
+
+        if (!isPerformer) {
+          throw new ForbiddenError("Only assigned performer can request start OTP");
+        }
+
+        const otp = (Math.floor(1000 + Math.random() * 9000)).toString();
+        const now = new Date();
+        const nextResendCount = options?.isResend ? (qcOrder.startOtp?.resendCount || 0) + 1 : 0;
+
+        await updateQcOrderById(qcOrder._id, {
+          startOtp: {
+            codeHash: otp,
+            codePlain: otp,
+            requestedAt: now,
+            attempts: 0,
+            resendCount: nextResendCount,
+            requestedById: profileId,
+          },
+          executionPhase: 'on_the_way',
+          onTheWayAt: now,
+          updatedAt: now,
+        });
+
+        logger.info(`[OTP] Generated 4-digit start OTP: ${otp} for QC order: ${qcOrder._id}`);
+        return { sentTo: qcOrder.address?.phone || qcOrder.requesterUid || 'Customer' };
+      }
+
       throw new NotFoundError("Task not found");
     }
 
@@ -3451,6 +3533,46 @@ export class TaskService {
   ): Promise<ITask> {
     const task = await Task.findById(taskId);
     if (!task) {
+      const qcOrder = await findQcOrderById(taskId);
+      if (qcOrder) {
+        const isPerformer =
+          (qcOrder.assigneeId && String(qcOrder.assigneeId) === String(profileId)) ||
+          (qcOrder.partnerId && String(qcOrder.partnerId) === String(profileId)) ||
+          (qcOrder.assignedTo?.profileId && String(qcOrder.assignedTo.profileId) === String(profileId));
+
+        if (!isPerformer) {
+          throw new ForbiddenError("Only assigned performer can verify start OTP");
+        }
+
+        const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 4);
+        if (sanitizedOtp.length !== 4) {
+          throw new BadRequestError("Please enter a valid 4-digit OTP");
+        }
+
+        const posterUid = qcOrder.requesterUid || qcOrder.userId;
+        if (acceptsPosterDummyStartOtp(posterUid, sanitizedOtp)) {
+          logger.warn("start_otp_poster_dummy_accepted_qc", { taskId: qcOrder._id, posterUid });
+        } else {
+          if (!qcOrder.startOtp?.codeHash) {
+            throw new BadRequestError("Start OTP not requested. Please request OTP first");
+          }
+          if (qcOrder.startOtp.codeHash !== sanitizedOtp) {
+            throw new BadRequestError("OTP mismatch");
+          }
+        }
+
+        const now = new Date();
+        await updateQcOrderById(qcOrder._id, {
+          'startOtp.verifiedAt': now,
+          status: 'started',
+          startedAt: now,
+          executionPhase: 'on_the_way',
+          updatedAt: now,
+        });
+        const updated = await findQcOrderById(qcOrder._id);
+        return normalizeQcOrderToTask(updated) as unknown as ITask;
+      }
+
       throw new NotFoundError("Task not found");
     }
 
@@ -3913,7 +4035,29 @@ export class TaskService {
     _performerUid: string
   ): Promise<ITask> {
     const task = await Task.findById(taskId);
-    if (!task) throw new NotFoundError("Task not found");
+    if (!task) {
+      const qcOrder = await findQcOrderById(taskId);
+      if (qcOrder) {
+        const isPerformer =
+          (qcOrder.assigneeId && String(qcOrder.assigneeId) === String(performerProfileId)) ||
+          (qcOrder.partnerId && String(qcOrder.partnerId) === String(performerProfileId)) ||
+          (qcOrder.assignedTo?.profileId && String(qcOrder.assignedTo.profileId) === String(performerProfileId));
+
+        if (!isPerformer) {
+          throw new ForbiddenError("Only assigned performer can mark arrival");
+        }
+
+        const now = new Date();
+        await updateQcOrderById(qcOrder._id, {
+          executionPhase: "arrived",
+          arrivedAt: now,
+          updatedAt: now,
+        });
+        const updated = await findQcOrderById(qcOrder._id);
+        return normalizeQcOrderToTask(updated) as unknown as ITask;
+      }
+      throw new NotFoundError("Task not found");
+    }
 
     const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
     const effectiveTaskId = String(workTask._id);

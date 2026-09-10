@@ -4,6 +4,8 @@ import { NotFoundError, BadRequestError, ForbiddenError } from '../errors/AppErr
 import logger from '../config/logger';
 import { uploadFile, deleteFile, getStorageType } from '../utils/storageManager';
 import sharp from 'sharp';
+import mongoose from 'mongoose';
+import { QcDatabase } from '../config/qcDatabase';
 
 interface ProcessedImage {
   buffer: Buffer;
@@ -164,7 +166,54 @@ export class UploadService {
     // Verify task exists and user has permission
     const task = await Task.findById(taskId);
     if (!task) {
-      throw new NotFoundError('Task not found');
+      const qcConnection = await QcDatabase.getQcConnection();
+      const CustomerOrders = qcConnection.collection('customerorders');
+      const orderQuery = mongoose.Types.ObjectId.isValid(String(taskId))
+        ? { _id: new mongoose.Types.ObjectId(String(taskId)) }
+        : { orderNumber: String(taskId).replace(/^#/, '') };
+      const order = await CustomerOrders.findOne(orderQuery);
+      if (!order) {
+        throw new NotFoundError('Task not found');
+      }
+
+      const assignedToPartner = [
+        order.partnerUid,
+        order.assigneeUid,
+        order.assignedTo?.userId,
+      ].some((value) => String(value || '') === String(performerUid)) || [
+        order.partnerId,
+        order.assigneeId,
+        order.assignedTo?.profileId,
+      ].some((value) => String(value || '') === String(performerProfileId || ''));
+      if (!assignedToPartner) {
+        throw new ForbiddenError('Only the assigned performer can upload completion proof');
+      }
+
+      const processed = await compressImageIfSupported(fileBuffer, filename, mimetype);
+      const result = await uploadFile(
+        processed.buffer,
+        processed.filename,
+        processed.mimetype,
+        'completion-proofs',
+        { taskId: String(order._id), userId: performerUid, type: 'completion-proof' },
+      );
+
+      await CustomerOrders.updateOne(
+        { _id: order._id },
+        {
+          $push: {
+            completionProof: {
+              url: result.url,
+              key: result.key,
+              uploadedAt: new Date(),
+              uploadedBy: performerUid,
+            },
+          },
+          $set: { updatedAt: new Date() },
+        } as any,
+      );
+
+      return { url: result.url, key: result.key };
     }
 
     await assertPerformerCanUploadProof(task, performerUid, performerProfileId);
