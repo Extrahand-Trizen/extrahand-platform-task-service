@@ -2,6 +2,7 @@ import { Response } from 'express';
 import mongoose from 'mongoose';
 import Task from '../models/Task';
 import TaskLiveLocation from '../models/TaskLiveLocation';
+import { QcDatabase } from '../config/qcDatabase';
 import { AuthenticatedRequest } from '../types';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -119,21 +120,40 @@ export class PartnerLocationController {
 
     // Look up task to resolve its assigned partner's profileId and verify access.
     const task = await Task.findById(id).select('requesterId partnerId assigneeId status').lean();
-    if (!task) {
-      throw new NotFoundError('Task not found');
+    let allowedProfileIds: string[];
+    let partnerId: string | null;
+
+    if (task) {
+      allowedProfileIds = [task.requesterId?.toString(), task.partnerId?.toString(), task.assigneeId?.toString()].filter(Boolean) as string[];
+      partnerId = task.partnerId?.toString() ?? task.assigneeId?.toString() ?? null;
+    } else {
+      const qcConnection = await QcDatabase.getQcConnection();
+      const order = await qcConnection.collection('customerorders').findOne({
+        _id: new mongoose.Types.ObjectId(id),
+      });
+      if (!order) throw new NotFoundError('Task not found');
+
+      allowedProfileIds = [
+        order.requesterId,
+        order.userId,
+        order.customerId,
+        order.customerUid,
+        order.partnerId,
+        order.assigneeId,
+        order.assignedTo?.profileId,
+        order.partnerUid,
+        order.assigneeUid,
+        order.assignedTo?.userId,
+      ].filter(Boolean).map(String);
+      partnerId = [order.partnerId, order.assigneeId, order.assignedTo?.profileId, order.partnerUid, order.assigneeUid, order.assignedTo?.userId]
+        .find(Boolean)?.toString() ?? null;
     }
 
-    const allowedProfileIds = [
-      task.requesterId?.toString(),
-      task.partnerId?.toString(),
-      task.assigneeId?.toString(),
-    ].filter(Boolean);
     if (!allowedProfileIds.includes(requesterProfileId)) {
       throw new ForbiddenError('Not authorized to view partner location');
     }
 
     // Prefer partnerId (Book Now flow); fall back to assigneeId (marketplace flow)
-    const partnerId = task.partnerId?.toString() ?? task.assigneeId?.toString() ?? null;
     if (!partnerId) {
       logger.warn('Partner location lookup missed — task has no assigned partner', {
         taskId: id,

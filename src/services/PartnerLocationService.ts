@@ -1,7 +1,9 @@
 import { getRedisClient, REDIS_TTLS } from "../config/redis";
 import { emitPartnerLocation } from "../socket/taskSocketEmitter";
+import mongoose from "mongoose";
 import Task from "../models/Task";
 import TaskLiveLocation from "../models/TaskLiveLocation";
+import { QcDatabase } from "../config/qcDatabase";
 import logger from "../config/logger";
 
 export interface PartnerLocationUpdate {
@@ -24,6 +26,12 @@ export type PartnerLocationProcessResult =
         | "stale-location"
         | "duplicate-location";
     };
+
+type LocationSubject = {
+  partnerIds: string[];
+  requesterIds: string[];
+  status: string;
+};
 
 const LOCATION_DB_WRITE_INTERVAL_MS = 60 * 1000;
 const LOCATION_DB_WRITE_DISTANCE_METERS = 150;
@@ -61,6 +69,49 @@ function isValidCoordinate(lat: number, lng: number): boolean {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
   if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return false;
   return !(Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001);
+}
+
+function stringValues(...values: unknown[]): string[] {
+  return values
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .map((value) => (value == null ? '' : String(value)))
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+async function findLocationSubject(taskId: string): Promise<LocationSubject | null> {
+  const task = await Task.findById(taskId).select("partnerId assigneeId status requesterId").lean();
+  if (task) {
+    return {
+      partnerIds: stringValues(task.partnerId, task.assigneeId),
+      requesterIds: stringValues(task.requesterId),
+      status: String(task.status || ''),
+    };
+  }
+
+  try {
+    const qcConnection = await QcDatabase.getQcConnection();
+    const order = await qcConnection.collection('customerorders').findOne({
+      _id: new mongoose.Types.ObjectId(taskId),
+    });
+    if (!order) return null;
+
+    return {
+      partnerIds: stringValues(
+        order.partnerId,
+        order.assigneeId,
+        order.assignedTo?.profileId,
+        order.partnerUid,
+        order.assigneeUid,
+        order.assignedTo?.userId,
+      ),
+      requesterIds: stringValues(order.requesterId, order.userId, order.customerId, order.customerUid),
+      status: String(order.status || 'assigned'),
+    };
+  } catch (error) {
+    logger.warn('QC location subject lookup failed', { taskId, error });
+    return null;
+  }
 }
 
 async function persistPartnerLocationSnapshot(params: {
@@ -146,15 +197,13 @@ export async function processPartnerLocationUpdate(
     return { ok: false, reason: "stale-location" };
   }
 
-  const task = await Task.findById(taskId).select("partnerId assigneeId status").lean();
-  if (!task) {
+  const subject = await findLocationSubject(taskId);
+  if (!subject) {
     logger.warn(`⚠️  partner location rejected — task ${taskId} not found (profile: ${profileId})`);
     return { ok: false, reason: "task-not-found" };
   }
 
-  const taskPartnerId = task.partnerId?.toString() ?? null;
-  const taskAssigneeId = task.assigneeId?.toString() ?? null;
-  if (taskPartnerId !== profileId && taskAssigneeId !== profileId) {
+  if (!subject.partnerIds.includes(profileId)) {
     logger.warn(
       `🚫 partner location rejected — profile ${profileId} is not assigned to task ${taskId}`,
     );
@@ -162,9 +211,9 @@ export async function processPartnerLocationUpdate(
   }
 
   const activeStatuses = ["assigned", "started", "in_progress"];
-  if (!activeStatuses.includes(task.status)) {
+  if (!activeStatuses.includes(subject.status.toLowerCase())) {
     logger.warn(
-      `⚠️  partner location ignored — task ${taskId} is in status "${task.status}" (profile: ${profileId})`,
+      `⚠️  partner location ignored — task ${taskId} is in status "${subject.status}" (profile: ${profileId})`,
     );
     return { ok: false, reason: "inactive-status" };
   }
