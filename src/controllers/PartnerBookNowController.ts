@@ -1176,14 +1176,14 @@ export class PartnerBookNowController {
               { 'assignedTo.profileId': String(partnerOid) },
             ],
           },
-          { status: { $ne: 'completed' } },
+          { status: { $nin: ['completed', 'DELIVERED'] } },
         ],
       });
 
       if (order) {
         const now = new Date();
         const qcUpdate: Record<string, any> = {
-          status: newStatus,
+          status: newStatus === 'completed' ? 'DELIVERED' : newStatus,
           updatedAt: now,
         };
         if (newStatus === 'started') {
@@ -1205,21 +1205,55 @@ export class PartnerBookNowController {
 
         console.log(`[PartnerBookNow] updateLeadStatus: QC task=${id} uid=${uid} newStatus=${newStatus}`);
 
-        // Auto-payout on QC order completion
+        // Auto-payout on QC order completion: 29 rupees by default
         if (newStatus === 'completed') {
           try {
-            const { PaymentClient } = await import('../services/PaymentClient');
             const payoutAmount =
-              typeof order.budget === 'object' && order.budget?.amount
-                ? order.budget.amount
-                : typeof order.budget === 'object' && order.budget?.max
-                  ? order.budget.max
-                  : (order.deliveryFeePaise ? order.deliveryFeePaise / 100 : 50);
-            await PaymentClient.processTaskCompletionPayout({
+              (order.deliveryFeePaise ? order.deliveryFeePaise / 100 : 0) ||
+              (typeof order.budget === 'object' && order.budget?.amount ? order.budget.amount : 0) ||
+              (typeof order.budget === 'object' && order.budget?.max ? order.budget.max : 0) ||
+              QC_DEFAULT_DELIVERY_FEE_INR;
+
+            const orderNum = order.orderNumber
+              ? String(order.orderNumber)
+              : `#QC-${String(order._id).slice(-8).toUpperCase()}`;
+
+            const payoutResult = await PaymentClient.processTaskCompletionPayout({
               taskId: String(order._id),
               performerUid: uid,
               amount: payoutAmount,
-              taskTitle: order.title || `Quick Commerce Order #${order.orderNumber || String(order._id).slice(-6)}`,
+              taskTitle: order.title || `Quick Commerce Order ${orderNum}`,
+            });
+
+            logger.info(`[PartnerBookNow] updateLeadStatus: Auto-payout result for QC order ${id}`, {
+              success: payoutResult.success,
+              amount: payoutAmount,
+              payoutId: payoutResult.payout?.payoutId,
+              payoutStatus: payoutResult.payout?.status,
+              error: payoutResult.error,
+            });
+
+            const notifTitle = payoutResult.success
+              ? `₹${payoutAmount} payout initiated 🎉`
+              : 'Delivery complete';
+            const notifBody = payoutResult.success
+              ? `Great job! Your delivery earnings of ₹${payoutAmount} for order ${orderNum} have been queued for payout.`
+              : `Order ${orderNum} completed. Payout initiation failed — please contact support.`;
+
+            await InAppNotificationClient.send({
+              userId: String(partnerOid),
+              title: notifTitle,
+              body: notifBody,
+              type: payoutResult.success ? 'success' : 'warning',
+              category: 'payments',
+              data: {
+                orderId: String(order._id),
+                orderNumber: orderNum,
+                deliveryFee: payoutAmount,
+                actionUrl: '/profile?section=payments',
+                eventKey: payoutResult.success ? 'PAYOUT_INITIATED' : 'PAYOUT_FAILED',
+                entityType: 'qc_order',
+              },
             });
           } catch (payoutError: any) {
             logger.error('[PartnerBookNow] Auto-payout failed on QC completion:', {
