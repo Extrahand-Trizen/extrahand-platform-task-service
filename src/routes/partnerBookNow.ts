@@ -16,8 +16,26 @@ router.get(
   asyncHandler(PartnerBookNowController.getAvailableLeads as any),
 );
 
+// GET /api/v1/book-now/available-qc-orders
+// Returns unassigned Quick Commerce orders within 3 km of partner.
+router.get(
+  '/available-qc-orders',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(PartnerBookNowController.getAvailableQcOrders as any),
+);
+
+// POST /api/v1/book-now/qc-orders/:id/apply
+// Partner applies for (claims) an available Quick Commerce order.
+router.post(
+  '/qc-orders/:id/apply',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(PartnerBookNowController.applyQcOrder as any),
+);
+
 // POST /api/v1/book-now/tasks/:id/partner-accept
-// Atomically accepts (claims) a Book Now lead for the authenticated partner.
+// Atomically accepts (claims) a Book Now lead or Quick Commerce order for the authenticated partner.
 router.post(
   '/tasks/:id/partner-accept',
   serviceAuthMiddleware,

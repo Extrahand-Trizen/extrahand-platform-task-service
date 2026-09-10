@@ -11,6 +11,7 @@ import { CancellationPassService } from '../services/CancellationPassService';
 import { serializeBookNowLeadExecutionFields } from '../utils/bookNowLeadSerialization';
 import { normalizeQcOrderToTask, findQcOrdersForPartner } from '../utils/qcOrderTaskAdapter';
 import { QcDatabase } from '../config/qcDatabase';
+import { QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, haversineKm } from '../constants/quickCommerce';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -247,11 +248,413 @@ export class PartnerBookNowController {
   }
 
   /**
-   * POST /api/v1/book-now/tasks/:id/partner-accept
-   * Partner-side self-accept is intentionally disabled.
-   * Book Now jobs must be assigned by auto-assignment or operations.
+   * GET /api/v1/book-now/available-qc-orders
+   * Fetch unassigned Quick Commerce orders within 3 km of the partner.
+   * "distance from shop to partner location should be at max 3km only if <=3 then it should show"
    */
-  static async acceptLead(_req: AuthenticatedRequest, _res: Response): Promise<void> {
+  static async getAvailableQcOrders(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { lat, lng } = req.query as Record<string, string | undefined>;
+    let partnerLat = lat ? parseFloat(lat) : undefined;
+    let partnerLng = lng ? parseFloat(lng) : undefined;
+
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+    let profileId: mongoose.Types.ObjectId | undefined = req.user?.profileId;
+
+    const Profile = mongoose.connection.collection('profiles');
+    let partnerProfile: any = null;
+    if (profileId) {
+      partnerProfile = await Profile.findOne({
+        _id: profileId instanceof mongoose.Types.ObjectId ? profileId : new mongoose.Types.ObjectId(profileId),
+      });
+    } else if (uid) {
+      partnerProfile = await Profile.findOne({ uid });
+      if (partnerProfile) profileId = partnerProfile._id;
+    }
+
+    // Fallback: resolve partner coordinates from profile if not passed in query
+    if (
+      (partnerLat === undefined || partnerLng === undefined || isNaN(partnerLat) || isNaN(partnerLng)) &&
+      partnerProfile
+    ) {
+      const homeLoc = (partnerProfile.homeLocation as { coordinates?: number[] } | undefined)?.coordinates;
+      const liveLoc = (partnerProfile.location as { coordinates?: number[] } | undefined)?.coordinates;
+      const coords =
+        Array.isArray(liveLoc) && liveLoc.length === 2 && liveLoc[0] && liveLoc[1]
+          ? liveLoc
+          : Array.isArray(homeLoc) && homeLoc.length === 2 && homeLoc[0] && homeLoc[1]
+          ? homeLoc
+          : null;
+      if (coords) {
+        partnerLng = coords[0];
+        partnerLat = coords[1];
+      }
+    }
+
+    // Connect to QC database
+    const qcConnection = await QcDatabase.getQcConnection();
+    const CustomerOrders = qcConnection.collection('customerorders');
+    const SellerOnboardings = qcConnection.collection('selleronboardings');
+
+    // Query unassigned orders that are paid/placed/ready for delivery
+    const unassignedOrders = await CustomerOrders.find({
+      $and: [
+        {
+          $or: [
+            { partnerId: null },
+            { partnerId: { $exists: false } },
+            { assigneeId: null },
+            { assigneeId: { $exists: false } },
+            { assignmentStatus: 'pending' },
+            { assignmentStatus: { $exists: false } },
+          ],
+        },
+        {
+          status: { $in: ['PAID', 'PLACED', 'CONFIRMED', 'PENDING_ACCEPT', 'ACCEPTED', 'open'] },
+        },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .toArray();
+
+    if (!unassignedOrders.length) {
+      ApiResponse.success(res, [], 'Available Quick Commerce orders retrieved');
+      return;
+    }
+
+    // Cache seller onboarding lookups
+    const sellerCache = new Map<string, any>();
+    const sellerIdsToFetch = [
+      ...new Set(
+        unassignedOrders
+          .map((o) => (o.sellerId ? String(o.sellerId) : null))
+          .filter(Boolean),
+      ),
+    ];
+
+    if (sellerIdsToFetch.length > 0) {
+      const sellerOids = sellerIdsToFetch
+        .filter((id) => mongoose.Types.ObjectId.isValid(id!))
+        .map((id) => new mongoose.Types.ObjectId(id!));
+      const foundSellers = await SellerOnboardings.find({
+        $or: [{ sellerId: { $in: sellerOids } }, { _id: { $in: sellerOids } }],
+      }).toArray();
+      for (const s of foundSellers) {
+        if (s.sellerId) sellerCache.set(String(s.sellerId), s);
+        sellerCache.set(String(s._id), s);
+      }
+    }
+
+    const availableList: any[] = [];
+
+    for (const order of unassignedOrders) {
+      let shopCoords: [number, number] | null = null;
+      let shopName = order.shopName;
+      let shopAddress = order.shopAddress;
+      let shopArea = order.shopArea;
+      let shopCategory = order.shopCategory || 'Quick Commerce';
+
+      if (order.shopCoordinates && Array.isArray(order.shopCoordinates) && order.shopCoordinates.length === 2) {
+        shopCoords = [Number(order.shopCoordinates[0]), Number(order.shopCoordinates[1])];
+      }
+
+      const sellerKey = order.sellerId ? String(order.sellerId) : null;
+      const seller = sellerKey ? sellerCache.get(sellerKey) : null;
+
+      if (seller) {
+        if (!shopCoords && seller.longitude && seller.latitude) {
+          shopCoords = [seller.longitude, seller.latitude];
+        }
+        if (!shopName && seller.shopName) shopName = seller.shopName;
+        if (!shopAddress) {
+          shopAddress =
+            seller.formattedAddress ||
+            seller.address ||
+            [seller.area, seller.locality, seller.city, seller.state, seller.pincode].filter(Boolean).join(', ');
+        }
+        if (!shopArea) shopArea = seller.area || seller.locality || seller.city;
+        if (!order.shopCategory && seller.shopType) shopCategory = seller.shopType;
+      }
+
+      // Default fallbacks if missing
+      shopName = shopName || 'FreshMart';
+      shopAddress = shopAddress || 'Shop address unavailable';
+      shopArea = shopArea || order.address?.area || order.address?.locality || order.address?.city || 'Nearby';
+
+      let distKm: number | null = null;
+      if (
+        partnerLat !== undefined &&
+        partnerLng !== undefined &&
+        shopCoords &&
+        shopCoords.length === 2 &&
+        typeof shopCoords[0] === 'number' &&
+        typeof shopCoords[1] === 'number'
+      ) {
+        const [shopLng, shopLat] = shopCoords;
+        distKm = haversineKm(shopLat, shopLng, partnerLat, partnerLng);
+      }
+
+      // STRICT FILTER: "distance from shop to partner location should be at max 3km only if <=3 then it should show to then"
+      if (distKm === null || distKm > QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM) {
+        continue;
+      }
+
+      const orderIdStr = String(order._id);
+      const orderNum = order.orderNumber ? String(order.orderNumber) : `#QC-${orderIdStr.slice(-8).toUpperCase()}`;
+
+      const itemsList = Array.isArray(order.items)
+        ? order.items.map((i: any) => ({
+            name: i.name || 'Item',
+            unit: i.unit || 'pcs',
+            quantity: i.quantity || 1,
+            unitPricePaise: i.unitPricePaise || 0,
+            lineTotalPaise: i.lineTotalPaise || 0,
+            imageUrl: i.imageUrl || '',
+          }))
+        : [];
+
+      const itemCount = itemsList.reduce((sum: number, item: any) => sum + (Number(item.quantity) || 1), 0);
+
+      const deliveryFee =
+        (order.deliveryFeePaise ? order.deliveryFeePaise / 100 : 0) ||
+        (typeof order.budget === 'object' && order.budget?.amount ? order.budget.amount : 29);
+
+      // Customer dropoff address & area
+      const customerArea =
+        order.address?.locality ||
+        order.address?.area ||
+        order.address?.city ||
+        order.location?.locality ||
+        order.location?.city ||
+        shopArea ||
+        'Aguruvudi';
+
+      const customerAddress =
+        order.location?.address ||
+        [order.address?.line1, order.address?.line2, order.address?.city, order.address?.state, order.address?.pinCode]
+          .filter(Boolean)
+          .join(', ') ||
+        'Delivery address unavailable';
+
+      const customerName = order.address?.name || order.customerName || 'Customer';
+
+      let customerCoords: [number, number] | null = null;
+      if (
+        order.location?.coordinates &&
+        Array.isArray(order.location.coordinates) &&
+        order.location.coordinates.length === 2
+      ) {
+        customerCoords = [Number(order.location.coordinates[0]), Number(order.location.coordinates[1])];
+      } else if (
+        order.address?.coordinates &&
+        Array.isArray(order.address.coordinates) &&
+        order.address.coordinates.length === 2
+      ) {
+        customerCoords = [Number(order.address.coordinates[0]), Number(order.address.coordinates[1])];
+      }
+
+      // Calculate distance from shop to customer drop-off location
+      let shopToCustomerDistKm: number | null = null;
+      if (
+        shopCoords &&
+        shopCoords.length === 2 &&
+        customerCoords &&
+        customerCoords.length === 2 &&
+        typeof customerCoords[0] === 'number' &&
+        typeof customerCoords[1] === 'number' &&
+        customerCoords[0] !== 0 &&
+        customerCoords[1] !== 0
+      ) {
+        shopToCustomerDistKm = haversineKm(shopCoords[1], shopCoords[0], customerCoords[1], customerCoords[0]);
+      }
+
+      const partnerToShopKm = Number(distKm.toFixed(1));
+      const shopToCustKm =
+        shopToCustomerDistKm != null && shopToCustomerDistKm > 0
+          ? Number(shopToCustomerDistKm.toFixed(1))
+          : 2.2;
+      const totalDistKm = Number((partnerToShopKm + shopToCustKm).toFixed(1));
+      const estimatedMinutes = Math.max(15, Math.min(60, Math.round(totalDistKm * 4 + 11)));
+
+      // Format scheduled date/time string e.g. "Wed, 10 Sept · 05:30 AM"
+      const dateObj = new Date(order.scheduledDate || order.createdAt || Date.now());
+      const dateStr = dateObj.toLocaleDateString('en-IN', {
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short',
+      });
+      const timeStr = dateObj.toLocaleTimeString('en-IN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      });
+      const scheduledDisplay = `${dateStr} · ${timeStr}`;
+
+      availableList.push({
+        id: orderIdStr,
+        orderId: orderIdStr,
+        orderNumber: orderNum.startsWith('#') ? orderNum : `#${orderNum}`,
+        shopName,
+        shopAddress,
+        shopArea,
+        shopCategory,
+        shopCoordinates: shopCoords,
+        customerName,
+        customerAddress,
+        customerArea,
+        customerCoordinates: customerCoords,
+        itemCount,
+        items: itemsList,
+        deliveryFee,
+        deliveryFeePaise: order.deliveryFeePaise || deliveryFee * 100,
+        distKm: partnerToShopKm,
+        partnerToShopDistKm: partnerToShopKm,
+        shopToCustomerDistKm: shopToCustKm,
+        totalDistKm,
+        estimatedMinutes,
+        distanceText: `${partnerToShopKm} km`,
+        scheduledDate: order.scheduledDate || order.createdAt,
+        scheduledDisplay,
+        status: 'open',
+        isQCommerce: true,
+        bookingSource: 'quick_commerce',
+        createdAt: order.createdAt,
+      });
+    }
+
+    // Sort by distance (closest to partner first)
+    availableList.sort((a, b) => a.distKm - b.distKm);
+
+    logger.info(`[PartnerBookNow] getAvailableQcOrders: returning ${availableList.length} orders within 3km for partner uid=${uid}`);
+    ApiResponse.success(res, availableList, 'Available Quick Commerce orders retrieved');
+  }
+
+  /**
+   * POST /api/v1/book-now/qc-orders/:id/apply
+   * Partner applies for (claims) an available Quick Commerce order.
+   * Atomically claims the order with concurrency guard (only first applicant wins).
+   */
+  static async applyQcOrder(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+    let profileId: mongoose.Types.ObjectId | undefined = req.user?.profileId;
+
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      throw new BadRequestError('Invalid order ID');
+    }
+
+    const Profile = mongoose.connection.collection('profiles');
+    let partnerProfile: any = null;
+    if (profileId) {
+      partnerProfile = await Profile.findOne({
+        _id: profileId instanceof mongoose.Types.ObjectId ? profileId : new mongoose.Types.ObjectId(profileId),
+      });
+    } else if (uid) {
+      partnerProfile = await Profile.findOne({ uid });
+      if (partnerProfile) profileId = partnerProfile._id;
+    }
+
+    if (!profileId || !uid) {
+      throw new BadRequestError('Profile ID and UID required');
+    }
+
+    const partnerOid =
+      profileId instanceof mongoose.Types.ObjectId
+        ? profileId
+        : new mongoose.Types.ObjectId(profileId as string);
+
+    const partnerName = (partnerProfile?.name || partnerProfile?.fullName || (req.user as any)?.name || 'Partner') as string;
+
+    const qcConnection = await QcDatabase.getQcConnection();
+    const CustomerOrders = qcConnection.collection('customerorders');
+    const orderOid = new mongoose.Types.ObjectId(String(id));
+
+    // Concurrency guard: update only if unassigned
+    const now = new Date();
+    const updateResult = await CustomerOrders.updateOne(
+      {
+        _id: orderOid,
+        $and: [
+          {
+            $or: [
+              { partnerId: null },
+              { partnerId: { $exists: false } },
+              { assigneeId: null },
+              { assigneeId: { $exists: false } },
+              { assignmentStatus: 'pending' },
+              { assignmentStatus: { $exists: false } },
+            ],
+          },
+          {
+            status: { $in: ['PAID', 'PLACED', 'CONFIRMED', 'PENDING_ACCEPT', 'ACCEPTED', 'open'] },
+          },
+        ],
+      },
+      {
+        $set: {
+          assigneeUid: uid,
+          assigneeId: partnerOid,
+          assigneeName: partnerName,
+          partnerUid: uid,
+          partnerId: partnerOid,
+          assignedHelperName: partnerName,
+          assignedToName: partnerName,
+          assignedTo: {
+            userId: uid,
+            profileId: String(partnerOid),
+            name: partnerName,
+            assignedAt: now,
+          },
+          assignedAt: now,
+          partnerAcceptedAt: now,
+          assignmentStatus: 'assigned',
+          status: 'assigned',
+          confirmed: true, // Manual apply is immediately confirmed
+          confirmedAt: now,
+          updatedAt: now,
+        },
+      },
+    );
+
+    if (updateResult.matchedCount === 0 || updateResult.modifiedCount === 0) {
+      throw new BadRequestError('This order has already been assigned to another partner.');
+    }
+
+    const updatedOrder = await CustomerOrders.findOne({ _id: orderOid });
+    logger.info(`✅ [PartnerBookNow] applyQcOrder: Order ${id} successfully assigned to partner ${partnerName} (${uid})`);
+
+    ApiResponse.success(
+      res,
+      {
+        id: String(updatedOrder?._id),
+        orderNumber: updatedOrder?.orderNumber,
+        status: 'assigned',
+        assignedTo: partnerName,
+        assignedAt: now,
+      },
+      'Quick Commerce order successfully assigned to you',
+    );
+  }
+
+  /**
+   * POST /api/v1/book-now/tasks/:id/partner-accept
+   * Atomically accepts a lead if it's a Quick Commerce order.
+   * Standard Book Now jobs are assigned automatically by ExtraHand.
+   */
+  static async acceptLead(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+      try {
+        const qcConnection = await QcDatabase.getQcConnection();
+        const CustomerOrders = qcConnection.collection('customerorders');
+        const qcOrder = await CustomerOrders.findOne({ _id: new mongoose.Types.ObjectId(String(id)) });
+        if (qcOrder) {
+          return await PartnerBookNowController.applyQcOrder(req, res);
+        }
+      } catch {
+        // Fall through
+      }
+    }
     throw new ForbiddenError(
       'Book Now jobs are assigned automatically by ExtraHand or manually by operations.',
     );

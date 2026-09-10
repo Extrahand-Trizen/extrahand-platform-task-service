@@ -57,6 +57,14 @@ router.post(
 );
 
 // Quick Commerce: auto-assign partner to order after payment (service-to-service)
+// Quick Commerce: notify nearby partners of new available order (service-to-service)
+router.post(
+  '/qc/internal/notify-available',
+  serviceAuthMiddleware,
+  asyncHandler(QcOrderAutoAssignController.notifyAvailable)
+);
+
+// Quick Commerce: auto-assign route delegates to notify-available (service-to-service)
 router.post(
   '/qc/internal/auto-assign',
   serviceAuthMiddleware,

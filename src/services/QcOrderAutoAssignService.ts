@@ -1,8 +1,9 @@
 import mongoose from 'mongoose';
 import logger from '../config/logger';
 import { QcDatabase } from '../config/qcDatabase';
-import { QC_SHOP_PROXIMITY_KM, EARTH_RADIUS_KM } from '../constants/quickCommerce';
+import { QC_SHOP_PROXIMITY_KM, QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, EARTH_RADIUS_KM } from '../constants/quickCommerce';
 import { NotificationClient } from './NotificationClient';
+import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 
 // ─── Haversine Distance ──────────────────────────────────────────────────────
 
@@ -27,13 +28,14 @@ interface PartnerCandidate {
   phone?: string;
 }
 
-interface QcOrderShopInfo {
+export interface QcOrderShopInfo {
   orderId: string;
   orderNumber: string;
   sellerId?: string;
   shopName?: string;
   shopCoordinates?: [number, number]; // [longitude, latitude]
   shopAddress?: string;
+  deliveryFee?: number;
 }
 
 interface QcAutoAssignResult {
@@ -277,5 +279,171 @@ export class QcOrderAutoAssignService {
     }
 
     return null;
+  }
+
+  /**
+   * Broadcast push and in-app notifications to all nearby partners (<= 3 km from shop)
+   * to whom the Quick Commerce order is currently showing.
+   */
+  static async notifyNearbyPartners(order: QcOrderShopInfo): Promise<{
+    success: boolean;
+    notifiedCount: number;
+    candidateUids: string[];
+    reason?: string;
+  }> {
+    const orderId = order.orderId;
+
+    try {
+      let coords = order.shopCoordinates;
+      if (!coords || !Array.isArray(coords) || coords.length !== 2) {
+        coords = (await QcOrderAutoAssignService.resolveShopCoordinates(order.sellerId, order.shopName)) ?? undefined;
+      }
+
+      if (!coords || coords.length !== 2) {
+        logger.info('[QcOrderNotify] No shop coordinates available, skipping notification', {
+          orderId,
+          orderNumber: order.orderNumber,
+        });
+        return { success: false, notifiedCount: 0, candidateUids: [], reason: 'No shop coordinates available' };
+      }
+
+      const [shopLng, shopLat] = coords;
+      if (typeof shopLng !== 'number' || typeof shopLat !== 'number' || (shopLng === 0 && shopLat === 0)) {
+        logger.info('[QcOrderNotify] Invalid shop coordinates, skipping notification', {
+          orderId,
+          orderNumber: order.orderNumber,
+        });
+        return { success: false, notifiedCount: 0, candidateUids: [], reason: 'Invalid shop coordinates' };
+      }
+
+      const Profile = mongoose.connection.collection('profiles');
+      const profiles = await Profile.find({
+        isActive: true,
+        'partnerProfile.status': 'approved',
+      }).toArray();
+
+      if (!profiles.length) {
+        logger.info('[QcOrderNotify] No active approved partners found', { orderId });
+        return { success: true, notifiedCount: 0, candidateUids: [], reason: 'No active approved partners' };
+      }
+
+      const maxDistanceKm = QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM; // 3.0 km
+      const candidates: PartnerCandidate[] = [];
+
+      for (const p of profiles) {
+        const pp = (p.partnerProfile as any) || {};
+
+        // Check active for quick commerce toggle
+        const isActiveForQc = pp.activeForQCommerce === true || pp.activeForQCommerceOrders === true;
+        if (!isActiveForQc) continue;
+
+        // Check on-leave status
+        if (pp.onLeave === true) continue;
+
+        // Resolve partner location (prefer live, fallback to home)
+        const homeLoc = (p.homeLocation as { coordinates?: number[] } | undefined)?.coordinates;
+        const liveLoc = (p.location as { coordinates?: number[] } | undefined)?.coordinates;
+        const partnerCoords =
+          Array.isArray(liveLoc) && liveLoc.length === 2 && liveLoc[0] && liveLoc[1]
+            ? liveLoc
+            : Array.isArray(homeLoc) && homeLoc.length === 2 && homeLoc[0] && homeLoc[1]
+            ? homeLoc
+            : null;
+
+        if (!partnerCoords) continue;
+
+        const [partnerLng, partnerLat] = partnerCoords;
+        if (typeof partnerLng !== 'number' || typeof partnerLat !== 'number' || (partnerLng === 0 && partnerLat === 0)) {
+          continue;
+        }
+
+        // Calculate distance from partner to seller shop
+        const distKm = haversineKm(shopLat, shopLng, partnerLat, partnerLng);
+
+        // Strictly filter to nearby partners (<= 3 km) to whom the order is showing
+        if (distKm > maxDistanceKm) continue;
+
+        candidates.push({
+          uid: String(p.uid),
+          profileId: String(p._id),
+          name: (p.name || p.fullName || 'Partner') as string,
+          distKm: Number(distKm.toFixed(1)),
+          phone: p.phone as string | undefined,
+        });
+      }
+
+      if (candidates.length === 0) {
+        logger.info('[QcOrderNotify] No eligible partners within 3.0 km of shop', {
+          orderId,
+          orderNumber: order.orderNumber,
+          shopName: order.shopName,
+          shopLat,
+          shopLng,
+        });
+        return { success: true, notifiedCount: 0, candidateUids: [], reason: 'No eligible partners within 3.0 km' };
+      }
+
+      const candidateUids = candidates.map((c) => c.uid);
+      const title = 'New Quick Commerce Order Available!';
+      const shopName = order.shopName || 'Nearby Store';
+
+      logger.info(`📢 [QcOrderNotify] Broadcasting notification to ${candidates.length} nearby partners for order #${order.orderNumber}: ${candidateUids.join(', ')}`);
+
+      // 1. Send push notifications via NotificationClient to each candidate with localized distance
+      await Promise.allSettled(
+        candidates.map(async (c) => {
+          const distText = c.distKm != null ? `${c.distKm} km away` : 'nearby';
+          const body = `New order from ${shopName} (${distText}). Tap to apply now!`;
+
+          try {
+            await NotificationClient.send({
+              eventKey: 'TASK_NEARBY',
+              category: 'recommendedTaskAlerts',
+              recipients: [c.uid],
+              entity: { type: 'task', id: order.orderId },
+              title,
+              body,
+              data: {
+                orderId: order.orderId,
+                orderNumber: order.orderNumber,
+                shopName: order.shopName,
+                bookingSource: 'quick_commerce',
+                eventKey: 'TASK_NEARBY',
+                action: 'apply_qc_order',
+                recipientRole: 'partner',
+                distance: c.distKm,
+              },
+            });
+          } catch (notifErr: any) {
+            logger.warn(`[QcOrderNotify] Failed to send push to partner ${c.uid}:`, notifErr?.message);
+          }
+        }),
+      );
+
+      // 2. In-App Notification Center
+      try {
+        await InAppNotificationClient.sendBatch({
+          userIds: candidateUids,
+          title,
+          body: `New Quick Commerce order available from ${shopName}. Tap to apply!`,
+          type: 'info',
+          category: 'taskUpdates',
+          data: {
+            orderId: order.orderId,
+            orderNumber: order.orderNumber,
+            shopName: order.shopName,
+            bookingSource: 'quick_commerce',
+            action: 'apply_qc_order',
+          },
+        });
+      } catch (inAppErr: any) {
+        logger.warn('[QcOrderNotify] Failed to create in-app notification batch:', inAppErr?.message);
+      }
+
+      return { success: true, notifiedCount: candidates.length, candidateUids };
+    } catch (err: any) {
+      logger.error(`[QcOrderNotify] Error notifying partners for order ${orderId}:`, err);
+      return { success: false, notifiedCount: 0, candidateUids: [], reason: err?.message };
+    }
   }
 }
