@@ -180,22 +180,32 @@ export async function processPartnerLocationUpdate(
     return { ok: false, reason: "invalid-payload" };
   }
 
-  const { taskId, lat, lng, timestamp, forcePersist } = data;
+  const { taskId, lat, lng, forcePersist } = data;
+  const timestamp = data.timestamp < 1_000_000_000_000
+    ? data.timestamp * 1000
+    : data.timestamp;
   if (!isValidCoordinate(lat, lng) || !Number.isFinite(timestamp)) {
     logger.warn(`⚠️  partner location rejected — invalid coordinates from profile: ${profileId}`);
     return { ok: false, reason: "invalid-payload" };
   }
 
   const now = Date.now();
-  if (timestamp < now - LOCATION_MAX_AGE_MS || timestamp > now + LOCATION_MAX_FUTURE_MS) {
-    logger.warn("⚠️  partner location rejected — stale/future timestamp", {
+  const timestampSkewed = timestamp < now - LOCATION_MAX_AGE_MS || timestamp > now + LOCATION_MAX_FUTURE_MS;
+  if (timestampSkewed) {
+    logger.warn("⚠️  partner location timestamp skew detected — using server time", {
       profileId,
       taskId,
       timestamp,
       serverTimestamp: now,
+      skewMs: timestamp - now,
+      action: "using-server-receipt-time",
     });
-    return { ok: false, reason: "stale-location" };
   }
+
+  // Mobile device clocks can drift or jump after resume. The request arrived
+  // now, so use the server receipt time rather than dropping an otherwise valid
+  // live GPS point.
+  const acceptedTimestamp = timestampSkewed ? now : timestamp;
 
   const subject = await findLocationSubject(taskId);
   if (!subject) {
@@ -220,10 +230,10 @@ export async function processPartnerLocationUpdate(
 
   const processKey = `${taskId}:${profileId}`;
   const previousTimestamp = lastProcessedTimestampByTask.get(processKey);
-  if (previousTimestamp != null && timestamp <= previousTimestamp) {
+  if (previousTimestamp != null && acceptedTimestamp <= previousTimestamp) {
     return { ok: false, reason: "duplicate-location" };
   }
-  lastProcessedTimestampByTask.set(processKey, timestamp);
+  lastProcessedTimestampByTask.set(processKey, acceptedTimestamp);
 
   // Redis cache (best-effort — app keeps working if Redis is down).
   const redis = getRedisClient();
@@ -231,7 +241,7 @@ export async function processPartnerLocationUpdate(
     try {
       const key = `partner:location:${profileId}`;
       const taskKey = `task:partner-location:${taskId}`;
-      const value = JSON.stringify({ taskId, lat, lng, timestamp });
+      const value = JSON.stringify({ taskId, lat, lng, timestamp: acceptedTimestamp });
       await redis.set(key, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
       await redis.set(taskKey, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
     } catch (err) {
@@ -246,7 +256,7 @@ export async function processPartnerLocationUpdate(
     partnerId: profileId,
     lat,
     lng,
-    timestamp,
+    timestamp: acceptedTimestamp,
     forcePersist,
   }).catch((err) => {
     logger.warn("Partner location snapshot persistence failed", {
@@ -257,7 +267,7 @@ export async function processPartnerLocationUpdate(
   });
 
   // Fan-out to the customer's task room.
-  emitPartnerLocation(taskId, { lat, lng, timestamp });
+  emitPartnerLocation(taskId, { lat, lng, timestamp: acceptedTimestamp });
   logger.info(`📍 partner location — profile ${profileId} → task:${taskId} [${lat}, ${lng}]`);
 
   return { ok: true };
