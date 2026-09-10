@@ -5,6 +5,9 @@ export function serializeBookNowLeadExecutionFields(task: Record<string, unknown
   const projectExecution = task.projectExecution as Record<string, unknown> | undefined;
 
   return {
+    executionPhase: task.executionPhase,
+    arrivedAt: task.arrivedAt,
+    onTheWayAt: task.onTheWayAt,
     bookingKind: task.bookingKind,
     serviceFlowType: task.serviceFlowType,
     serviceType: task.serviceType,

@@ -34,6 +34,15 @@ router.post(
   asyncHandler(PartnerBookNowController.applyQcOrder as any),
 );
 
+// POST /api/v1/book-now/qc-orders/:id/complete
+// Partner marks a Quick Commerce order as delivered and triggers payout.
+router.post(
+  '/qc-orders/:id/complete',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(PartnerBookNowController.completeQcOrder as any),
+);
+
 // POST /api/v1/book-now/tasks/:id/partner-accept
 // Atomically accepts (claims) a Book Now lead or Quick Commerce order for the authenticated partner.
 router.post(

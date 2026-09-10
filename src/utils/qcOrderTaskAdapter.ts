@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import logger from '../config/logger';
 import { QcDatabase } from '../config/qcDatabase';
+import { QC_DEFAULT_DELIVERY_FEE_INR } from '../constants/quickCommerce';
 
 /**
  * Normalizes a raw customerorders document into an ITask-compatible shape
@@ -20,7 +21,7 @@ export function normalizeQcOrderToTask(order: Record<string, any>): Record<strin
         ? order.budget.max
           : deliveryFee > 0
           ? deliveryFee
-          : 29;
+          : QC_DEFAULT_DELIVERY_FEE_INR;
 
   let customerCoordinates: [number, number] | undefined = undefined;
   if (order.location?.coordinates && Array.isArray(order.location.coordinates)) {

@@ -11,7 +11,9 @@ import { CancellationPassService } from '../services/CancellationPassService';
 import { serializeBookNowLeadExecutionFields } from '../utils/bookNowLeadSerialization';
 import { normalizeQcOrderToTask, findQcOrdersForPartner } from '../utils/qcOrderTaskAdapter';
 import { QcDatabase } from '../config/qcDatabase';
-import { QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, haversineKm } from '../constants/quickCommerce';
+import { QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, QC_DEFAULT_DELIVERY_FEE_INR, haversineKm } from '../constants/quickCommerce';
+import { PaymentClient } from '../services/PaymentClient';
+import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -417,7 +419,7 @@ export class PartnerBookNowController {
 
       const deliveryFee =
         (order.deliveryFeePaise ? order.deliveryFeePaise / 100 : 0) ||
-        (typeof order.budget === 'object' && order.budget?.amount ? order.budget.amount : 29);
+        (typeof order.budget === 'object' && order.budget?.amount ? order.budget.amount : QC_DEFAULT_DELIVERY_FEE_INR);
 
       // Customer dropoff address & area
       const customerArea =
@@ -634,6 +636,169 @@ export class PartnerBookNowController {
       },
       'Quick Commerce order successfully assigned to you',
     );
+  }
+
+  /**
+   * POST /api/v1/book-now/qc-orders/:id/complete
+   * Partner marks a Quick Commerce order as delivered.
+   * Updates customerorders status to DELIVERED and triggers partner payout.
+   */
+  static async completeQcOrder(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { id } = req.params;
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+    let profileId: mongoose.Types.ObjectId | undefined = req.user?.profileId;
+
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      throw new BadRequestError('Invalid order ID');
+    }
+
+    if (!uid) {
+      throw new BadRequestError('Authentication required');
+    }
+
+    const Profile = mongoose.connection.collection('profiles');
+    let partnerProfile: any = null;
+    if (profileId) {
+      partnerProfile = await Profile.findOne({
+        _id: profileId instanceof mongoose.Types.ObjectId ? profileId : new mongoose.Types.ObjectId(profileId),
+      });
+    } else {
+      partnerProfile = await Profile.findOne({ uid });
+      if (partnerProfile) { profileId = partnerProfile._id; }
+    }
+
+    if (!profileId) {
+      throw new BadRequestError('Partner profile not found');
+    }
+
+    const partnerOid =
+      profileId instanceof mongoose.Types.ObjectId
+        ? profileId
+        : new mongoose.Types.ObjectId(profileId as string);
+
+    const qcConnection = await QcDatabase.getQcConnection();
+    const CustomerOrders = qcConnection.collection('customerorders');
+    const orderOid = new mongoose.Types.ObjectId(String(id));
+
+    // Fetch the order and verify this partner is assigned
+    const order = await CustomerOrders.findOne({ _id: orderOid });
+    if (!order) {
+      throw new BadRequestError('Quick Commerce order not found');
+    }
+
+    const assignedUid = order.assigneeUid || order.partnerUid || order.assignedTo?.userId;
+    const assignedProfileId = String(
+      order.assigneeId || order.partnerId || order.assignedTo?.profileId || '',
+    );
+    const isAssigned =
+      (assignedUid && assignedUid === uid) ||
+      (assignedProfileId && assignedProfileId === String(partnerOid));
+    if (!isAssigned) {
+      throw new ForbiddenError('You are not assigned to this order');
+    }
+
+    if (['DELIVERED', 'completed'].includes(String(order.status))) {
+      ApiResponse.success(res, { id: String(order._id), status: 'completed' }, 'Order already completed');
+      return;
+    }
+
+    const now = new Date();
+    await CustomerOrders.updateOne(
+      { _id: orderOid },
+      {
+        $set: {
+          status: 'DELIVERED',
+          completionStatus: 'approved',
+          completedAt: now,
+          completionApprovedAt: now,
+          updatedAt: now,
+        },
+      },
+    );
+
+    logger.info(
+      `[PartnerBookNow] completeQcOrder: Order ${id} marked DELIVERED by partner uid=${uid}`,
+    );
+
+    // Resolve delivery fee — default is always ₹29 for Quick Commerce
+    const deliveryFee =
+      (order.deliveryFeePaise ? order.deliveryFeePaise / 100 : 0) ||
+      (typeof order.budget === 'object' && order.budget?.amount ? order.budget.amount : QC_DEFAULT_DELIVERY_FEE_INR);
+
+    const orderNum = order.orderNumber
+      ? String(order.orderNumber)
+      : `#QC-${String(order._id).slice(-8).toUpperCase()}`;
+
+    // Trigger payout via payment service
+    try {
+      const payoutResult = await PaymentClient.processTaskCompletionPayout({
+        taskId: String(id),
+        performerUid: uid,
+        amount: deliveryFee,
+        taskTitle: order.title || `Quick Commerce Order ${orderNum}`,
+      });
+
+      logger.info(`[PartnerBookNow] completeQcOrder: Payout result for order ${id}`, {
+        success: payoutResult.success,
+        requiresBankAccount: payoutResult.requiresBankAccount,
+        error: payoutResult.error,
+        payoutId: payoutResult.payout?.payoutId,
+        payoutStatus: payoutResult.payout?.status,
+      });
+
+      const notifTitle = payoutResult.success
+        ? `\u20B9${deliveryFee} payout initiated \uD83C\uDF89`
+        : 'Delivery complete';
+      const notifBody = payoutResult.success
+        ? `Great job! Your delivery earnings of \u20B9${deliveryFee} for order ${orderNum} have been queued for payout.`
+        : `Order ${orderNum} completed. Payout initiation failed — please contact support.`;
+
+      await InAppNotificationClient.send({
+        userId: String(partnerOid),
+        title: notifTitle,
+        body: notifBody,
+        type: payoutResult.success ? 'success' : 'warning',
+        category: 'payments',
+        data: {
+          orderId: String(id),
+          orderNumber: orderNum,
+          deliveryFee,
+          actionUrl: '/profile?section=payments',
+          eventKey: payoutResult.success ? 'PAYOUT_INITIATED' : 'PAYOUT_FAILED',
+          entityType: 'qc_order',
+        },
+      });
+
+      ApiResponse.success(
+        res,
+        {
+          id: String(id),
+          orderNumber: orderNum,
+          status: 'completed',
+          deliveryFee,
+          payout: payoutResult.success
+            ? {
+                status: payoutResult.payout?.status || 'processing',
+                payoutId: payoutResult.payout?.payoutId,
+              }
+            : null,
+          payoutSuccess: payoutResult.success,
+          payoutError: payoutResult.error,
+        },
+        payoutResult.success
+          ? `Order delivered! \u20B9${deliveryFee} payout has been initiated.`
+          : 'Order delivered. Payout could not be initiated automatically.',
+      );
+    } catch (payoutErr: any) {
+      logger.error(`[PartnerBookNow] completeQcOrder: Payout exception for order ${id}`, {
+        error: payoutErr?.message,
+      });
+      ApiResponse.success(
+        res,
+        { id: String(id), status: 'completed', deliveryFee, payoutSuccess: false },
+        'Order marked as delivered. Payout will be processed shortly.',
+      );
+    }
   }
 
   /**

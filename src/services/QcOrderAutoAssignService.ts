@@ -427,13 +427,15 @@ export class QcOrderAutoAssignService {
           title,
           body: `New Quick Commerce order available from ${shopName}. Tap to apply!`,
           type: 'info',
-          category: 'taskUpdates',
+          category: 'recommendedTaskAlerts',
           data: {
             orderId: order.orderId,
             orderNumber: order.orderNumber,
             shopName: order.shopName,
             bookingSource: 'quick_commerce',
+            eventKey: 'TASK_NEARBY',
             action: 'apply_qc_order',
+            recipientRole: 'partner',
           },
         });
       } catch (inAppErr: any) {

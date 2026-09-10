@@ -8,6 +8,9 @@ export const QC_SHOP_PROXIMITY_KM = 2.5;
 /** Maximum distance (km) from partner location to seller shop for available orders on partner home screen. */
 export const QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM = 3.0;
 
+/** Default delivery fee (INR) paid to the partner for every Quick Commerce order completion. */
+export const QC_DEFAULT_DELIVERY_FEE_INR = 29;
+
 /** Earth radius in km for haversine distance calculation. */
 export const EARTH_RADIUS_KM = 6371;
 
