@@ -2,6 +2,7 @@ import { getRedisClient, REDIS_TTLS } from "../config/redis";
 import { emitPartnerLocation } from "../socket/taskSocketEmitter";
 import Task from "../models/Task";
 import TaskLiveLocation from "../models/TaskLiveLocation";
+import { findQcOrderById } from "../utils/qcOrderTaskAdapter";
 import logger from "../config/logger";
 
 export interface PartnerLocationUpdate {
@@ -38,6 +39,152 @@ type LastPersistedLocation = {
 
 const lastPersistedLocationByTask = new Map<string, LastPersistedLocation>();
 const lastProcessedTimestampByTask = new Map<string, number>();
+
+const TERMINAL_LOCATION_STATUSES = new Set([
+  "completed",
+  "cancelled",
+  "canceled",
+  "rejected",
+  "expired",
+  "delivered",
+  "failed",
+]);
+
+const SUBJECT_CACHE_MS = 15_000;
+
+const TASK_ACTIVE_LOCATION_STATUSES = new Set([
+  "assigned",
+  "started",
+  "in_progress",
+]);
+
+export type PartnerLocationSubject = {
+  taskId: string;
+  partnerId: string | null;
+  assigneeId: string | null;
+  requesterId: string | null;
+  requesterUid: string | null;
+  partnerUid: string | null;
+  status: string;
+  fulfillmentStatus?: string | null;
+  source: "task" | "qc";
+};
+
+type CachedLocationSubject = {
+  subject: PartnerLocationSubject | null;
+  expiresAt: number;
+};
+
+const locationSubjectCache = new Map<string, CachedLocationSubject>();
+
+function toIdString(value: unknown): string | null {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+export function isTerminalLocationStatus(
+  status?: string | null,
+  fulfillmentStatus?: string | null,
+): boolean {
+  return [status, fulfillmentStatus].some((value) =>
+    TERMINAL_LOCATION_STATUSES.has(String(value || "").toLowerCase()),
+  );
+}
+
+export function isActiveLocationStatus(subject: PartnerLocationSubject): boolean {
+  if (isTerminalLocationStatus(subject.status, subject.fulfillmentStatus)) {
+    return false;
+  }
+  if (subject.source === "qc") {
+    return true;
+  }
+  return TASK_ACTIVE_LOCATION_STATUSES.has(String(subject.status || "").toLowerCase());
+}
+
+export function isAssignedToLocationSubject(
+  subject: PartnerLocationSubject,
+  profileId: string,
+): boolean {
+  return subject.partnerId === profileId || subject.assigneeId === profileId;
+}
+
+export function canAccessPartnerLocation(
+  subject: PartnerLocationSubject,
+  actor: { profileId?: string | null; uid?: string | null },
+): boolean {
+  const profileId = toIdString(actor.profileId);
+  const uid = toIdString(actor.uid);
+  if (
+    profileId &&
+    (subject.requesterId === profileId ||
+      subject.partnerId === profileId ||
+      subject.assigneeId === profileId)
+  ) {
+    return true;
+  }
+  if (uid && (subject.requesterUid === uid || subject.partnerUid === uid)) {
+    return true;
+  }
+  return false;
+}
+
+export async function resolvePartnerLocationSubject(
+  taskId: string,
+): Promise<PartnerLocationSubject | null> {
+  const cached = locationSubjectCache.get(taskId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.subject;
+  }
+
+  const task = await Task.findById(taskId)
+    .select("partnerId assigneeId requesterId status")
+    .lean();
+
+  let subject: PartnerLocationSubject | null = null;
+  if (task) {
+    subject = {
+      taskId: String(task._id),
+      partnerId: toIdString(task.partnerId),
+      assigneeId: toIdString(task.assigneeId),
+      requesterId: toIdString(task.requesterId),
+      requesterUid: null,
+      partnerUid: null,
+      status: String(task.status || ""),
+      source: "task",
+    };
+  } else {
+    const qcOrder = await findQcOrderById(taskId);
+    if (qcOrder) {
+      const assigneeId =
+        toIdString(qcOrder.assigneeId) ||
+        toIdString(qcOrder.partnerId) ||
+        toIdString(qcOrder.assignedTo?.profileId);
+      subject = {
+        taskId: String(qcOrder._id),
+        partnerId: assigneeId,
+        assigneeId,
+        requesterId: toIdString(qcOrder.requesterId),
+        requesterUid: toIdString(qcOrder.requesterUid) || toIdString(qcOrder.userId),
+        partnerUid:
+          toIdString(qcOrder.partnerUid) ||
+          toIdString(qcOrder.assigneeUid) ||
+          toIdString(qcOrder.assignedTo?.userId),
+        status: String(qcOrder.status || ""),
+        fulfillmentStatus: qcOrder.fulfillmentStatus
+          ? String(qcOrder.fulfillmentStatus)
+          : null,
+        source: "qc",
+      };
+    }
+  }
+
+  locationSubjectCache.set(taskId, {
+    subject,
+    expiresAt: Date.now() + SUBJECT_CACHE_MS,
+  });
+  return subject;
+}
 
 function toRadians(value: number): number {
   return (value * Math.PI) / 180;
@@ -146,25 +293,22 @@ export async function processPartnerLocationUpdate(
     return { ok: false, reason: "stale-location" };
   }
 
-  const task = await Task.findById(taskId).select("partnerId assigneeId status").lean();
-  if (!task) {
+  const subject = await resolvePartnerLocationSubject(taskId);
+  if (!subject) {
     logger.warn(`⚠️  partner location rejected — task ${taskId} not found (profile: ${profileId})`);
     return { ok: false, reason: "task-not-found" };
   }
 
-  const taskPartnerId = task.partnerId?.toString() ?? null;
-  const taskAssigneeId = task.assigneeId?.toString() ?? null;
-  if (taskPartnerId !== profileId && taskAssigneeId !== profileId) {
+  if (!isAssignedToLocationSubject(subject, profileId)) {
     logger.warn(
       `🚫 partner location rejected — profile ${profileId} is not assigned to task ${taskId}`,
     );
     return { ok: false, reason: "not-assigned" };
   }
 
-  const activeStatuses = ["assigned", "started", "in_progress"];
-  if (!activeStatuses.includes(task.status)) {
+  if (!isActiveLocationStatus(subject)) {
     logger.warn(
-      `⚠️  partner location ignored — task ${taskId} is in status "${task.status}" (profile: ${profileId})`,
+      `⚠️  partner location ignored — task ${taskId} is in status "${subject.status}" (profile: ${profileId})`,
     );
     return { ok: false, reason: "inactive-status" };
   }

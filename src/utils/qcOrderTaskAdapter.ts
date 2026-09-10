@@ -179,6 +179,7 @@ export function normalizeQcOrderToTask(order: Record<string, any>): Record<strin
     createdAt: order.createdAt || new Date(),
     updatedAt: order.updatedAt || new Date(),
     isQCommerce: true,
+    fulfillmentStatus: order.fulfillmentStatus || null,
     items: itemsList,
     shopName,
     shopAddress,

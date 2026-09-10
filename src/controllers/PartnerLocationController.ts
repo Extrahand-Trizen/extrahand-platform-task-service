@@ -1,12 +1,15 @@
 import { Response } from 'express';
 import mongoose from 'mongoose';
-import Task from '../models/Task';
 import TaskLiveLocation from '../models/TaskLiveLocation';
 import { AuthenticatedRequest } from '../types';
 import { BadRequestError, ForbiddenError, NotFoundError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { getRedisClient } from '../config/redis';
-import { processPartnerLocationUpdate } from '../services/PartnerLocationService';
+import {
+  canAccessPartnerLocation,
+  processPartnerLocationUpdate,
+  resolvePartnerLocationSubject,
+} from '../services/PartnerLocationService';
 import logger from '../config/logger';
 
 const PARTNER_LOCATION_STALE_AFTER_MS = 2 * 60 * 1000;
@@ -113,27 +116,27 @@ export class PartnerLocationController {
     }
 
     const requesterProfileId = req.user?.profileId?.toString() ?? null;
-    if (!requesterProfileId) {
+    const requesterUid = req.user?.uid ?? null;
+    if (!requesterProfileId && !requesterUid) {
       throw new ForbiddenError('Profile context required');
     }
 
-    // Look up task to resolve its assigned partner's profileId and verify access.
-    const task = await Task.findById(id).select('requesterId partnerId assigneeId status').lean();
-    if (!task) {
+    const subject = await resolvePartnerLocationSubject(id);
+    if (!subject) {
       throw new NotFoundError('Task not found');
     }
 
-    const allowedProfileIds = [
-      task.requesterId?.toString(),
-      task.partnerId?.toString(),
-      task.assigneeId?.toString(),
-    ].filter(Boolean);
-    if (!allowedProfileIds.includes(requesterProfileId)) {
+    if (
+      !canAccessPartnerLocation(subject, {
+        profileId: requesterProfileId,
+        uid: requesterUid,
+      })
+    ) {
       throw new ForbiddenError('Not authorized to view partner location');
     }
 
-    // Prefer partnerId (Book Now flow); fall back to assigneeId (marketplace flow)
-    const partnerId = task.partnerId?.toString() ?? task.assigneeId?.toString() ?? null;
+    // Prefer partnerId (Book Now / QC); fall back to assigneeId (marketplace flow)
+    const partnerId = subject.partnerId ?? subject.assigneeId;
     if (!partnerId) {
       logger.warn('Partner location lookup missed — task has no assigned partner', {
         taskId: id,
