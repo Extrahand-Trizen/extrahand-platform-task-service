@@ -736,6 +736,8 @@ export class PartnerBookNowController {
         performerUid: uid,
         amount: deliveryFee,
         taskTitle: order.title || `Quick Commerce Order ${orderNum}`,
+        source: 'quick_commerce',
+        isQuickCommerce: true,
       });
 
       logger.info(`[PartnerBookNow] completeQcOrder: Payout result for order ${id}`, {
@@ -1223,6 +1225,8 @@ export class PartnerBookNowController {
               performerUid: uid,
               amount: payoutAmount,
               taskTitle: order.title || `Quick Commerce Order ${orderNum}`,
+              source: 'quick_commerce',
+              isQuickCommerce: true,
             });
 
             logger.info(`[PartnerBookNow] updateLeadStatus: Auto-payout result for QC order ${id}`, {
