@@ -50,7 +50,7 @@ const TERMINAL_LOCATION_STATUSES = new Set([
   "failed",
 ]);
 
-const SUBJECT_CACHE_MS = 15_000;
+const SUBJECT_CACHE_MS = 2_000;
 
 const TASK_ACTIVE_LOCATION_STATUSES = new Set([
   "assigned",
@@ -67,6 +67,8 @@ export type PartnerLocationSubject = {
   partnerUid: string | null;
   status: string;
   fulfillmentStatus?: string | null;
+  /** QC customer-leg journey only — live GPS after second Start Journey. */
+  executionPhase?: string | null;
   source: "task" | "qc";
 };
 
@@ -76,6 +78,11 @@ type CachedLocationSubject = {
 };
 
 const locationSubjectCache = new Map<string, CachedLocationSubject>();
+
+export function invalidatePartnerLocationSubject(taskId: string): void {
+  const id = String(taskId || "").trim();
+  if (id) locationSubjectCache.delete(id);
+}
 
 function toIdString(value: unknown): string | null {
   if (value == null) return null;
@@ -97,7 +104,8 @@ export function isActiveLocationStatus(subject: PartnerLocationSubject): boolean
     return false;
   }
   if (subject.source === "qc") {
-    return true;
+    // First Start Journey (to store) must not accept GPS. Only customer-leg on_the_way.
+    return String(subject.executionPhase || "").toLowerCase() === "on_the_way";
   }
   return TASK_ACTIVE_LOCATION_STATUSES.has(String(subject.status || "").toLowerCase());
 }
@@ -106,7 +114,13 @@ export function isAssignedToLocationSubject(
   subject: PartnerLocationSubject,
   profileId: string,
 ): boolean {
-  return subject.partnerId === profileId || subject.assigneeId === profileId;
+  const id = String(profileId || "").trim();
+  if (!id) return false;
+  return (
+    subject.partnerId === id ||
+    subject.assigneeId === id ||
+    subject.partnerUid === id
+  );
 }
 
 export function canAccessPartnerLocation(
@@ -160,19 +174,29 @@ export async function resolvePartnerLocationSubject(
         toIdString(qcOrder.assigneeId) ||
         toIdString(qcOrder.partnerId) ||
         toIdString(qcOrder.assignedTo?.profileId);
+      const partnerUid =
+        toIdString(qcOrder.partnerUid) ||
+        toIdString(qcOrder.assigneeUid) ||
+        toIdString(qcOrder.assignedTo?.userId);
       subject = {
         taskId: String(qcOrder._id),
         partnerId: assigneeId,
         assigneeId,
-        requesterId: toIdString(qcOrder.requesterId),
-        requesterUid: toIdString(qcOrder.requesterUid) || toIdString(qcOrder.userId),
-        partnerUid:
-          toIdString(qcOrder.partnerUid) ||
-          toIdString(qcOrder.assigneeUid) ||
-          toIdString(qcOrder.assignedTo?.userId),
-        status: String(qcOrder.status || ""),
+        requesterId:
+          toIdString(qcOrder.requesterId) ||
+          toIdString(qcOrder.customerId) ||
+          null,
+        requesterUid:
+          toIdString(qcOrder.requesterUid) ||
+          toIdString(qcOrder.userId) ||
+          toIdString(qcOrder.customerUid),
+        partnerUid,
+        status: String(qcOrder.status || "assigned"),
         fulfillmentStatus: qcOrder.fulfillmentStatus
           ? String(qcOrder.fulfillmentStatus)
+          : null,
+        executionPhase: qcOrder.executionPhase
+          ? String(qcOrder.executionPhase)
           : null,
         source: "qc",
       };
@@ -276,22 +300,33 @@ export async function processPartnerLocationUpdate(
     return { ok: false, reason: "invalid-payload" };
   }
 
-  const { taskId, lat, lng, timestamp, forcePersist } = data;
+  const { taskId, lat, lng, forcePersist } = data;
+  // Normalize seconds → ms if a client sends unix seconds.
+  const timestamp =
+    data.timestamp < 1_000_000_000_000 ? data.timestamp * 1000 : data.timestamp;
   if (!isValidCoordinate(lat, lng) || !Number.isFinite(timestamp)) {
     logger.warn(`⚠️  partner location rejected — invalid coordinates from profile: ${profileId}`);
     return { ok: false, reason: "invalid-payload" };
   }
 
   const now = Date.now();
-  if (timestamp < now - LOCATION_MAX_AGE_MS || timestamp > now + LOCATION_MAX_FUTURE_MS) {
-    logger.warn("⚠️  partner location rejected — stale/future timestamp", {
+  const timestampSkewed =
+    timestamp < now - LOCATION_MAX_AGE_MS || timestamp > now + LOCATION_MAX_FUTURE_MS;
+  if (timestampSkewed) {
+    logger.warn("⚠️  partner location timestamp skew detected — using server time", {
       profileId,
       taskId,
       timestamp,
       serverTimestamp: now,
+      skewMs: timestamp - now,
+      action: "using-server-receipt-time",
     });
-    return { ok: false, reason: "stale-location" };
   }
+
+  // Mobile device clocks can drift or jump after resume. The request arrived
+  // now, so use the server receipt time rather than dropping an otherwise valid
+  // live GPS point.
+  const acceptedTimestamp = timestampSkewed ? now : timestamp;
 
   const subject = await resolvePartnerLocationSubject(taskId);
   if (!subject) {
@@ -315,10 +350,10 @@ export async function processPartnerLocationUpdate(
 
   const processKey = `${taskId}:${profileId}`;
   const previousTimestamp = lastProcessedTimestampByTask.get(processKey);
-  if (previousTimestamp != null && timestamp <= previousTimestamp) {
+  if (previousTimestamp != null && acceptedTimestamp <= previousTimestamp) {
     return { ok: false, reason: "duplicate-location" };
   }
-  lastProcessedTimestampByTask.set(processKey, timestamp);
+  lastProcessedTimestampByTask.set(processKey, acceptedTimestamp);
 
   // Redis cache (best-effort — app keeps working if Redis is down).
   const redis = getRedisClient();
@@ -326,7 +361,7 @@ export async function processPartnerLocationUpdate(
     try {
       const key = `partner:location:${profileId}`;
       const taskKey = `task:partner-location:${taskId}`;
-      const value = JSON.stringify({ taskId, lat, lng, timestamp });
+      const value = JSON.stringify({ taskId, lat, lng, timestamp: acceptedTimestamp });
       await redis.set(key, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
       await redis.set(taskKey, value, "EX", REDIS_TTLS.PARTNER_LOCATION_SECONDS);
     } catch (err) {
@@ -341,7 +376,7 @@ export async function processPartnerLocationUpdate(
     partnerId: profileId,
     lat,
     lng,
-    timestamp,
+    timestamp: acceptedTimestamp,
     forcePersist,
   }).catch((err) => {
     logger.warn("Partner location snapshot persistence failed", {
@@ -352,7 +387,7 @@ export async function processPartnerLocationUpdate(
   });
 
   // Fan-out to the customer's task room.
-  emitPartnerLocation(taskId, { lat, lng, timestamp });
+  emitPartnerLocation(taskId, { lat, lng, timestamp: acceptedTimestamp });
   logger.info(`📍 partner location — profile ${profileId} → task:${taskId} [${lat}, ${lng}]`);
 
   return { ok: true };

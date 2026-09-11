@@ -44,6 +44,7 @@ import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { normalizeQcOrderToTask, findQcOrderById, updateQcOrderById } from '../utils/qcOrderTaskAdapter';
+import { invalidatePartnerLocationSubject } from './PartnerLocationService';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 import { resolveTaskStartForCancellationPolicy } from './cancellation/cancellationContext';
 import {
@@ -2371,13 +2372,19 @@ export class TaskService {
           updatedAt: now,
         };
         if (status === 'started') {
+          // First Start Journey = to store. Customer live ETA/GPS starts only on start-otp/send.
           qcUpdate.startedAt = now;
-          qcUpdate.executionPhase = 'on_the_way';
-          qcUpdate.onTheWayAt = now;
+          qcUpdate.executionPhase = 'assigned';
+          qcUpdate.executionPhaseUpdatedAt = now;
+          qcUpdate.onTheWayAt = null;
+          qcUpdate.arrivedAt = null;
         } else if (status === 'in_progress') {
+          // Store pickup verified — not arrived at customer yet.
           qcUpdate.inProgressAt = now;
-          qcUpdate.executionPhase = 'arrived';
-          qcUpdate.arrivedAt = now;
+          qcUpdate.executionPhase = 'assigned';
+          qcUpdate.executionPhaseUpdatedAt = now;
+          qcUpdate.onTheWayAt = null;
+          qcUpdate.arrivedAt = null;
         } else if (status === 'completed') {
           qcUpdate.completedAt = now;
           qcUpdate.completionStatus = 'approved';
@@ -3330,6 +3337,8 @@ export class TaskService {
           onTheWayAt: now,
           updatedAt: now,
         });
+        invalidatePartnerLocationSubject(String(qcOrder._id));
+        invalidatePartnerLocationSubject(taskId);
 
         logger.info(`[OTP] Generated 4-digit start OTP: ${otp} for QC order: ${qcOrder._id}`);
         return { sentTo: qcOrder.address?.phone || qcOrder.requesterUid || 'Customer' };

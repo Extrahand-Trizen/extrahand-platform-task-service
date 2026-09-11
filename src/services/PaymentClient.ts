@@ -617,6 +617,8 @@ export class PaymentClient {
     amount: number;
     taskTitle?: string;
     visitId?: string;
+    source?: string;
+    isQuickCommerce?: boolean;
   }): Promise<{ success: boolean; payout?: any; requiresBankAccount?: boolean; error?: string }> {
     try {
       if (!this.baseURL || !this.serviceAuthToken) {

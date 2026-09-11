@@ -98,6 +98,9 @@ export class PartnerLocationController {
     if (result.reason === 'inactive-status') {
       throw new BadRequestError('Task is not in an active tracking status');
     }
+    if (result.reason === 'stale-location') {
+      throw new BadRequestError('Location timestamp is stale or invalid');
+    }
     throw new BadRequestError('Invalid location payload');
   }
 
