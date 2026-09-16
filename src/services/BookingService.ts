@@ -210,6 +210,17 @@ function partnerStateSeverity(state: ReschedulePartnerState): number {
   }
 }
 
+function normalizePreferredHelperGender(
+  value: unknown,
+): 'any' | 'male' | 'female' | undefined {
+  if (value == null || value === '') return undefined;
+  const raw = String(value).trim().toLowerCase();
+  if (raw === 'any') return 'any';
+  if (raw === 'male' || raw === 'man') return 'male';
+  if (raw === 'female' || raw === 'woman') return 'female';
+  throw new BadRequestError('preferredHelperGender must be any, male, or female');
+}
+
 function parseCalendarDate(date: string): Date {
   const trimmed = String(date || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
@@ -606,6 +617,7 @@ export class BookingService {
     serviceType?: string;
     consultationMeta?: ConsultationBookingMeta;
     gstExempt?: boolean;
+    preferredHelperGender?: 'any' | 'male' | 'female' | string;
   }) {
     const {
       customerUid,
@@ -626,6 +638,9 @@ export class BookingService {
     } = params;
 
     const fulfillmentType = parseBookingFulfillmentType(params.fulfillmentType);
+    const preferredHelperGender = normalizePreferredHelperGender(
+      params.preferredHelperGender,
+    );
     const {
       serviceFlowType,
       bookingKind,
@@ -892,6 +907,7 @@ export class BookingService {
       total: pricing.total,
       pendingLines: resolvedLinesWithSchedule.map(serializePendingLine),
       bookingNotes: notes?.trim() || undefined,
+      ...(preferredHelperGender ? { preferredHelperGender } : {}),
       serviceFlowType: normalizedOrderServiceFlowType,
       bookingKind: normalizedOrderBookingKind,
       serviceType: normalizedOrderServiceType,
@@ -1404,6 +1420,9 @@ export class BookingService {
     if (!hydrated.subcategory && line.packageSlug) {
       hydrated.subcategory = line.packageSlug;
     }
+    if (!hydrated.preferredHelperGender && order.preferredHelperGender) {
+      hydrated.preferredHelperGender = order.preferredHelperGender;
+    }
 
     return hydrated as unknown as InstanceType<typeof Task>;
   }
@@ -1689,6 +1708,9 @@ export class BookingService {
               bookingSource: 'book_now' as const,
               bookingOrderId: order.orderId,
               assignmentStatus: 'pending' as const,
+              ...(order.preferredHelperGender
+                ? { preferredHelperGender: order.preferredHelperGender }
+                : {}),
               serviceFlowType: line.serviceFlowType || order.serviceFlowType || 'standard',
               bookingKind: line.bookingKind || order.bookingKind || 'standard',
               serviceType:

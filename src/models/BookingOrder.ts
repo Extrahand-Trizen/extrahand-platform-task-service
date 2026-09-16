@@ -65,6 +65,11 @@ export interface IBookingOrder extends Document {
   /** Serialized cart lines — tasks are created only after payment succeeds. */
   pendingLines?: Record<string, unknown>[];
   bookingNotes?: string;
+  /**
+   * Soft customer preference for helper gender (Hourly Direct Buy).
+   * Values align with Profile.gender: male | female | any.
+   */
+  preferredHelperGender?: 'any' | 'male' | 'female';
   serviceFlowType?: 'standard' | 'consultation_project';
   bookingKind?: 'standard' | 'consultation' | 'project';
   serviceType?: string;
@@ -142,6 +147,11 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     deletedByCustomerId: { type: String, index: true },
     pendingLines: { type: [Schema.Types.Mixed], default: undefined },
     bookingNotes: String,
+    preferredHelperGender: {
+      type: String,
+      enum: ['any', 'male', 'female'],
+      required: false,
+    },
     serviceFlowType: {
       type: String,
       enum: ['standard', 'consultation_project'],

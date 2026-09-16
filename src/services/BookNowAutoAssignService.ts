@@ -344,6 +344,7 @@ export interface EligiblePartner {
   distKm: number | null;
   workArea: string;
   workAreaDistKm: number;
+  gender?: string | null;
 }
 
 export interface AutoAssignResult {
@@ -359,6 +360,61 @@ type AutoAssignOptions = {
   /** Send partner ring notification (default true for new assignments). */
   notifyPartner?: boolean;
 };
+
+function normalizePartnerGender(value: unknown): string | null {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (!raw) return null;
+  if (raw === 'male' || raw === 'man' || raw === 'm') return 'male';
+  if (raw === 'female' || raw === 'woman' || raw === 'f') return 'female';
+  return raw;
+}
+
+function resolvePreferredHelperGender(task: ITask): 'male' | 'female' | null {
+  const raw = String((task as { preferredHelperGender?: string }).preferredHelperGender || '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'male' || raw === 'man') return 'male';
+  if (raw === 'female' || raw === 'woman') return 'female';
+  return null;
+}
+
+function partnerMatchesPreferredGender(
+  partner: EligiblePartner,
+  preferred: 'male' | 'female',
+): boolean {
+  return normalizePartnerGender(partner.gender) === preferred;
+}
+
+/**
+ * Soft gender preference: rank matching-gender partners first, then by distance.
+ * Never filters out eligible partners — fallback to any eligible by distance.
+ */
+function sortPartnersByPreferenceThenDistance(
+  partners: EligiblePartner[],
+  preferredGender: 'male' | 'female' | null,
+): EligiblePartner[] {
+  const byDistance = sortPartnersByDistance(partners);
+  if (!preferredGender) return byDistance;
+  const preferred = byDistance.filter((p) =>
+    partnerMatchesPreferredGender(p, preferredGender),
+  );
+  if (preferred.length === 0) return byDistance;
+  const others = byDistance.filter(
+    (p) => !partnerMatchesPreferredGender(p, preferredGender),
+  );
+  return [...preferred, ...others];
+}
+
+function readPartnerGender(profile: Record<string, unknown>): string | null {
+  const pp = (profile.partnerProfile as Record<string, unknown> | undefined) || {};
+  return (
+    normalizePartnerGender(profile.gender) ||
+    normalizePartnerGender(pp.gender) ||
+    null
+  );
+}
 
 export class BookNowAutoAssignService {
   /**
@@ -630,12 +686,16 @@ export class BookNowAutoAssignService {
           distKm,
           workArea: wa.area,
           workAreaDistKm: wa.distKm,
+          gender: readPartnerGender(p as Record<string, unknown>),
         });
       }
 
       if (areaPartners.length === 0) continue;
 
-      return sortPartnersByDistance(areaPartners)[0];
+      return sortPartnersByPreferenceThenDistance(
+        areaPartners,
+        resolvePreferredHelperGender(task),
+      )[0];
     }
 
     return null;
@@ -671,11 +731,15 @@ export class BookNowAutoAssignService {
         distKm: resolvePartnerDistanceKm(taskCoords, p),
         workArea: postedArea,
         workAreaDistKm: 0,
+        gender: readPartnerGender(p),
       });
     }
 
     if (!eligible.length) return null;
-    return sortPartnersByDistance(eligible)[0];
+    return sortPartnersByPreferenceThenDistance(
+      eligible,
+      resolvePreferredHelperGender(task),
+    )[0];
   }
 
   private static async findPreferredPartnerForTask(
