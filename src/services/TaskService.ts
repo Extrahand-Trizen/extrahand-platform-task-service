@@ -27,6 +27,7 @@ import { config } from "../config/env";
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { getRedisClient, REDIS_TTLS } from '../config/redis';
 import { notifyPosterOnTaskCompleted, resolveTaskParticipantUids } from "./taskCompletionPosterNotify";
+import { notifyPartnerOnTaskCancelledByCustomer } from "./taskCancellationPartnerNotify";
 import { acceptsPosterDummyStartOtp } from '../utils/startOtpBypass';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
@@ -2985,7 +2986,15 @@ export class TaskService {
           }
         }
 
-        if (otherPartyId) {
+        if (isRequesterCancelled) {
+          // Customer cancelled → notify assigned partner/helper
+          await notifyPartnerOnTaskCancelledByCustomer({
+            task,
+            cancellerUid: cancellerProfile?.uid || profileId,
+            reason: options?.cancellationReason,
+          });
+        } else if (otherPartyId) {
+          // Performer/helper cancelled → notify customer
           const otherProfile = await Profile.findOne({ _id: otherPartyId });
           if (otherProfile?.email) {
             EmailServiceClient.sendTaskCancelled(otherProfile.email, {
@@ -3004,14 +3013,9 @@ export class TaskService {
           }
 
           if (otherProfile?.uid) {
-            // isRequesterCancelled = true means the poster/partner cancelled → notify helper
-            // isRequesterCancelled = false means the performer/helper cancelled → notify partner
-            const otherRole = isRequesterCancelled ? 'helper' : 'partner';
-            logger.info('[TaskService.updateTaskStatus] Sending task cancelled in-app notification', {
+            logger.info('[TaskService.updateTaskStatus] Sending task cancelled in-app notification to customer', {
               taskId,
               recipientUid: otherProfile.uid,
-              recipientRole: otherRole,
-              cancelledBy: isRequesterCancelled ? 'partner' : 'helper',
               actionUrl: `${config.WEB_APP_URL}/tasks/${taskId}/track`,
             });
 
@@ -3024,15 +3028,11 @@ export class TaskService {
               data: {
                 taskId: taskId.toString(),
                 actionUrl: `/tasks/${taskId}/track`,
-                recipientRole: otherRole,
+                recipientRole: 'partner',
               },
             });
 
-            // Push → notification-service → Dialog WhatsApp (when Settings WA is on).
-            // eventKey selects customer vs helper Meta cancel template via Dialog rules.
-            const cancelEventKey = isRequesterCancelled
-              ? 'TASK_CANCELLED_HELPER'
-              : 'TASK_CANCELLED_CUSTOMER';
+            const cancelEventKey = 'TASK_CANCELLED_CUSTOMER';
             const cancelTitle = 'Task cancelled';
             const cancelBody = `The task "${task.title}" has been cancelled.`;
             const cancelTaskTitle = task.title || 'your task';
@@ -3061,7 +3061,6 @@ export class TaskService {
               });
             }
 
-            // Dialog WhatsApp — customer cancel → helper gets extrahand_work_cancelled_helper
             const waMinute = Math.floor(Date.now() / 60000);
             fireDialogWhatsAppForUser({
               uid: otherProfile.uid,
@@ -3077,22 +3076,17 @@ export class TaskService {
                 `eh-push:${otherProfile.uid}:${cancelEventKey}:${taskId}:${waMinute}`.slice(0, 200),
             });
 
-            // Legacy messaging-service path (no-op when WHATSAPP_SUPPRESS_LEGACY=true).
             fireWhatsAppNotify({
               uid: otherProfile.uid,
-              templateKey: isRequesterCancelled
-                ? 'wa_work_cancelled_helper'
-                : 'wa_work_cancelled_customer',
+              templateKey: 'wa_work_cancelled_customer',
               category: 'taskUpdates',
               templateBody: { var_1: cancelTaskTitle },
               templateButtons: taskOpenAppButton(taskId.toString()),
               idempotencyKey: `cancel:${taskId.toString()}:${otherProfile.uid}`,
               metadata: {
                 workId: taskId.toString(),
-                recipientRole: isRequesterCancelled ? 'helper' : 'customer',
-                metaTemplateName: isRequesterCancelled
-                  ? 'extrahand_work_cancelled_helper'
-                  : 'extrahand_work_cancelled_customer',
+                recipientRole: 'customer',
+                metaTemplateName: 'extrahand_work_cancelled_customer',
               },
             });
           }

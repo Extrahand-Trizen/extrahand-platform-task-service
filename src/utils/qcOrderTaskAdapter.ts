@@ -141,8 +141,43 @@ export function normalizeQcOrderToTask(order: Record<string, any>): Record<strin
       locality: city,
       taskArea: order.location?.taskArea || order.address?.area || city,
     },
-    scheduledDate: order.scheduledDate || order.createdAt || new Date(),
-    scheduledTimeStart: order.scheduledTimeStart || '05:30 AM',
+    scheduledDate: (() => {
+      const placedEvent = Array.isArray(order.fulfillmentEvents)
+        ? order.fulfillmentEvents.find((e: any) => e?.action === 'PLACED')
+        : null;
+      return (
+        placedEvent?.at ||
+        order.confirmedAt ||
+        order.confirmed_at ||
+        order.placedAt ||
+        order.paidAt ||
+        order.scheduledDate ||
+        order.createdAt ||
+        new Date()
+      );
+    })(),
+    scheduledTimeStart:
+      order.scheduledTimeStart ||
+      (() => {
+        const placedEvent = Array.isArray(order.fulfillmentEvents)
+          ? order.fulfillmentEvents.find((e: any) => e?.action === 'PLACED')
+          : null;
+        const placedDate =
+          placedEvent?.at ||
+          order.confirmedAt ||
+          order.confirmed_at ||
+          order.placedAt ||
+          order.paidAt ||
+          order.scheduledDate ||
+          order.createdAt ||
+          new Date();
+        return new Date(placedDate).toLocaleTimeString('en-IN', {
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+          timeZone: 'Asia/Kolkata',
+        });
+      })(),
     scheduledTimeEnd: order.scheduledTimeEnd || '',
     dateOption: 'specific',
     urgency: order.urgency || 'urgent',
