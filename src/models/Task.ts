@@ -396,6 +396,11 @@ export interface ITask extends Document {
   bookingOrderId?: string;
   bookingItemId?: string;
   assignmentStatus?: 'pending' | 'assigned' | 'failed';
+  /**
+   * Soft customer preference for helper gender (Hourly Direct Buy).
+   * Copied from BookingOrder; used by BookNowAutoAssignService ranking only.
+   */
+  preferredHelperGender?: 'any' | 'male' | 'female';
 
   /** Partner who accepted this Book Now lead */
   partnerId?: mongoose.Types.ObjectId | null;
@@ -1001,6 +1006,11 @@ const TaskSchema = new Schema<ITask>(
     },
     bookingOrderId: { type: String, index: true },
     bookingItemId: String,
+    preferredHelperGender: {
+      type: String,
+      enum: ['any', 'male', 'female'],
+      required: false,
+    },
     assignmentStatus: {
       type: String,
       enum: ['pending', 'assigned', 'failed'],

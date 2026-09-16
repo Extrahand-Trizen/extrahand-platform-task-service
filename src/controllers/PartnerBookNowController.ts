@@ -1205,13 +1205,16 @@ export class PartnerBookNowController {
           updatedAt: now,
         };
         if (newStatus === 'started') {
+          // First Start Journey = heading to the seller store.
+          // Do NOT put the customer journey live yet (that is start-otp / second Start Journey).
           qcUpdate.startedAt = now;
-          qcUpdate.executionPhase = 'on_the_way';
-          qcUpdate.onTheWayAt = now;
+          qcUpdate.executionPhase = 'assigned';
+          qcUpdate.executionPhaseUpdatedAt = now;
         } else if (newStatus === 'in_progress') {
+          // Picked up / verified at store — still not on the way to the customer.
           qcUpdate.inProgressAt = now;
-          qcUpdate.executionPhase = 'arrived';
-          qcUpdate.arrivedAt = now;
+          qcUpdate.executionPhase = 'assigned';
+          qcUpdate.executionPhaseUpdatedAt = now;
         } else if (newStatus === 'completed') {
           qcUpdate.completedAt = now;
           qcUpdate.completionStatus = 'approved';
@@ -1219,7 +1222,16 @@ export class PartnerBookNowController {
           qcUpdate.fulfillmentStatus = 'HANDED_OVER';
         }
 
-        await CustomerOrders.updateOne({ _id: order._id }, { $set: qcUpdate });
+        await CustomerOrders.updateOne(
+          { _id: order._id },
+          {
+            $set: qcUpdate,
+            // Clear any stale customer-leg journey fields from older builds.
+            ...(newStatus === 'started' || newStatus === 'in_progress'
+              ? { $unset: { onTheWayAt: '', arrivedAt: '' } }
+              : {}),
+          },
+        );
 
         console.log(`[PartnerBookNow] updateLeadStatus: QC task=${id} uid=${uid} newStatus=${newStatus}`);
 

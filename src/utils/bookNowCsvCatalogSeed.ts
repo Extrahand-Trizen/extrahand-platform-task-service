@@ -1187,17 +1187,17 @@ function buildPrefixServices(
     }>;
   },
 ): BookNowCsvHubSectionSeed {
-  const services = config.serviceMap
-    .map((service) => ({
-      serviceId: service.serviceId,
-      label: service.label,
-      categorySlug: service.categorySlug,
-      imageUrl: service.imageUrl,
-      sectionId: service.sectionId,
-      serviceSortOrder: service.sortOrder,
-      packages: section.items.filter((item) => service.match.test(item.name)),
-    }))
-    .filter((service) => service.packages.length > 0);
+  const services = config.serviceMap.map((service) => ({
+    serviceId: service.serviceId,
+    label: service.label,
+    categorySlug: service.categorySlug,
+    imageUrl: service.imageUrl,
+    sectionId: service.sectionId,
+    serviceSortOrder: service.sortOrder,
+    packages: section.items.filter((item) => service.match.test(item.name)),
+  }));
+  // Keep every configured hub tile (e.g. AC Install/Uninstall) even when CSV
+  // package names differ; CatalogService still requires the category to have packages.
 
   return {
     slug: config.slug,
@@ -1560,8 +1560,8 @@ export function buildBookNowCsvSeed(): BookNowCsvSeed {
         { match: /^AC Repair/i, serviceId: 'ac-repair', label: 'AC Repair', categorySlug: 'ac-services', imageUrl: cdnImage('acrepair-booknow'), sectionId: 'repair', sortOrder: 1 },
         { match: /^Foam Jet AC Service/i, serviceId: 'ac-servicing', label: 'AC Servicing', categorySlug: 'ac-services', imageUrl: cdnImage('foanjetacservice-booknow'), sectionId: 'servicing', sortOrder: 2 },
         { match: /^AC Gas Refill/i, serviceId: 'gas-refill', label: 'Gas Refill', categorySlug: 'ac-services', imageUrl: cdnImage('gasrefill-booknow'), sectionId: 'gas-refill', sortOrder: 3 },
-        { match: /^AC Installation/i, serviceId: 'install', label: 'Install', categorySlug: 'ac-services', imageUrl: cdnImage('acinstall-booknow'), sectionId: 'install', sortOrder: 4 },
-        { match: /^AC Uninstallation/i, serviceId: 'uninstall', label: 'Uninstall', categorySlug: 'ac-services', imageUrl: cdnImage('acuninstall-booknow'), sectionId: 'uninstall', sortOrder: 5 },
+        { match: /AC Installation/i, serviceId: 'install', label: 'Install', categorySlug: 'ac-services', imageUrl: cdnImage('acinstall-booknow'), sectionId: 'install', sortOrder: 4 },
+        { match: /AC Uninstallation/i, serviceId: 'uninstall', label: 'Uninstall', categorySlug: 'ac-services', imageUrl: cdnImage('acuninstall-booknow'), sectionId: 'uninstall', sortOrder: 5 },
       ],
     }),
     buildPrefixServices(sectionMap.get('APPLIANCES REPAIR') || { title: 'APPLIANCES REPAIR', items: [] }, {

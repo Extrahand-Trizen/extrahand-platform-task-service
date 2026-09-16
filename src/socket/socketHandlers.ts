@@ -1,8 +1,11 @@
 import { Server as SocketIOServer, Socket } from "socket.io";
-import Task from "../models/Task";
 import logger from "../config/logger";
 import { socketAuthMiddleware } from "../middleware/socketAuth";
-import { processPartnerLocationUpdate } from "../services/PartnerLocationService";
+import {
+  canAccessPartnerLocation,
+  processPartnerLocationUpdate,
+  resolvePartnerLocationSubject,
+} from "../services/PartnerLocationService";
 import {
   getTaskSocketServer,
   setTaskSocketServer,
@@ -32,19 +35,18 @@ export function initializeSocketHandlers(ioServer: SocketIOServer) {
           return;
         }
 
-        const task = await Task.findById(taskId).select("requesterId partnerId assigneeId").lean();
-        if (!task) {
+        const subject = await resolvePartnerLocationSubject(taskId);
+        if (!subject) {
           logger.warn(`⚠️ task:join rejected — task ${taskId} not found (profile: ${profileId})`);
           return;
         }
 
-        const allowedProfileIds = [
-          task.requesterId?.toString(),
-          task.partnerId?.toString(),
-          task.assigneeId?.toString(),
-        ].filter(Boolean);
-
-        if (!allowedProfileIds.includes(profileId)) {
+        if (
+          !canAccessPartnerLocation(subject, {
+            profileId,
+            uid: (socket as any).uid ?? null,
+          })
+        ) {
           logger.warn(`🚫 task:join rejected — profile ${profileId} cannot join task ${taskId}`);
           return;
         }

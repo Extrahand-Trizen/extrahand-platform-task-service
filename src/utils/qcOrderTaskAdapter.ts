@@ -202,7 +202,11 @@ export function normalizeQcOrderToTask(order: Record<string, any>): Record<strin
     confirmed: Boolean(order.confirmed),
     confirmedAt: order.confirmedAt || order.confirmed_at || null,
     confirmed_at: order.confirmedAt || order.confirmed_at || null,
-    executionPhase: order.executionPhase || (status === 'started' ? 'on_the_way' : status === 'in_progress' ? 'arrived' : 'assigned'),
+    // Customer live journey uses explicit executionPhase from start-otp/send + mark-arrived.
+    // Do not infer on_the_way/arrived from Book Now lead statuses (started = to store, in_progress = picked up).
+    executionPhase:
+      order.executionPhase ||
+      (order.arrivedAt ? 'arrived' : order.onTheWayAt ? 'on_the_way' : 'assigned'),
     onTheWayAt: order.onTheWayAt,
     arrivedAt: order.arrivedAt,
     startOtp: order.startOtp,
@@ -215,6 +219,7 @@ export function normalizeQcOrderToTask(order: Record<string, any>): Record<strin
     createdAt: order.createdAt || new Date(),
     updatedAt: order.updatedAt || new Date(),
     isQCommerce: true,
+    fulfillmentStatus: order.fulfillmentStatus || null,
     items: itemsList,
     shopName,
     shopAddress,

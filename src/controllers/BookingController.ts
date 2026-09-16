@@ -36,6 +36,7 @@ export class BookingController {
       serviceType,
       consultationMeta,
       gstExempt,
+      preferredHelperGender,
     } = req.body;
 
     const hasItems = Array.isArray(items) && items.length > 0;
@@ -70,6 +71,7 @@ export class BookingController {
       serviceType,
       consultationMeta,
       gstExempt: gstExempt === true,
+      preferredHelperGender,
     });
 
     res.status(201).json({
