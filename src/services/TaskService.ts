@@ -34,7 +34,7 @@ import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
-import { BookNowAutoAssignService } from './BookNowAutoAssignService';
+import { BookNowAutoAssignService, isHourlyTask } from './BookNowAutoAssignService';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
@@ -190,6 +190,7 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     // Book Now Hourly Helper (catalog slug / mistaken SKU taskCategory)
     helper: "other",
     "hourly-helper": "other",
+    "hourly-based": "other",
     handyperson: "repair",
     "furniture-assembly": "assembly",
     "security-patrol": "other",
@@ -1299,6 +1300,8 @@ export class TaskService {
       status: "open",
       createdAt: new Date(),
       updatedAt: new Date(),
+      ...(taskData.bookingSource ? { bookingSource: taskData.bookingSource } : {}),
+      ...(taskData.preferredHelperGender ? { preferredHelperGender: taskData.preferredHelperGender } : {}),
     };
 
     if (taskPayload.scheduledDate) {
@@ -1541,7 +1544,7 @@ export class TaskService {
 
     const taskRecord = task.toObject() as ITask;
 
-    if (taskRecord.bookingSource === 'book_now') {
+    if (taskRecord.bookingSource === 'book_now' || isHourlyTask(taskRecord)) {
       try {
         await BookNowAutoAssignService.autoAssign(taskRecord);
       } catch (autoAssignErr) {

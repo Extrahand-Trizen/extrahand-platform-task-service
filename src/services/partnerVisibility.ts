@@ -55,6 +55,8 @@ const CATEGORY_MAP: Record<string, string[]> = {
   'home-cleaning': ['cleaning', 'home-cleaning'],
   'pest-control': ['pest-control'],
   'beauty-services': ['beauty-services', 'beauty', 'beautician', 'salon'],
+  'hourly-helper': ['hourly-helper', 'hourly-based', 'other'],
+  'hourly-based': ['hourly-based', 'hourly-helper', 'other'],
 };
 
 export function normalizeCategory(input: string): string {
@@ -113,9 +115,9 @@ const PARTNER_CATEGORY_TO_TASK_CATEGORIES: Record<string, string[]> = {
   'home_services': ALL_BOOK_NOW_TASK_CATEGORIES,
   handyperson: ALL_BOOK_NOW_TASK_CATEGORIES,
   handyman: ALL_BOOK_NOW_TASK_CATEGORIES,
-  // Cleaning family.
-  cleaning: ['cleaning'],
-  'home-cleaning': ['cleaning'],
+  // Cleaning family — also eligible for hourly-based/hourly-helper tasks (category: 'other').
+  cleaning: ['cleaning', 'other'],
+  'home-cleaning': ['cleaning', 'other'],
   // Repair family (plumbing / electrical / carpentry / AC / appliance).
   repair: ['repair'],
   plumbing: ['repair'],
@@ -170,6 +172,12 @@ const PARTNER_CATEGORY_TO_TASK_CATEGORIES: Record<string, string[]> = {
   'care-services': ['other'],
   'professional-services': ['other'],
   'event-services': ['other'],
+  'hourly-helper': ALL_BOOK_NOW_TASK_CATEGORIES,
+  'hourly-based': ALL_BOOK_NOW_TASK_CATEGORIES,
+  'home-help': ['cleaning', 'other'],
+  'kitchen-help': ['cleaning', 'other'],
+  'heavy-work': ['delivery', 'other'],
+  'event-help': ['other'],
 };
 
 const PAINTING_SUPPLY_CATEGORY_SLUGS = new Set([

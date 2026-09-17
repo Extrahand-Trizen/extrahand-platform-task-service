@@ -323,6 +323,10 @@ export interface IDispatchCandidateLog {
   distanceKm?: number | null;
   notifiedAt?: Date | string | null;
   respondedAt?: Date | string | null;
+  /** Partner's gender as stored in their profile */
+  gender?: string | null;
+  /** Whether this candidate passed the gender preference check */
+  genderCheckResult?: 'passed' | 'failed' | null;
 }
 
 export interface IDispatchAreaLog {
@@ -378,6 +382,24 @@ function resolvePreferredHelperGender(task: ITask): 'male' | 'female' | null {
   if (raw === 'male' || raw === 'man') return 'male';
   if (raw === 'female' || raw === 'woman') return 'female';
   return null;
+}
+
+export function isHourlyTask(task: ITask): boolean {
+  const slug = String((task as any).categorySlug || '').trim().toLowerCase();
+  const cat = String(task.category || '').trim().toLowerCase();
+  const label = String((task as any).categoryLabel || '').trim().toLowerCase();
+  const budgetType = String(task.budget?.type || '').trim().toLowerCase();
+  const hourlyFlag = Boolean((task as any).hourlyHelper);
+  return (
+    slug === 'hourly-helper' ||
+    slug === 'hourly-based' ||
+    cat === 'hourly-helper' ||
+    cat === 'hourly-based' ||
+    label === 'hourly based' ||
+    label === 'hourly helper' ||
+    budgetType === 'hourly' ||
+    hourlyFlag
+  );
 }
 
 function partnerMatchesPreferredGender(
@@ -454,6 +476,9 @@ export class BookNowAutoAssignService {
       task.partnerUid ||
       (task.partnerId ? String(task.partnerId) : undefined);
 
+    const isHourly = isHourlyTask(task);
+    const preferredGender = resolvePreferredHelperGender(task);
+
     const dispatchAreaLogs: IDispatchAreaLog[] = [];
 
     // 2. Evaluate each area
@@ -487,6 +512,11 @@ export class BookNowAutoAssignService {
         const workShifts: string[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
         const shiftLabel = formatShiftLabel(workShifts);
         const timingMatches = checkTimingMatch(workShifts, task);
+        const partnerGender = readPartnerGender(p as Record<string, unknown>);
+        const isGenderMismatch =
+          isHourly &&
+          preferredGender &&
+          normalizePartnerGender(partnerGender) !== preferredGender;
 
         // Distance
         let distKm: number | null = null;
@@ -508,6 +538,10 @@ export class BookNowAutoAssignService {
             shiftTiming: shiftLabel,
             details: 'on leave today',
             reasons: ['on leave today'],
+            gender: partnerGender,
+            genderCheckResult: isHourly && preferredGender
+              ? (normalizePartnerGender(partnerGender) === preferredGender ? 'passed' : 'failed')
+              : null,
           });
         } else if (!timingMatches) {
           candidates.push({
@@ -518,6 +552,22 @@ export class BookNowAutoAssignService {
             shiftTiming: shiftLabel,
             details: `shift ${shiftLabel}, no overlap with ${taskTimeString} job`,
             reasons: [`shift ${shiftLabel}, no overlap with ${taskTimeString} job`],
+            gender: partnerGender,
+            genderCheckResult: isHourly && preferredGender
+              ? (normalizePartnerGender(partnerGender) === preferredGender ? 'passed' : 'failed')
+              : null,
+          });
+        } else if (isGenderMismatch) {
+          candidates.push({
+            partnerId: String(p._id),
+            partnerUid: String(p.uid),
+            name: partnerName,
+            status: 'ineligible',
+            shiftTiming: shiftLabel,
+            details: `gender preference is ${preferredGender}, partner is ${partnerGender || 'unspecified'}`,
+            reasons: [`gender preference is ${preferredGender}`],
+            gender: partnerGender,
+            genderCheckResult: 'failed',
           });
         } else {
           // Eligible!
@@ -532,6 +582,8 @@ export class BookNowAutoAssignService {
               distanceKm: distKm,
               details: `shift ${shiftLabel}, ${distStr} — assigned`,
               reasons: [],
+              gender: partnerGender,
+              genderCheckResult: isHourly && preferredGender ? 'passed' : null,
             });
           } else if (task.status === 'assigned' && !isThisAssigned) {
             candidates.push({
@@ -543,6 +595,8 @@ export class BookNowAutoAssignService {
               distanceKm: distKm,
               details: `shift ${shiftLabel}, ${distStr}`,
               reasons: [],
+              gender: partnerGender,
+              genderCheckResult: isHourly && preferredGender ? 'passed' : null,
             });
           } else {
             candidates.push({
@@ -554,6 +608,8 @@ export class BookNowAutoAssignService {
               distanceKm: distKm,
               details: `shift ${shiftLabel}, ${distStr}`,
               reasons: [],
+              gender: partnerGender,
+              genderCheckResult: isHourly && preferredGender ? 'passed' : null,
             });
           }
         }
@@ -651,6 +707,8 @@ export class BookNowAutoAssignService {
       return BookNowAutoAssignService.findBestPartnerForConsultation(task, profiles, taskCoords);
     }
 
+    const isHourly = isHourlyTask(task);
+    const preferredGender = resolvePreferredHelperGender(task);
     const orderedWorkAreas = buildOrderedWorkAreasForDispatch(task);
 
     for (const wa of orderedWorkAreas) {
@@ -677,6 +735,15 @@ export class BookNowAutoAssignService {
         const workShifts: string[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
         if (!checkTimingMatch(workShifts, task)) continue;
 
+        const partnerGender = readPartnerGender(p as Record<string, unknown>);
+
+        // STRICT GENDER MATCH FOR HOURLY WORKS:
+        if (isHourly && preferredGender) {
+          if (normalizePartnerGender(partnerGender) !== preferredGender) {
+            continue;
+          }
+        }
+
         const distKm = resolvePartnerDistanceKm(taskCoords, p as Record<string, unknown>);
 
         areaPartners.push({
@@ -686,15 +753,19 @@ export class BookNowAutoAssignService {
           distKm,
           workArea: wa.area,
           workAreaDistKm: wa.distKm,
-          gender: readPartnerGender(p as Record<string, unknown>),
+          gender: partnerGender,
         });
       }
 
       if (areaPartners.length === 0) continue;
 
+      if (isHourly && preferredGender) {
+        return sortPartnersByDistance(areaPartners)[0];
+      }
+
       return sortPartnersByPreferenceThenDistance(
         areaPartners,
-        resolvePreferredHelperGender(task),
+        preferredGender,
       )[0];
     }
 
@@ -712,6 +783,8 @@ export class BookNowAutoAssignService {
       task.location?.city ||
       'Consultation area';
     const eligible: EligiblePartner[] = [];
+    const isHourly = isHourlyTask(task);
+    const preferredGender = resolvePreferredHelperGender(task);
 
     for (const p of profiles) {
       const pp = (p.partnerProfile as Record<string, unknown>) || {};
@@ -724,6 +797,13 @@ export class BookNowAutoAssignService {
       const workShifts: unknown[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
       if (!checkTimingMatch(workShifts as string[], task)) continue;
 
+      const partnerGender = readPartnerGender(p);
+      if (isHourly && preferredGender) {
+        if (normalizePartnerGender(partnerGender) !== preferredGender) {
+          continue;
+        }
+      }
+
       eligible.push({
         uid: String(p.uid),
         profileId: String(p._id),
@@ -731,14 +811,17 @@ export class BookNowAutoAssignService {
         distKm: resolvePartnerDistanceKm(taskCoords, p),
         workArea: postedArea,
         workAreaDistKm: 0,
-        gender: readPartnerGender(p),
+        gender: partnerGender,
       });
     }
 
     if (!eligible.length) return null;
+    if (isHourly && preferredGender) {
+      return sortPartnersByDistance(eligible)[0];
+    }
     return sortPartnersByPreferenceThenDistance(
       eligible,
-      resolvePreferredHelperGender(task),
+      preferredGender,
     )[0];
   }
 
@@ -759,6 +842,14 @@ export class BookNowAutoAssignService {
     const categories: string[] = Array.isArray(pp.categories) ? pp.categories : [];
     if (!partnerCategoryMatchesBookNowTask(categories, task)) return null;
 
+    const partnerGender = readPartnerGender(profile as Record<string, unknown>);
+    if (isHourlyTask(task)) {
+      const preferredGender = resolvePreferredHelperGender(task);
+      if (preferredGender && normalizePartnerGender(partnerGender) !== preferredGender) {
+        return null;
+      }
+    }
+
     const postedArea =
       task.location?.taskArea ||
       (task.location as any)?.locality ||
@@ -772,6 +863,7 @@ export class BookNowAutoAssignService {
       distKm: null,
       workArea: postedArea,
       workAreaDistKm: 0,
+      gender: partnerGender,
     };
   }
 
@@ -999,10 +1091,14 @@ export class BookNowAutoAssignService {
         logger.info(`   Work Posted Area  : ${postedArea}`);
         logger.info(`   Work Scheduled    : ${timeInfo}`);
         logger.info(`--------------------------------------------------------------------------------`);
-        logger.info(`⚠️ NO PARTNER FOUND (Within 5 km work areas)`);
-        logger.info(`   Task remains unassigned for manual operations assignment.`);
-        logger.info(`================================================================================`);
-        return { assigned: false, reason: 'No eligible approved partner found within 5km work areas', dispatchLogs };
+        const isHourly = isHourlyTask(task);
+        const preferredGender = resolvePreferredHelperGender(task);
+        const reason =
+          isHourly && preferredGender
+            ? `No eligible approved ${preferredGender} partner found within 5km work areas`
+            : 'No eligible approved partner found within 5km work areas';
+
+        return { assigned: false, reason, dispatchLogs };
       }
 
       await BookNowAutoAssignService.persistPartnerAssignment(task, best, dispatchLogs, {
