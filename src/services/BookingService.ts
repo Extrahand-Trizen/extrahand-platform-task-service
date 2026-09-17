@@ -74,6 +74,7 @@ import {
   isHelperAssignedOnTask,
   type HourlyCancellationOrchestratorResult,
 } from './cancellation/cancellationTypes';
+import { notifyPartnerOnTaskCancelledByCustomer } from './taskCancellationPartnerNotify';
 import {
   evaluateBookingLineReschedulePolicy,
   resolveReschedulePartnerState,
@@ -2625,6 +2626,14 @@ export class BookingService {
         }
       }
       await task.save();
+
+      if (isHelperAssignedOnTask(task)) {
+        void notifyPartnerOnTaskCancelledByCustomer({
+          task,
+          cancellerUid: customerUid,
+          reason: cancelReason,
+        });
+      }
     }
 
     for (const item of items) {
@@ -2780,6 +2789,14 @@ export class BookingService {
       task.cancelledAt = evaluatedAt;
       task.cancellationReason = cancelReason;
       await task.save();
+
+      if (isHelperAssignedOnTask(task)) {
+        void notifyPartnerOnTaskCancelledByCustomer({
+          task,
+          cancellerUid: customerUid,
+          reason: cancelReason,
+        });
+      }
     }
 
     for (const item of items) {
@@ -2926,6 +2943,14 @@ export class BookingService {
     task.cancellationReason = reason || 'Cancelled by customer';
     await task.save();
 
+    if (isHelperAssignedOnTask(task)) {
+      void notifyPartnerOnTaskCancelledByCustomer({
+        task,
+        cancellerUid: customerUid,
+        reason: reason || 'Cancelled by customer',
+      });
+    }
+
     item.status = 'cancelled';
     item.cancelledAt = new Date();
     item.cancellationReason = reason || 'Cancelled by customer';
@@ -3021,6 +3046,14 @@ export class BookingService {
       task.cancelledAt = new Date();
       task.cancellationReason = reason || 'Cancelled by customer';
       await task.save();
+
+      if (isHelperAssignedOnTask(task)) {
+        void notifyPartnerOnTaskCancelledByCustomer({
+          task,
+          cancellerUid: customerUid,
+          reason: reason || 'Cancelled by customer',
+        });
+      }
     }
 
     order.status = order.paidAt ? 'refunded' : 'cancelled';

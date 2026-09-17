@@ -478,17 +478,32 @@ export class PartnerBookNowController {
       const totalDistKm = Number((partnerToShopKm + shopToCustKm).toFixed(1));
       const estimatedMinutes = Math.max(15, Math.min(60, Math.round(totalDistKm * 4 + 11)));
 
-      // Format scheduled date/time string e.g. "Wed, 10 Sept · 05:30 AM"
-      const dateObj = new Date(order.scheduledDate || order.createdAt || Date.now());
+      // Format scheduled date/time string e.g. "Tue, 15 Sept · 6:56 pm"
+      const placedEvent = Array.isArray(order.fulfillmentEvents)
+        ? order.fulfillmentEvents.find((e: any) => e?.action === 'PLACED')
+        : null;
+      const orderTimestamp =
+        placedEvent?.at ||
+        order.confirmedAt ||
+        order.confirmed_at ||
+        order.placedAt ||
+        order.paidAt ||
+        order.scheduledDate ||
+        order.createdAt ||
+        Date.now();
+
+      const dateObj = new Date(orderTimestamp);
       const dateStr = dateObj.toLocaleDateString('en-IN', {
         weekday: 'short',
         day: 'numeric',
         month: 'short',
+        timeZone: 'Asia/Kolkata',
       });
       const timeStr = dateObj.toLocaleTimeString('en-IN', {
-        hour: '2-digit',
+        hour: 'numeric',
         minute: '2-digit',
         hour12: true,
+        timeZone: 'Asia/Kolkata',
       });
       const scheduledDisplay = `${dateStr} · ${timeStr}`;
 
@@ -515,7 +530,8 @@ export class PartnerBookNowController {
         totalDistKm,
         estimatedMinutes,
         distanceText: `${partnerToShopKm} km`,
-        scheduledDate: order.scheduledDate || order.createdAt,
+        scheduledDate: orderTimestamp,
+        placedAt: orderTimestamp,
         scheduledDisplay,
         status: 'open',
         isQCommerce: true,
