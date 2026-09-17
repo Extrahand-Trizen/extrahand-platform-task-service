@@ -12,7 +12,6 @@ import {
   collectDistinctBookNowSlotChecks,
   finalizeBookNowLineSchedule,
   hasAnyBookNowScheduleFields,
-  isCompleteResolvedBookNowSchedule,
   resolveBookNowLineDurationMinutes,
   resolveBookNowLineSchedule,
   usesPerItemBookNowScheduling,
@@ -85,7 +84,8 @@ function testDistinctSlotChecksDedupeIdenticalSlots() {
 
   const checks = collectDistinctBookNowSlotChecks([lineA, lineB, lineC]);
   assert.strictEqual(checks.length, 2);
-  assert.ok(isCompleteResolvedBookNowSchedule(lineA));
+  const twoPm = checks.find((check) => check.scheduledTimeStart === '2:00 PM');
+  assert.strictEqual(twoPm?.durationMinutes, 90);
 }
 
 function testExactStartBlockingSemantics() {

@@ -179,13 +179,13 @@ export type BookNowSlotCheck = {
   date: string;
   scheduledTimeStart?: string;
   timeSlot?: BookNowTimeBucket;
+  durationMinutes?: number;
 };
 
 export function collectDistinctBookNowSlotChecks(
   schedules: Array<ResolvedBookNowLineSchedule | null | undefined>,
 ): BookNowSlotCheck[] {
-  const seen = new Set<string>();
-  const checks: BookNowSlotCheck[] = [];
+  const byKey = new Map<string, BookNowSlotCheck>();
 
   for (const schedule of schedules) {
     if (!isCompleteResolvedBookNowSchedule(schedule)) continue;
@@ -196,17 +196,24 @@ export function collectDistinctBookNowSlotChecks(
       schedule.timeSlot || '',
     ].join('|');
 
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.durationMinutes = Math.max(
+        Number(existing.durationMinutes || 0),
+        Number(schedule.durationMinutes || 0),
+      );
+      continue;
+    }
 
-    checks.push({
+    byKey.set(key, {
       date: schedule.scheduledDate,
       scheduledTimeStart: schedule.scheduledTimeStart,
       timeSlot: schedule.timeSlot,
+      durationMinutes: schedule.durationMinutes,
     });
   }
 
-  return checks;
+  return [...byKey.values()];
 }
 
 export function scheduleFieldsFromResolved(
