@@ -10,6 +10,7 @@ import { config } from '../config/env';
 import { resolvePartnerUidByPhone } from '../utils/resolvePartnerUidByPhone';
 import { partnerCategoryMatchesBookNowTask } from './partnerVisibility';
 import { notifyBookNowAssignment } from './AssignmentService';
+import AssignmentManagementRules from '../models/AssignmentManagementRules';
 
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
 const WORK_AREA_COORDS = HYDERABAD_WORK_AREA_COORDS;
@@ -118,6 +119,20 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
 
 function normalizeArea(s: string): string {
   return String(s).toLowerCase().replace(/[-_\s]+/g, '');
+}
+
+function normalizePhone(phone: unknown): string {
+  return String(phone || '').replace(/\D/g, '');
+}
+
+function phoneMatchesExcluded(phone: unknown, excludedPhones: string[]): boolean {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return false;
+  const lastTen = normalized.slice(-10);
+  return excludedPhones.some((excluded) => {
+    const normalizedExcluded = normalizePhone(excluded);
+    return normalizedExcluded === normalized || normalizedExcluded.slice(-10) === lastTen;
+  });
 }
 
 const SHIFT_WINDOWS: Record<string, { start: number; end: number; label: string }> = {
@@ -838,9 +853,27 @@ export class BookNowAutoAssignService {
 
     const pp = (profile.partnerProfile as any) || {};
     if (pp.status !== 'approved') return null;
+    if (pp.onLeave === true || profile.isAvailable === false) return null;
 
     const categories: string[] = Array.isArray(pp.categories) ? pp.categories : [];
     if (!partnerCategoryMatchesBookNowTask(categories, task)) return null;
+
+    const workShifts: string[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
+    if (!checkTimingMatch(workShifts, task)) return null;
+
+    if (!isConsultationBookNowTask(task)) {
+      const postedArea = normalizeArea(
+        String(task.location?.taskArea || (task.location as any)?.locality || task.location?.city || ''),
+      );
+      const workAreas: string[] = Array.isArray(pp.workAreas)
+        ? pp.workAreas
+        : Array.isArray(profile.helperWorkAreas)
+          ? profile.helperWorkAreas
+          : [];
+      if (postedArea && (!workAreas.length || !workAreas.some((area) => partnerMatchesWorkArea([area], postedArea)))) {
+        return null;
+      }
+    }
 
     const partnerGender = readPartnerGender(profile as Record<string, unknown>);
     if (isHourlyTask(task)) {
@@ -1040,10 +1073,89 @@ export class BookNowAutoAssignService {
     return { assigned: true, partner: preferred, dispatchLogs };
   }
 
+  private static async isExcludedCustomer(task: ITask): Promise<boolean> {
+    const rules = await AssignmentManagementRules.findOne({ key: 'assignment_management' }).lean();
+    const excludedPhones = rules?.excludedPhones || [];
+    if (!excludedPhones.length) return false;
+
+    const requesterUid = String((task as any).requesterUid || '').trim();
+    const requesterId = String((task as any).requesterId || (task as any).CustomerId || '').trim();
+    const Profile = mongoose.connection.collection('profiles');
+    const profileQuery: Record<string, unknown>[] = [];
+    if (requesterUid) profileQuery.push({ uid: requesterUid });
+    if (requesterId) profileQuery.push({ uid: requesterId });
+    if (requesterId && mongoose.Types.ObjectId.isValid(requesterId)) {
+      profileQuery.push({ _id: new mongoose.Types.ObjectId(requesterId) });
+    }
+    const profile = profileQuery.length ? await Profile.findOne({ $or: profileQuery }) : null;
+    const phone =
+      (task as any).requesterPhone ||
+      (task as any).customerPhone ||
+      (profile as any)?.phone ||
+      (profile as any)?.phoneNumber;
+    return phoneMatchesExcluded(phone, excludedPhones);
+  }
+
+  private static async findConfiguredPreferredPartner(task: ITask, rotationAttempt = 0): Promise<EligiblePartner | null> {
+    const rules = await AssignmentManagementRules.findOne({ key: 'assignment_management' }).lean();
+    const hourly = isHourlyTask(task);
+    const globalPreferredPartners = hourly ? (rules?.preferredPartners || []) : [];
+    let preferredPartnerCursor = Number(rules?.preferredPartnerCursor || 0);
+
+    const taskArea = normalizeArea(String(
+      task.location?.taskArea || (task.location as any)?.locality || task.location?.city || '',
+    ));
+    const areaRule = (rules?.areaRules || []).find((rule) => {
+      const ruleArea = normalizeArea(rule.area);
+      const appliesToWorkType = rule.workTypes.includes('all') ||
+        (hourly && rule.workTypes.includes('hourly')) ||
+        (!hourly && rule.workTypes.includes('book_now'));
+      return rule.active !== false && appliesToWorkType && !!taskArea && (ruleArea === taskArea || ruleArea.includes(taskArea) || taskArea.includes(ruleArea));
+    });
+    const rotatedPreferredPartners = globalPreferredPartners.length > 0
+      ? [
+        ...globalPreferredPartners.slice(preferredPartnerCursor % globalPreferredPartners.length),
+        ...globalPreferredPartners.slice(0, preferredPartnerCursor % globalPreferredPartners.length),
+      ]
+      : [];
+    const orderedPartners = [
+      ...(areaRule?.preferredPartners || []),
+      ...rotatedPreferredPartners,
+    ].filter((partner, index, partners) => partner.active !== false && partners.findIndex((item) => item.uid === partner.uid) === index);
+
+    for (const partner of orderedPartners) {
+      const eligible = await BookNowAutoAssignService.findPreferredPartnerForTask(task, partner.uid);
+      if (!eligible) continue;
+
+      const selectedGlobalIndex = rotatedPreferredPartners.findIndex((item) => item.uid === partner.uid);
+      if (hourly && selectedGlobalIndex >= 0) {
+        const nextCursor = (preferredPartnerCursor + selectedGlobalIndex + 1) % globalPreferredPartners.length;
+        const cursorFilter = rules?.preferredPartnerCursor == null
+          ? { key: 'assignment_management', $or: [{ preferredPartnerCursor: { $exists: false } }, { preferredPartnerCursor: 0 }] }
+          : { key: 'assignment_management', preferredPartnerCursor };
+        const cursorUpdate = await AssignmentManagementRules.updateOne(
+          cursorFilter,
+          { $set: { preferredPartnerCursor: nextCursor } },
+        );
+        if (cursorUpdate.matchedCount === 0 && rotationAttempt < 3) {
+          return BookNowAutoAssignService.findConfiguredPreferredPartner(task, rotationAttempt + 1);
+        }
+      }
+
+      return eligible;
+    }
+    return null;
+  }
+
   static async autoAssign(task: ITask, options?: AutoAssignOptions): Promise<AutoAssignResult> {
     const taskId = String(task._id);
 
     try {
+      if (await BookNowAutoAssignService.isExcludedCustomer(task)) {
+        logger.info('[BookNowAutoAssign] Customer is excluded from automatic assignment', { taskId });
+        return { assigned: false, reason: 'Customer phone is excluded from automatic assignment' };
+      }
+
       const devPreferredUid = await resolvePaintingConsultationPreferredPartnerUid(task);
       const existingUid = String(task.assigneeUid || task.partnerUid || '').trim();
 
@@ -1068,6 +1180,9 @@ export class BookNowAutoAssignService {
       let best = preferredUid
         ? await BookNowAutoAssignService.findPreferredPartnerForTask(task, preferredUid)
         : null;
+      if (!best) {
+        best = await BookNowAutoAssignService.findConfiguredPreferredPartner(task);
+      }
       if (!best) {
         best = await BookNowAutoAssignService.findBestPartner(task);
       }
