@@ -992,21 +992,35 @@ export class BookingService {
           ...(normalizedOrderGstExempt ? { gstExempt: true } : {}),
           itemCount: resolvedLinesWithSchedule.length,
           skuSlugs: resolvedLinesWithSchedule.map((l) => l.packageSlug),
-          couponServiceIds: resolvedLinesWithSchedule.map((l) => l.categorySlug || l.packageSlug),
+          couponServiceIds: Array.from(
+            new Set(
+              resolvedLinesWithSchedule.flatMap((l) => [l.categorySlug, l.packageSlug].filter(Boolean) as string[])
+            )
+          ),
           couponLineItems: (() => {
-            const byService = new Map<string, number>();
+            const byKey = new Map<string, { serviceId: string; amount: number; skuSlug?: string; categorySlug?: string }>();
             for (const line of resolvedLinesWithSchedule) {
               const serviceId = String(line.categorySlug || line.packageSlug || '').trim();
               if (!serviceId) continue;
-              // Coupon applies on service (pre-GST) amount; GST is recalculated on discounted subtotals at payment.
-              byService.set(
-                serviceId,
-                (byService.get(serviceId) || 0) + (Number(line.lineTotal) || 0),
-              );
+              const skuSlug = line.packageSlug ? String(line.packageSlug).trim() : undefined;
+              const categorySlug = line.categorySlug ? String(line.categorySlug).trim() : undefined;
+              const key = `${serviceId}:${skuSlug || ''}:${categorySlug || ''}`;
+              const existing = byKey.get(key);
+              const amount = Number(line.lineTotal) || 0;
+              if (existing) {
+                existing.amount += amount;
+              } else {
+                byKey.set(key, {
+                  serviceId,
+                  amount,
+                  ...(skuSlug ? { skuSlug } : {}),
+                  ...(categorySlug ? { categorySlug } : {}),
+                });
+              }
             }
-            return [...byService.entries()].map(([serviceId, amt]) => ({
-              serviceId,
-              amount: Math.round(amt * 100) / 100,
+            return [...byKey.values()].map((row) => ({
+              ...row,
+              amount: Math.round(row.amount * 100) / 100,
             }));
           })(),
           gstByCategory: pricing.categories,
