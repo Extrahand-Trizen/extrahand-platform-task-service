@@ -24,13 +24,21 @@ export function isHourlyCatalogLineInput(line: HourlyLineHint): boolean {
   return slug.startsWith('hourly-');
 }
 
-/** Resolved line is Hourly (pricingUnit or category). Line count is NOT part of this check. */
+/** Resolved line is Hourly (pricingUnit, category, or hourly-* SKU slug). */
 export function isHourlyResolvedLine(line: {
   pricingUnit?: string;
   categorySlug?: string;
+  packageSlug?: string;
+  packageId?: string;
 }): boolean {
   if (line.pricingUnit === 'hourly') return true;
-  return String(line.categorySlug || '').trim().toLowerCase() === HOURLY_HELPER_CATEGORY_SLUG;
+  if (String(line.categorySlug || '').trim().toLowerCase() === HOURLY_HELPER_CATEGORY_SLUG) {
+    return true;
+  }
+  const slug = String(line.packageSlug || line.packageId || '')
+    .trim()
+    .toLowerCase();
+  return slug.startsWith('hourly-');
 }
 
 export function parseBookingFulfillmentType(

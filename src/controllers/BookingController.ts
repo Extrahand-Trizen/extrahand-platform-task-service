@@ -95,7 +95,12 @@ export class BookingController {
       throw new BadRequestError('date and city are required');
     }
 
-    const data = await BookingService.getSlotAvailability(date, city);
+    const data = await BookingService.getSlotAvailability(date, city, {
+      durationMinutes: Number(req.query.durationMinutes),
+      area: String(req.query.area || '').trim() || undefined,
+      lat: Number(req.query.lat),
+      lng: Number(req.query.lng),
+    });
     res.json({ success: true, data });
   }
 

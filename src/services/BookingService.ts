@@ -19,6 +19,7 @@ import {
   assertBookNowSlotAvailable,
   deriveBookNowTimeSlot,
   getOccupiedBookNowSlots,
+  getPartnerCapacityForSlots,
   isBookNowSlotWithinLeadTime,
   normalizeBookNowSlotLabel,
   type BookNowTimeBucket,
@@ -92,6 +93,19 @@ type BookingAddress = {
   pinCode: string;
   coordinates?: [number, number];
 };
+
+/** Neighbourhood/area for partner matching — not the saved-address nickname (Home/Work). */
+function resolveBookingAreaForCapacity(address: {
+  label?: string | null;
+  line2?: string | null;
+  line1?: string | null;
+}): string | undefined {
+  const line2 = String(address.line2 || '').trim();
+  if (line2) return line2;
+  const label = String(address.label || '').trim();
+  if (label && !/^(home|work|other|office|default)$/i.test(label)) return label;
+  return undefined;
+}
 
 export type BookingLineInput = {
   skuSlug?: string;
@@ -842,16 +856,20 @@ export class BookingService {
             city: address.city,
             scheduledTimeStart: slotCheck.scheduledTimeStart,
             timeSlot: slotCheck.timeSlot,
+            durationMinutes: slotCheck.durationMinutes,
+            area: resolveBookingAreaForCapacity(address),
+            lat: Array.isArray(address.coordinates) ? address.coordinates[1] : undefined,
+            lng: Array.isArray(address.coordinates) ? address.coordinates[0] : undefined,
           });
         } catch (error) {
           if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
             throw new BadRequestError(
-              'This time slot is no longer available. Please choose another slot.',
+              'No helper is free for this full time window. Please choose another slot.',
             );
           }
           if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
             throw new BadRequestError(
-              'Book Now requires at least 3 hours notice. Please choose a later time slot.',
+              'That time has already passed. Please choose a later time slot.',
             );
           }
           throw error;
@@ -974,21 +992,35 @@ export class BookingService {
           ...(normalizedOrderGstExempt ? { gstExempt: true } : {}),
           itemCount: resolvedLinesWithSchedule.length,
           skuSlugs: resolvedLinesWithSchedule.map((l) => l.packageSlug),
-          couponServiceIds: resolvedLinesWithSchedule.map((l) => l.categorySlug || l.packageSlug),
+          couponServiceIds: Array.from(
+            new Set(
+              resolvedLinesWithSchedule.flatMap((l) => [l.categorySlug, l.packageSlug].filter(Boolean) as string[])
+            )
+          ),
           couponLineItems: (() => {
-            const byService = new Map<string, number>();
+            const byKey = new Map<string, { serviceId: string; amount: number; skuSlug?: string; categorySlug?: string }>();
             for (const line of resolvedLinesWithSchedule) {
               const serviceId = String(line.categorySlug || line.packageSlug || '').trim();
               if (!serviceId) continue;
-              // Coupon applies on service (pre-GST) amount; GST is recalculated on discounted subtotals at payment.
-              byService.set(
-                serviceId,
-                (byService.get(serviceId) || 0) + (Number(line.lineTotal) || 0),
-              );
+              const skuSlug = line.packageSlug ? String(line.packageSlug).trim() : undefined;
+              const categorySlug = line.categorySlug ? String(line.categorySlug).trim() : undefined;
+              const key = `${serviceId}:${skuSlug || ''}:${categorySlug || ''}`;
+              const existing = byKey.get(key);
+              const amount = Number(line.lineTotal) || 0;
+              if (existing) {
+                existing.amount += amount;
+              } else {
+                byKey.set(key, {
+                  serviceId,
+                  amount,
+                  ...(skuSlug ? { skuSlug } : {}),
+                  ...(categorySlug ? { categorySlug } : {}),
+                });
+              }
             }
-            return [...byService.entries()].map(([serviceId, amt]) => ({
-              serviceId,
-              amount: Math.round(amt * 100) / 100,
+            return [...byKey.values()].map((row) => ({
+              ...row,
+              amount: Math.round(row.amount * 100) / 100,
             }));
           })(),
           gstByCategory: pricing.categories,
@@ -1073,14 +1105,52 @@ export class BookingService {
 
       await order.save();
 
-      logger.info('Book Now booking checkout created (tasks deferred until payment)', {
-        orderId,
-        customerUid,
-        total: order.total,
-        totalBeforeCoupon: order.totalBeforeCoupon ?? pricing.total,
-        couponCode: order.couponCode || undefined,
-        itemCount: resolvedLinesWithSchedule.length,
-      });
+      const isFreeBooking = order.total === 0 || (finalPayableRaw != null && finalPayableRaw === 0);
+      let materializedTasks: InstanceType<typeof Task>[] = [];
+
+      if (isFreeBooking) {
+        order.paidAt = new Date();
+        materializedTasks = await this.materializeBookingTasks(order);
+        const autoAssigned =
+          materializedTasks.length > 0 &&
+          materializedTasks.every((task) => Boolean(task.assigneeUid));
+        order.status = autoAssigned ? 'assigned' : 'assigning';
+        await order.save();
+
+        if (autoAssigned && escrowResult.escrow?.escrowId && materializedTasks[0]?.assigneeUid) {
+          try {
+            await PaymentClient.attachPerformerToEscrow({
+              escrowId: escrowResult.escrow.escrowId,
+              performerUid: materializedTasks[0].assigneeUid,
+            });
+          } catch (err: any) {
+            logger.warn('Failed to attach performer to free booking escrow', {
+              orderId,
+              escrowId: escrowResult.escrow.escrowId,
+              error: err.message,
+            });
+          }
+        }
+
+        logger.info('Book Now 100% free booking directly confirmed and placed', {
+          orderId,
+          customerUid,
+          total: order.total,
+          couponCode: order.couponCode || undefined,
+          itemCount: resolvedLinesWithSchedule.length,
+          taskCount: materializedTasks.length,
+          status: order.status,
+        });
+      } else {
+        logger.info('Book Now booking checkout created (tasks deferred until payment)', {
+          orderId,
+          customerUid,
+          total: order.total,
+          totalBeforeCoupon: order.totalBeforeCoupon ?? pricing.total,
+          couponCode: order.couponCode || undefined,
+          itemCount: resolvedLinesWithSchedule.length,
+        });
+      }
 
       const rawOrder =
         escrowResult.order && typeof escrowResult.order === 'object'
@@ -1096,7 +1166,7 @@ export class BookingService {
           }
         : escrowResult.order;
 
-      if (!razorpayOrder || typeof (razorpayOrder as { keyId?: string }).keyId !== 'string') {
+      if (!isFreeBooking && (!razorpayOrder || typeof (razorpayOrder as { keyId?: string }).keyId !== 'string')) {
         logger.warn('Book Now razorpayOrder missing keyId — client may use divergent checkout key', {
           orderId,
           razorpayOrderId: (razorpayOrder as { id?: string } | null)?.id,
@@ -1107,10 +1177,11 @@ export class BookingService {
         order,
         item: createdItems[0],
         items: createdItems,
-        task: null,
-        tasks: [],
+        task: materializedTasks[0] || null,
+        tasks: materializedTasks,
         escrow: escrowResult.escrow,
         razorpayOrder,
+        isFree: isFreeBooking,
       };
     } catch (error) {
       await BookingOrder.findByIdAndDelete(order._id);
@@ -1872,12 +1943,35 @@ export class BookingService {
     return abandonUnpaidBookingOrder(orderId, customerUid);
   }
 
-  static async getSlotAvailability(date: string, city: string) {
-    const occupied = await getOccupiedBookNowSlots(date, city);
+  static async getSlotAvailability(
+    date: string,
+    city: string,
+    opts?: {
+      durationMinutes?: number;
+      area?: string;
+      lat?: number;
+      lng?: number;
+    },
+  ) {
+    const durationMinutes =
+      Number.isFinite(Number(opts?.durationMinutes)) && Number(opts?.durationMinutes) > 0
+        ? Math.round(Number(opts?.durationMinutes))
+        : 30;
+    const lat = Number(opts?.lat);
+    const lng = Number(opts?.lng);
+    const [occupied, partnerCapacityBySlot] = await Promise.all([
+      getOccupiedBookNowSlots(date, city),
+      getPartnerCapacityForSlots(date, city, durationMinutes, {
+        area: opts?.area,
+        lat: Number.isFinite(lat) ? lat : undefined,
+        lng: Number.isFinite(lng) ? lng : undefined,
+      }),
+    ]);
     return {
       date: String(date || '').trim(),
       city: String(city || '').trim(),
       ...occupied,
+      partnerCapacityBySlot,
     };
   }
 
@@ -2038,11 +2132,26 @@ export class BookingService {
     const dateKey = String(date || '').trim();
     parseCalendarDate(dateKey);
     const city = String(order.address?.city || '').trim();
-    const occupied = await getOccupiedBookNowSlots(dateKey, city);
-    const blocked = new Set(occupied.occupiedTimeStarts.map(normalizeBookNowSlotLabel));
+    const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
+      .select('durationMinutes')
+      .lean();
+    const durationMinutes = Math.max(
+      30,
+      ...items.map((item) => Number(item.durationMinutes || 0)),
+    );
+    const lat = Number(order.address?.coordinates?.[1]);
+    const lng = Number(order.address?.coordinates?.[0]);
+    const partnerCapacityBySlot = await getPartnerCapacityForSlots(dateKey, city, durationMinutes, {
+      area: resolveBookingAreaForCapacity(order.address || {}),
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lng: Number.isFinite(lng) ? lng : undefined,
+    });
     const slots = RESCHEDULE_SLOT_STARTS.map((start) => {
       const normalized = normalizeBookNowSlotLabel(start);
-      const unavailable = blocked.has(normalized) || isBookNowSlotWithinLeadTime(normalized, dateKey);
+      const capacity = partnerCapacityBySlot[normalized];
+      const unavailable =
+        (typeof capacity === 'number' && capacity === 0) ||
+        isBookNowSlotWithinLeadTime(normalized, dateKey);
       return {
         id: normalized,
         label: normalized,
@@ -2080,11 +2189,24 @@ export class BookingService {
 
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
+    const rescheduleItems = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
+      .select('durationMinutes')
+      .lean();
+    const durationMinutes = Math.max(
+      30,
+      ...rescheduleItems.map((item) => Number(item.durationMinutes || 0)),
+    );
+    const lat = Number(order.address?.coordinates?.[1]);
+    const lng = Number(order.address?.coordinates?.[0]);
     await assertBookNowSlotAvailable({
       date: dateKey,
       city: order.address.city,
       scheduledTimeStart,
       timeSlot,
+      durationMinutes,
+      area: resolveBookingAreaForCapacity(order.address),
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lng: Number.isFinite(lng) ? lng : undefined,
     });
 
     order.scheduledDate = scheduledDate;

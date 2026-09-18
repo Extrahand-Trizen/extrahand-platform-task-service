@@ -1,5 +1,11 @@
 import BookingOrder, { type BookingOrderStatus } from '../models/BookingOrder';
 import BookingItem from '../models/BookingItem';
+import Task from '../models/Task';
+import mongoose from 'mongoose';
+import {
+  BOOK_NOW_WORK_AREA_PROXIMITY_KM,
+  HYDERABAD_WORK_AREA_COORDS,
+} from '../constants/locations/hyderabadWorkAreaCoords';
 
 /** Only confirmed (paid) bookings block slots — not unpaid checkouts. */
 const BLOCKING_STATUSES: BookingOrderStatus[] = ['paid', 'assigning', 'assigned'];
@@ -7,8 +13,8 @@ const BLOCKING_STATUSES: BookingOrderStatus[] = ['paid', 'assigning', 'assigned'
 /** Each Book Now booking blocks only the exact selected start slot. */
 export const BOOK_NOW_SLOTS_BLOCKED_PER_BOOKING = 1;
 
-/** Same-day bookings must start at least this many minutes from now. */
-export const BOOK_NOW_MIN_LEAD_TIME_MINUTES = 3 * 60;
+/** Same-day slots that have already started are rejected. No extra lead buffer. */
+export const BOOK_NOW_MIN_LEAD_TIME_MINUTES = 0;
 
 const BOOK_NOW_SLOT_STEP_MINUTES = 30;
 
@@ -78,7 +84,7 @@ export function deriveBookNowTimeSlot(anchorSlot: string): BookNowTimeBucket {
 function bucketAnchorSlot(bucket: BookNowTimeBucket): string {
   switch (bucket) {
     case 'morning':
-      return '8:00 AM';
+      return '7:00 AM';
     case 'midday':
       return '11:00 AM';
     case 'afternoon':
@@ -130,6 +136,7 @@ function getIstDateAndMinutes(now = new Date()): { dateKey: string; minutes: num
   };
 }
 
+/** True when booking today (IST) and the slot start is already in the past. */
 export function isBookNowSlotWithinLeadTime(
   slot: string,
   date: string,
@@ -255,13 +262,344 @@ export async function getOccupiedBookNowSlots(
   };
 }
 
-function isAnchorBlocked(
-  candidateAnchor: string,
-  occupiedBookingAnchors: string[],
+function slotHasZeroPartnerCapacity(
+  capacity: PartnerCapacityBySlot,
+  slot: string,
 ): boolean {
-  return occupiedBookingAnchors.some((existing) =>
-    bookNowSlotWindowsOverlap(existing, candidateAnchor),
+  const key = normalizeBookNowSlotLabel(slot);
+  const value = capacity[key];
+  return typeof value === 'number' && value === 0;
+}
+
+// ─── Partner capacity ─────────────────────────────────────────────────────────
+
+/**
+ * Map of slot-start label → number of eligible partners who are FREE to
+ * perform a service that starts at that slot.
+ *
+ * Only slot-start labels that appear in BOOK_NOW_START_TIME_SLOTS (7:00 AM –
+ * 8:00 PM, 30-min steps) are emitted. A missing key means "not yet computed"
+ * (treat the same as the capacity being unknown, not zero).
+ *
+ * A value of 0 means every eligible partner is occupied during that window.
+ */
+export type PartnerCapacityBySlot = Record<string, number>;
+
+/** Active task statuses that mean a partner is occupied. */
+const PARTNER_OCCUPIED_TASK_STATUSES = new Set([
+  'assigned',
+  'started',
+  'in_progress',
+  'review',
+]);
+
+/** Slot grid: 7:00 AM – 8:00 PM in 30-minute steps (mirrors BOOK_NOW_START_TIME_SLOTS). */
+function buildSlotGrid(): number[] {
+  const grid: number[] = [];
+  for (let t = 7 * 60; t <= 20 * 60; t += 30) grid.push(t);
+  return grid;
+}
+const SLOT_GRID_MINUTES = buildSlotGrid();
+
+/** Same shift windows as BookNowAutoAssignService.checkTimingMatch. */
+const SHIFT_WINDOWS: Record<string, { startHour: number; endHour: number }> = {
+  morning_rush: { startHour: 8.0, endHour: 12.0 },
+  morning_block: { startHour: 8.0, endHour: 12.0 },
+  midday_block: { startHour: 12.0, endHour: 16.0 },
+  mid_day_block: { startHour: 12.0, endHour: 16.0 },
+  afternoon_block: { startHour: 15.5, endHour: 19.5 },
+  morning_full_time: { startHour: 8.0, endHour: 16.0 },
+  general_day_full_time: { startHour: 10.0, endHour: 18.0 },
+  evening_full_time: { startHour: 11.5, endHour: 19.5 },
+};
+
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function normalizeAreaKey(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[-_\s]+/g, '');
+}
+
+/** Same includes-match BookNowAutoAssignService uses for work areas. */
+export function partnerWorkAreasMatchLocationKeys(
+  workAreas: string[],
+  locationKeys: string[],
+): boolean {
+  const normAreas = workAreas.map((area) => normalizeAreaKey(area)).filter(Boolean);
+  const keys = locationKeys.map((key) => normalizeAreaKey(key)).filter(Boolean);
+  if (!normAreas.length || !keys.length) return false;
+  return keys.some((key) =>
+    normAreas.some((area) => area === key || area.includes(key) || key.includes(area)),
   );
+}
+
+export function locationKeysForPartnerCapacity(params: {
+  city?: string;
+  area?: string;
+  lat?: number;
+  lng?: number;
+}): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw?: string) => {
+    const value = String(raw || '').trim();
+    if (!value) return;
+    const norm = normalizeAreaKey(value);
+    if (!norm || seen.has(norm)) return;
+    // Ignore saved-address nicknames — they are not work areas.
+    if (/^(home|work|other|office|default)$/i.test(norm)) return;
+    seen.add(norm);
+    keys.push(value);
+  };
+
+  add(params.area);
+  add(params.city);
+
+  const lat = Number(params.lat);
+  const lng = Number(params.lng);
+  const hasCoords =
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    !(lat === 0 && lng === 0);
+
+  if (hasCoords) {
+    for (const wa of HYDERABAD_WORK_AREA_COORDS) {
+      if (haversineKm(lat, lng, wa.lat, wa.lng) <= BOOK_NOW_WORK_AREA_PROXIMITY_KM) {
+        add(wa.area);
+      }
+    }
+  }
+
+  // Only expand the full Hyderabad work-area list when the client did not
+  // send a real neighbourhood (e.g. city-only "Hyderabad"). If area=Uppal,
+  // keep capacity scoped to Uppal + nearby — do not count the whole city.
+  const cityNorm = normalizeAreaKey(params.city || '');
+  const areaNorm = normalizeAreaKey(params.area || '');
+  const isHyderabadCity = cityNorm === 'hyderabad' || cityNorm.includes('hyderabad');
+  const hasSpecificArea =
+    !!areaNorm &&
+    areaNorm !== cityNorm &&
+    !/^(home|work|other|office|default)$/i.test(areaNorm);
+
+  if (isHyderabadCity && !hasSpecificArea) {
+    for (const wa of HYDERABAD_WORK_AREA_COORDS) {
+      add(wa.area);
+    }
+  }
+
+  return keys;
+}
+
+/**
+ * Empty shifts = do not block (legacy profiles), matching auto-assign.
+ * Otherwise the FULL [start, end) interval must fit inside one shift window.
+ */
+export function workShiftsCoverInterval(
+  workShifts: string[],
+  startMinutes: number,
+  endMinutes: number,
+): boolean {
+  if (!Array.isArray(workShifts) || workShifts.length === 0) return true;
+  const startHour = startMinutes / 60;
+  const endHour = endMinutes / 60;
+  for (const shiftId of workShifts) {
+    const key = String(shiftId || '')
+      .toLowerCase()
+      .replace(/[-_\s]+/g, '_');
+    const window = SHIFT_WINDOWS[key];
+    if (window) {
+      if (startHour >= window.startHour && endHour <= window.endHour) return true;
+      continue;
+    }
+    if (key.includes('morning') && startHour >= 7 && endHour <= 16) return true;
+    if (
+      (key.includes('general') || key.includes('day') || key.includes('mid')) &&
+      startHour >= 9 &&
+      endHour <= 18
+    ) {
+      return true;
+    }
+    if (
+      (key.includes('evening') || key.includes('afternoon')) &&
+      startHour >= 11.5 &&
+      endHour <= 19.5
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export type PartnerCapacityLocation = {
+  area?: string;
+  lat?: number;
+  lng?: number;
+};
+
+type EligibleCapacityPartner = {
+  uid: string;
+  workShifts: string[];
+};
+
+/**
+ * For a given date + city, return the number of eligible approved partners
+ * who can perform the COMPLETE `requestedDurationMinutes` starting at each
+ * 30-minute slot.
+ *
+ * Eligibility matches BookNowAutoAssignService (approved, active, not on leave,
+ * work-area includes neighbourhood/city and nearby 6 km areas).
+ *
+ * Occupied = active Task whose scheduled window overlaps
+ * [slotStart, slotStart + requestedDuration).
+ */
+export async function getPartnerCapacityForSlots(
+  date: string,
+  city: string,
+  requestedDurationMinutes: number,
+  location?: PartnerCapacityLocation,
+): Promise<PartnerCapacityBySlot> {
+  const capacity: PartnerCapacityBySlot = {};
+
+  const range = bookingDateRange(date);
+  if (!range) return capacity;
+
+  const safeDuration =
+    Number.isFinite(requestedDurationMinutes) && requestedDurationMinutes > 0
+      ? Math.round(requestedDurationMinutes)
+      : BOOK_NOW_SLOT_STEP_MINUTES;
+
+  const locationKeys = locationKeysForPartnerCapacity({
+    city,
+    area: location?.area,
+    lat: location?.lat,
+    lng: location?.lng,
+  });
+  if (!locationKeys.length) return capacity;
+
+  const Profile = mongoose.connection.collection('profiles');
+  const profiles = await Profile.find(
+    {
+      isActive: true,
+      'partnerProfile.status': 'approved',
+    },
+    {
+      projection: {
+        uid: 1,
+        isAvailable: 1,
+        helperWorkAreas: 1,
+        'partnerProfile.status': 1,
+        'partnerProfile.onLeave': 1,
+        'partnerProfile.workAreas': 1,
+        'partnerProfile.workShifts': 1,
+      },
+    },
+  ).toArray();
+
+  const eligiblePartners: EligibleCapacityPartner[] = [];
+  for (const profile of profiles) {
+    const record = profile as Record<string, unknown>;
+    const pp = (record.partnerProfile as Record<string, unknown>) || {};
+    if (pp.status !== 'approved') continue;
+    if (record.isAvailable === false || pp.onLeave === true) continue;
+
+    const workAreas: string[] = Array.isArray(pp.workAreas)
+      ? (pp.workAreas as string[])
+      : Array.isArray(record.helperWorkAreas)
+        ? (record.helperWorkAreas as string[])
+        : [];
+    if (!workAreas.length) continue;
+    if (!partnerWorkAreasMatchLocationKeys(workAreas, locationKeys)) continue;
+
+    const uid = String(record.uid || '').trim();
+    if (!uid) continue;
+    eligiblePartners.push({
+      uid,
+      workShifts: Array.isArray(pp.workShifts) ? (pp.workShifts as string[]) : [],
+    });
+  }
+
+  if (!eligiblePartners.length) {
+    for (const slotMinutes of SLOT_GRID_MINUTES) {
+      capacity[minutesToSlotLabel(slotMinutes)] = 0;
+    }
+    return capacity;
+  }
+
+  const activePartnerUids = eligiblePartners.map((partner) => partner.uid);
+
+  // ── 2. Fetch active tasks for these partners on this date ───────────────────
+  const activeTasks = await Task.find({
+    assigneeUid: { $in: activePartnerUids },
+    status: { $in: [...PARTNER_OCCUPIED_TASK_STATUSES] },
+    scheduledDate: { $gte: range.start, $lte: range.end },
+    scheduledTimeStart: { $exists: true, $ne: null },
+  })
+    .select('assigneeUid scheduledTimeStart scheduledTimeEnd estimatedDuration')
+    .lean();
+
+  // ── 3. Build per-partner occupied intervals (minutes) ──────────────────────
+  const partnerOccupied = new Map<string, Array<{ start: number; end: number }>>();
+  for (const uid of activePartnerUids) {
+    partnerOccupied.set(uid, []);
+  }
+
+  for (const task of activeTasks) {
+    const uid = String(task.assigneeUid || '');
+    if (!partnerOccupied.has(uid)) continue;
+
+    const startMin = parseHourlySlotToMinutes(String(task.scheduledTimeStart || ''));
+    if (startMin == null) continue;
+
+    // Use scheduledTimeEnd if present; otherwise fall back to estimatedDuration,
+    // then to one slot step (30 min) as a conservative minimum.
+    let endMin: number;
+    const endLabel = String(task.scheduledTimeEnd || '').trim();
+    const parsedEnd = endLabel ? parseHourlySlotToMinutes(endLabel) : null;
+    if (parsedEnd != null && parsedEnd > startMin) {
+      endMin = parsedEnd;
+    } else {
+      const dur = Number((task as any).estimatedDuration || 0);
+      endMin = startMin + (Number.isFinite(dur) && dur > 0 ? dur : BOOK_NOW_SLOT_STEP_MINUTES);
+    }
+
+    partnerOccupied.get(uid)!.push({ start: startMin, end: endMin });
+  }
+
+  const partnerByUid = new Map(eligiblePartners.map((partner) => [partner.uid, partner]));
+
+  // ── 4. For each slot, count partners free for the FULL requested interval ───
+  for (const slotMinutes of SLOT_GRID_MINUTES) {
+    const candidateStart = slotMinutes;
+    const candidateEnd = slotMinutes + safeDuration;
+    let freeCount = 0;
+
+    for (const [uid, intervals] of partnerOccupied) {
+      const partner = partnerByUid.get(uid);
+      if (!partner) continue;
+      if (!workShiftsCoverInterval(partner.workShifts, candidateStart, candidateEnd)) {
+        continue;
+      }
+      const isBusy = intervals.some(
+        ({ start, end }) => candidateStart < end && start < candidateEnd,
+      );
+      if (!isBusy) freeCount += 1;
+    }
+
+    capacity[minutesToSlotLabel(slotMinutes)] = freeCount;
+  }
+
+  return capacity;
 }
 
 export async function assertBookNowSlotAvailable(params: {
@@ -269,11 +607,19 @@ export async function assertBookNowSlotAvailable(params: {
   city: string;
   scheduledTimeStart?: string;
   timeSlot?: BookNowTimeBucket;
+  durationMinutes?: number;
+  area?: string;
+  lat?: number;
+  lng?: number;
 }): Promise<void> {
   const date = String(params.date || '').trim();
   const city = normalizeCity(params.city);
   const scheduledTimeStart = String(params.scheduledTimeStart || '').trim();
   const timeSlot = params.timeSlot;
+  const durationMinutes =
+    Number.isFinite(Number(params.durationMinutes)) && Number(params.durationMinutes) > 0
+      ? Math.round(Number(params.durationMinutes))
+      : BOOK_NOW_SLOT_STEP_MINUTES;
 
   if (!date || !city) return;
 
@@ -281,26 +627,20 @@ export async function assertBookNowSlotAvailable(params: {
     throw new Error('SLOT_TOO_SOON');
   }
 
-  const occupied = await getOccupiedBookNowSlots(date, city);
-  const anchors = occupied.occupiedBookingAnchors;
-  const hasExactStartSlot = Boolean(scheduledTimeStart);
+  const slotToCheck = scheduledTimeStart || (timeSlot ? bucketAnchorSlot(timeSlot) : '');
+  if (!slotToCheck) return;
 
-  if (scheduledTimeStart && isAnchorBlocked(scheduledTimeStart, anchors)) {
-    throw new Error('SLOT_UNAVAILABLE');
+  if (!scheduledTimeStart && timeSlot && isBookNowSlotWithinLeadTime(slotToCheck, date)) {
+    throw new Error('SLOT_TOO_SOON');
   }
 
-  /**
-   * `timeSlot` is a coarse fallback bucket for legacy clients.
-   * When exact `scheduledTimeStart` is provided, do not re-validate by bucket anchor;
-   * that can incorrectly reject valid later slots in the same bucket.
-   */
-  if (!hasExactStartSlot && timeSlot) {
-    const bucketAnchor = bucketAnchorSlot(timeSlot);
-    if (isBookNowSlotWithinLeadTime(bucketAnchor, date)) {
-      throw new Error('SLOT_TOO_SOON');
-    }
-    if (isAnchorBlocked(bucketAnchor, anchors)) {
-      throw new Error('SLOT_UNAVAILABLE');
-    }
+  const capacity = await getPartnerCapacityForSlots(date, city, durationMinutes, {
+    area: params.area,
+    lat: params.lat,
+    lng: params.lng,
+  });
+
+  if (slotHasZeroPartnerCapacity(capacity, slotToCheck)) {
+    throw new Error('SLOT_UNAVAILABLE');
   }
 }
