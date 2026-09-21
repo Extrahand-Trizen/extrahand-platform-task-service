@@ -447,6 +447,8 @@ export class TaskService {
     posterUid?: string;
     requesterId?: string;
     bookingSource?: string;
+    scheduledDateFrom?: string;
+    scheduledDateTo?: string;
     /**
      * Server-side Book Now visibility guard (partner category ∩ work areas).
      * Only applied when bookingSource === 'book_now'.
@@ -457,7 +459,7 @@ export class TaskService {
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, partnerVisibilityFilter, partnerVisibilityBlocked, limit = 50, page = 1 } = filters;
+    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo, partnerVisibilityFilter, partnerVisibilityBlocked, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -598,6 +600,17 @@ export class TaskService {
     // Browse tasks should hide deadline-crossed open tasks at query time.
     if (hasOpenInStatusFilter(status)) {
       andClauses.push(buildLiveOpenExpiryClause(new Date()));
+    }
+
+    if (scheduledDateFrom || scheduledDateTo) {
+      const scheduledDateRange: Record<string, Date> = {};
+      if (scheduledDateFrom) scheduledDateRange.$gte = normalizeDateOnly(new Date(`${scheduledDateFrom}T00:00:00.000Z`));
+      if (scheduledDateTo) {
+        const endDate = normalizeDateOnly(new Date(`${scheduledDateTo}T00:00:00.000Z`));
+        endDate.setUTCDate(endDate.getUTCDate() + 1);
+        scheduledDateRange.$lt = endDate;
+      }
+      andClauses.push({ scheduledDate: scheduledDateRange });
     }
 
     if (excludeRequesterId && mongoose.Types.ObjectId.isValid(excludeRequesterId)) {

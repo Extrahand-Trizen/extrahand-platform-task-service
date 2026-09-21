@@ -72,7 +72,7 @@ export class TaskController {
    * Get all tasks with optional filtering
    */
   static async getTasks(req: AuthenticatedRequest, res: Response): Promise<void> {
-    const { status, excludeOverdue, category, city, limit, page, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource } = req.query;
+    const { status, excludeOverdue, category, city, limit, page, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo } = req.query;
 
     // Allow comma-separated statuses (frontend may send multiple, e.g. "open,assigned")
     const statusParam = status ? (status as string) : undefined;
@@ -105,6 +105,8 @@ export class TaskController {
       posterUid: posterUid ? (posterUid as string) : undefined,
       requesterId: requesterId ? (requesterId as string) : undefined,
       bookingSource: bookingSource ? (bookingSource as string) : undefined,
+      scheduledDateFrom: scheduledDateFrom ? (scheduledDateFrom as string) : undefined,
+      scheduledDateTo: scheduledDateTo ? (scheduledDateTo as string) : undefined,
       ...(await resolveBookNowVisibilityGuard(req, bookingSource ? (bookingSource as string) : undefined)),
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
