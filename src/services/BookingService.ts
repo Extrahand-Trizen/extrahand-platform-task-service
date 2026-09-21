@@ -1117,6 +1117,30 @@ export class BookingService {
         order.status = autoAssigned ? 'assigned' : 'assigning';
         await order.save();
 
+        const primaryTaskId = materializedTasks[0] ? String(materializedTasks[0]._id) : undefined;
+        if (escrowResult.escrow?.escrowId && primaryTaskId) {
+          try {
+            const lineItems = await BookingItem.find({ orderId }).select('taskId skuSnapshot').lean();
+            await PaymentClient.linkTaskToBookingEscrow({
+              escrowId: escrowResult.escrow.escrowId,
+              taskId: primaryTaskId,
+              bookingOrderId: orderId,
+              lineItemTaskIds: lineItems
+                .filter((li) => li.taskId)
+                .map((li) => ({
+                  packageSlug: li.skuSnapshot?.slug,
+                  taskId: String(li.taskId),
+                })),
+            });
+          } catch (linkErr: any) {
+            logger.warn('Failed to link real taskId to free booking escrow', {
+              orderId,
+              escrowId: escrowResult.escrow.escrowId,
+              error: linkErr.message,
+            });
+          }
+        }
+
         if (autoAssigned && escrowResult.escrow?.escrowId && materializedTasks[0]?.assigneeUid) {
           try {
             await PaymentClient.attachPerformerToEscrow({
@@ -2276,7 +2300,33 @@ export class BookingService {
       if (order.pendingLines?.length) {
         await this.materializeBookingTasks(order);
       }
-      return { success: true, alreadyConfirmed: true, order };
+      const existingItems = await BookingItem.find({ orderId }).select('taskId skuSnapshot').lean();
+      const taskIds = existingItems.map((i) => i.taskId).filter(Boolean);
+      const existingTasks = taskIds.length ? await Task.find({ _id: { $in: taskIds } }).lean() : [];
+      const primaryTaskId = existingTasks[0] ? String(existingTasks[0]._id) : undefined;
+      const targetEscrowId = order.paymentEscrowId;
+      if (targetEscrowId && primaryTaskId && !primaryTaskId.startsWith('booknow-pending-')) {
+        try {
+          await PaymentClient.linkTaskToBookingEscrow({
+            escrowId: targetEscrowId,
+            taskId: primaryTaskId,
+            bookingOrderId: order.orderId,
+            lineItemTaskIds: existingItems
+              .filter((li) => li.taskId)
+              .map((li) => ({
+                packageSlug: li.skuSnapshot?.slug,
+                taskId: String(li.taskId),
+              })),
+          });
+        } catch (linkErr: any) {
+          logger.warn('Failed to link real taskId in confirmPaymentForCustomer', {
+            orderId,
+            escrowId: targetEscrowId,
+            error: linkErr.message,
+          });
+        }
+      }
+      return { success: true, alreadyConfirmed: true, order, tasks: existingTasks };
     }
 
     const escrowId = String(order.paymentEscrowId || '').trim();
@@ -2391,27 +2441,49 @@ export class BookingService {
         await order.save();
       }
 
+      const existingItems = await BookingItem.find({ orderId: order.orderId }).select('taskId skuSnapshot').lean();
+      const taskIds = existingItems.map((i) => i.taskId).filter(Boolean);
+      const existingTasks = taskIds.length ? await Task.find({ _id: { $in: taskIds } }).lean() : [];
+      const primaryTaskId = existingTasks[0] ? String(existingTasks[0]._id) : params.taskId;
+      const targetEscrowId = params.escrowId || order.paymentEscrowId;
+
+      if (targetEscrowId && primaryTaskId && !primaryTaskId.startsWith('booknow-pending-')) {
+        try {
+          await PaymentClient.linkTaskToBookingEscrow({
+            escrowId: targetEscrowId,
+            taskId: primaryTaskId,
+            bookingOrderId: order.orderId,
+            lineItemTaskIds: existingItems
+              .filter((li) => li.taskId)
+              .map((li) => ({
+                packageSlug: li.skuSnapshot?.slug,
+                taskId: String(li.taskId),
+              })),
+          });
+        } catch (linkErr: any) {
+          logger.warn('Failed to link real taskId in onPaymentCaptured (duplicate branch)', {
+            orderId: order.orderId,
+            escrowId: targetEscrowId,
+            error: linkErr.message,
+          });
+        }
+      }
+
       // If already assigned, automatically link performer to escrow
       if (order.status === 'assigned') {
         const task =
           (await Task.findById(params.taskId).lean()) ||
-          (await (async () => {
-            const linkedItems = await BookingItem.find({ orderId: order.orderId })
-              .select('taskId')
-              .lean();
-            const linkedTaskId = linkedItems.find((item) => item.taskId)?.taskId;
-            return linkedTaskId ? Task.findById(linkedTaskId).lean() : null;
-          })());
-        if (task && task.assigneeUid && params.escrowId) {
+          (existingTasks.length > 0 ? existingTasks[0] : null);
+        if (task && task.assigneeUid && targetEscrowId) {
           try {
             const attach = await PaymentClient.attachPerformerToEscrow({
-              escrowId: params.escrowId,
+              escrowId: targetEscrowId,
               performerUid: task.assigneeUid,
             });
             if (attach.success) {
               logger.info('Self-healed escrow attachment on post-payment capture', {
                 orderId: order.orderId,
-                escrowId: params.escrowId,
+                escrowId: targetEscrowId,
                 performerUid: task.assigneeUid,
               });
             } else {
@@ -2429,7 +2501,7 @@ export class BookingService {
         }
       }
 
-      return { success: true, duplicate: true };
+      return { success: true, duplicate: true, order, tasks: existingTasks };
     }
 
     // Materialize tasks first — never leave order as `assigning` with no Task rows
@@ -2444,6 +2516,30 @@ export class BookingService {
     await order.save();
 
     const primaryTaskId = tasks[0] ? String(tasks[0]._id) : params.taskId;
+
+    // Link real MongoDB task ID to PostgreSQL escrow immediately
+    if (params.escrowId && primaryTaskId && !primaryTaskId.startsWith('booknow-pending-')) {
+      try {
+        const items = await BookingItem.find({ orderId: order.orderId }).select('taskId skuSnapshot').lean();
+        await PaymentClient.linkTaskToBookingEscrow({
+          escrowId: params.escrowId,
+          taskId: primaryTaskId,
+          bookingOrderId: order.orderId,
+          lineItemTaskIds: items
+            .filter((li) => li.taskId)
+            .map((li) => ({
+              packageSlug: li.skuSnapshot?.slug,
+              taskId: String(li.taskId),
+            })),
+        });
+      } catch (linkErr: any) {
+        logger.warn('Failed to link real taskId in onPaymentCaptured', {
+          orderId: order.orderId,
+          escrowId: params.escrowId,
+          error: linkErr.message,
+        });
+      }
+    }
 
     if (autoAssigned && params.escrowId && tasks[0]?.assigneeUid) {
       try {

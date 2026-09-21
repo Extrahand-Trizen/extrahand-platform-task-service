@@ -147,6 +147,7 @@ export class PaymentClient {
     }
   }
 
+
   /**
    * Attach performer after manual ops assignment
    */
@@ -237,6 +238,60 @@ export class PaymentClient {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to detach performer',
+      };
+    }
+  }
+
+  /**
+   * Link real materialized MongoDB task ID to a Book Now escrow in payment service (Postgres).
+   */
+  static async linkTaskToBookingEscrow(params: {
+    escrowId: string;
+    bookingOrderId?: string;
+    taskId: string;
+    lineItemTaskIds?: Array<{ packageSlug?: string; taskId: string }>;
+  }): Promise<{ success: boolean; escrow?: any; error?: string }> {
+    try {
+      if (!this.baseURL || !this.serviceAuthToken) {
+        this.initialize();
+      }
+
+      const response = await axios.patch(
+        `${this.baseURL}/api/v1/escrow/${encodeURIComponent(params.escrowId)}/link-task`,
+        {
+          taskId: params.taskId,
+          bookingOrderId: params.bookingOrderId,
+          lineItemTaskIds: params.lineItemTaskIds,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Service-Auth': this.serviceAuthToken,
+            'X-Service-Name': 'task-service',
+          },
+          timeout: 15000,
+        }
+      );
+
+      if (response.data.success) {
+        return { success: true, escrow: response.data.escrow };
+      }
+
+      return {
+        success: false,
+        error: response.data.error || 'Failed to link task to escrow',
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const ax = error as AxiosError<{ error?: string }>;
+        return {
+          success: false,
+          error: ax.response?.data?.error || ax.message,
+        };
+      }
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to link task to escrow',
       };
     }
   }

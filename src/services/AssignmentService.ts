@@ -394,7 +394,7 @@ export class AssignmentService {
       try {
         logger.info('Order missing paymentEscrowId during assignment, attempting fallback creation', { orderId });
         const createRes = await PaymentClient.createBookingEscrow({
-          taskId: `booknow-pending-${order.orderId}`,
+          taskId: String(task._id),
           bookingOrderId: order.orderId,
           posterUid: order.customerUid,
           amount: order.total,
