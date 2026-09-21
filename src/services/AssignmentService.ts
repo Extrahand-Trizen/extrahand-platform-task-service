@@ -679,6 +679,11 @@ export class AssignmentService {
     task.status = 'open';
     task.assignmentStatus = undefined;
     task.acceptedApplicationId = null;
+    // Also clear partner fields so normalizeTask's fallback chain doesn't
+    // resurface the old partner when the task is re-fetched after unassign
+    (task as any).partnerId = null;
+    (task as any).partnerUid = null;
+    (task as any).partnerAcceptedAt = null;
     await task.save();
 
     // Reset escrow performer to pending_assignment

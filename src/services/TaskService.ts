@@ -990,40 +990,12 @@ export class TaskService {
     });
   }
 
-  /**
-   * Get a single task by ID (with Redis cache to reduce DB load under concurrency)
-   */
+  /** Get a single task by ID directly from MongoDB. */
   static async getTaskById(taskId: string): Promise<ITask> {
     // Avoid Mongoose CastError 500s for Book Now escrow placeholders (`booknow-pending-*`).
     assertMongoObjectIdTaskId(taskId);
 
-    const cacheKey = `task:detail:${taskId}`;
-    let cachedTask: ITask | null = null;
-
-    try {
-      const redis = getRedisClient();
-      if (redis) {
-        const cached = await redis.get(cacheKey);
-        if (cached) {
-          cachedTask = JSON.parse(cached) as ITask;
-          logger.debug("Task detail cache HIT", { taskId });
-        }
-      }
-    } catch (err) {
-      logger.warn("Task detail cache read error", { taskId, error: err instanceof Error ? err.message : String(err) });
-    }
-
-    if (cachedTask) {
-      const stillExists = await Task.findById(taskId).select('_id').lean();
-      if (!stillExists) {
-        TaskService.invalidateTaskCache(taskId);
-        cachedTask = null;
-      }
-    }
-
-    let task =
-      cachedTask ??
-      ((await Task.findById(taskId).lean()) as unknown as ITask | null);
+    let task = (await Task.findById(taskId).lean()) as unknown as ITask | null;
 
     if (!task) {
       const recovered = await RecurringVisitService.resolveDeletedRecurringChildTaskAccess(
@@ -1104,30 +1076,6 @@ export class TaskService {
     }
 
     const result = task as unknown as ITask;
-    const resolvedTaskId = String((result as unknown as { _id?: unknown })._id ?? taskId);
-
-    try {
-      const redis = getRedisClient();
-      if (redis) {
-        const payload = JSON.stringify(result);
-        if (resolvedTaskId === taskId) {
-          await redis.setex(cacheKey, REDIS_TTLS.TASK_DETAIL_SECONDS, payload);
-          logger.debug("Task detail cache SET", { taskId });
-        } else {
-          await redis.setex(
-            `task:detail:${resolvedTaskId}`,
-            REDIS_TTLS.TASK_DETAIL_SECONDS,
-            payload,
-          );
-          logger.debug("Task detail cache SET for resolved recurring child", {
-            requestedTaskId: taskId,
-            resolvedTaskId,
-          });
-        }
-      }
-    } catch (err) {
-      logger.warn("Task detail cache write error", { taskId, error: err instanceof Error ? err.message : String(err) });
-    }
 
     return result;
   }
