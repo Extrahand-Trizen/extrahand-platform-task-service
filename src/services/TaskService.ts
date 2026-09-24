@@ -321,7 +321,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce isDeletedByCustomer isDeletedBySupport';
 
 async function enrichBookNowTaskScheduleFromBooking(task: ITask): Promise<ITask> {
   if (!isBookNowTaskForCompletion(task)) return task;
@@ -456,10 +456,12 @@ export class TaskService {
     partnerVisibilityFilter?: Record<string, any> | null;
     /** When true the requesting end user may not see ANY Book Now pool jobs. */
     partnerVisibilityBlocked?: boolean;
+    /** Internal service caller (e.g. main-admin-service) */
+    isInternalService?: boolean;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo, partnerVisibilityFilter, partnerVisibilityBlocked, limit = 50, page = 1 } = filters;
+    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo, partnerVisibilityFilter, partnerVisibilityBlocked, isInternalService, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -491,6 +493,8 @@ export class TaskService {
       !!sortBy && sortBy !== "recent";
 
     const isCacheable =
+      !isInternalService &&
+      bookingSource !== 'all' &&
       (status === "open" || (Array.isArray(status) && status.length === 1 && status[0] === "open")) &&
       !bookingSource &&
       !(excludeOverdue === true || excludeOverdue === 'true') &&
@@ -567,6 +571,9 @@ export class TaskService {
           ],
         });
       }
+    } else if (bookingSource === 'all' || isInternalService) {
+      // Admin requested "all" work types (or internal service call) — include BOTH book_now and posted_task.
+      // Do NOT apply the helper marketplace-only browse clause which excludes book_now tasks.
     } else {
       // Book Now tasks are not marketplace listings — hide from helper browse/discover.
       andClauses.push(buildMarketplaceBrowseClause());
@@ -574,7 +581,7 @@ export class TaskService {
     }
 
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
-    if (status) {
+    if (status && status !== 'all') {
       if (status === 'overdue') {
         // scheduledDate is stored as UTC midnight for a calendar day — compare
         // against start of today (UTC), not wall-clock now, or "today" is overdue

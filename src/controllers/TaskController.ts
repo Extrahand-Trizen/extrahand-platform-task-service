@@ -88,6 +88,11 @@ export class TaskController {
       remotelyBool = remotely === 'true' ? true : remotely === 'false' ? false : null;
     }
 
+    const isInternalService =
+      (req as any).serviceName === 'main-admin-service' ||
+      req.headers['x-service-name'] === 'main-admin-service' ||
+      (req.user?.uid ? INTERNAL_SERVICE_UIDS.includes(req.user.uid) : false);
+
     const result = await TaskService.getTasks({
       status: statuses as any,
       excludeOverdue: excludeOverdue as string | undefined,
@@ -107,6 +112,7 @@ export class TaskController {
       bookingSource: bookingSource ? (bookingSource as string) : undefined,
       scheduledDateFrom: scheduledDateFrom ? (scheduledDateFrom as string) : undefined,
       scheduledDateTo: scheduledDateTo ? (scheduledDateTo as string) : undefined,
+      isInternalService,
       ...(await resolveBookNowVisibilityGuard(req, bookingSource ? (bookingSource as string) : undefined)),
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
