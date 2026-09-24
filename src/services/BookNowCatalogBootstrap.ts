@@ -104,21 +104,30 @@ export class BookNowCatalogBootstrap {
       { upsert: true, new: true },
     );
 
+    await ServiceSku.updateMany(
+      { categoryId: category._id, offerPrice: { $exists: false } },
+      { $set: { offerPrice: 0 } },
+    );
+
     let skus = 0;
     for (const def of HOURLY_DURATION_SKUS) {
       const sku = await ServiceSku.findOneAndUpdate(
         { categoryId: category._id, slug: def.slug },
         {
-          categoryId: category._id,
-          slug: def.slug,
-          name: def.name,
-          description: def.description,
-          basePrice: def.basePrice,
-          pricingUnit: 'hourly',
-          durationMinutes: def.durationMinutes,
-          // Must match Task.category enum — `helper` is invalid and breaks payment-captured.
-          taskCategory: 'other',
-          isActive: true,
+          $set: {
+            categoryId: category._id,
+            name: def.name,
+            description: def.description,
+            pricingUnit: 'hourly',
+            taskCategory: 'other',
+            isActive: true,
+            durationMinutes: def.durationMinutes,
+          },
+          $setOnInsert: {
+            slug: def.slug,
+            basePrice: def.basePrice,
+            offerPrice: def.offerPrice,
+          },
         },
         { upsert: true, new: true },
       );

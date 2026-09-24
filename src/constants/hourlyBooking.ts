@@ -5,19 +5,14 @@
 
 export const HOURLY_HELPER_CATEGORY_SLUG = 'hourly-helper' as const;
 
-/** Allowed booked durations (minutes). */
-export const HOURLY_ALLOWED_DURATION_MINUTES = [60, 90, 120, 180, 240] as const;
-export type HourlyAllowedDurationMinutes = (typeof HOURLY_ALLOWED_DURATION_MINUTES)[number];
-
-export const HOURLY_DURATION_SET: ReadonlySet<number> = new Set(HOURLY_ALLOWED_DURATION_MINUTES);
-
 /** Catalog SKU slug ↔ duration. Client duration key = slug. */
 export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   slug: string;
-  durationMinutes: HourlyAllowedDurationMinutes;
+  durationMinutes: number;
   name: string;
   /** Seed list price (INR). Ops may change via catalog; create path uses live SKU.basePrice. */
   basePrice: number;
+  offerPrice: number;
   description: string;
 }> = [
   {
@@ -25,6 +20,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
     durationMinutes: 60,
     name: 'Helper · 1 hour',
     basePrice: 99,
+    offerPrice: 0,
     description: 'Book a helper for 1 hour of on-demand help.',
   },
   {
@@ -32,6 +28,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
     durationMinutes: 90,
     name: 'Helper · 1.5 hours',
     basePrice: 149,
+    offerPrice: 0,
     description: 'Book a helper for 1.5 hours of on-demand help.',
   },
   {
@@ -39,6 +36,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
     durationMinutes: 120,
     name: 'Helper · 2 hours',
     basePrice: 189,
+    offerPrice: 0,
     description: 'Book a helper for 2 hours of on-demand help.',
   },
   {
@@ -46,6 +44,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
     durationMinutes: 180,
     name: 'Helper · 3 hours',
     basePrice: 269,
+    offerPrice: 0,
     description: 'Book a helper for 3 hours of on-demand help.',
   },
   {
@@ -53,7 +52,24 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
     durationMinutes: 240,
     name: 'Helper · 4 hours',
     basePrice: 349,
+    offerPrice: 0,
     description: 'Book a helper for 4 hours of on-demand help.',
+  },
+  {
+    slug: 'hourly-30m',
+    durationMinutes: 30,
+    name: 'Helper · 30 minutes',
+    basePrice: 39,
+    offerPrice: 0,
+    description: 'Book a helper for 30 minutes of on-demand help.',
+  },
+  {
+    slug: 'hourly-45m',
+    durationMinutes: 45,
+    name: 'Helper · 45 minutes',
+    basePrice: 49,
+    offerPrice: 0,
+    description: 'Book a helper for 45 minutes of on-demand help.',
   },
 ];
 
@@ -66,5 +82,8 @@ export const HOURLY_HELPER_CATEGORY = {
 
 /** Default Instant window in Asia/Kolkata (inclusive start, exclusive end hour). */
 export const HOURLY_INSTANT_DEFAULT_START_HOUR = 8;
-export const HOURLY_INSTANT_DEFAULT_END_HOUR = 20;
+export const HOURLY_INSTANT_DEFAULT_END_HOUR = 19;
 export const HOURLY_INSTANT_TIMEZONE = 'Asia/Kolkata';
+
+/** Scheduled Hourly bookings must finish by 7:00 PM local time. */
+export const HOURLY_SCHEDULED_END_HOUR = 19;

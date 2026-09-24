@@ -93,7 +93,7 @@ const envSchema = z.object({
 
   /** Instant Hourly Helper window in Asia/Kolkata (hour 0–23). Inclusive start, exclusive end. */
   HOURLY_INSTANT_START_HOUR: z.string().transform(Number).default('8'),
-  HOURLY_INSTANT_END_HOUR: z.string().transform(Number).default('20'),
+  HOURLY_INSTANT_END_HOUR: z.string().transform(Number).default('19'),
 
   /**
    * Book Now Personal Assistant catalog visibility.

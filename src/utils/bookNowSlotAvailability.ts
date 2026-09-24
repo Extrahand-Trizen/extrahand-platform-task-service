@@ -164,12 +164,14 @@ function addAnchorToOccupied(
   occupiedTimeStarts: Set<string>,
   occupiedTimeSlots: Set<BookNowTimeBucket>,
   occupiedBookingAnchors: Set<string>,
+  blockedDurationMinutes = BOOK_NOW_SLOT_STEP_MINUTES,
 ) {
   const trimmed = normalizeBookNowSlotLabel(anchor);
   if (!trimmed) return;
 
   occupiedBookingAnchors.add(trimmed);
-  for (const slot of expandBlockedSlotsFromAnchor(trimmed)) {
+  const blockedSlotCount = Math.max(1, Math.ceil(blockedDurationMinutes / BOOK_NOW_SLOT_STEP_MINUTES));
+  for (const slot of expandBlockedSlotsFromAnchor(trimmed, blockedSlotCount)) {
     occupiedTimeStarts.add(slot);
     occupiedTimeSlots.add(deriveBookNowTimeSlot(slot));
   }
@@ -194,6 +196,7 @@ function isScheduledDateOnQueryDate(scheduledDate: Date | undefined, range: { st
 export async function getOccupiedBookNowSlots(
   date: string,
   city: string,
+  blockedDurationMinutes = BOOK_NOW_SLOT_STEP_MINUTES,
 ): Promise<BookNowOccupiedSlots> {
   const range = bookingDateRange(date);
   const cityFilter = buildCityFilter(city);
@@ -229,7 +232,13 @@ export async function getOccupiedBookNowSlots(
   for (const item of items) {
     const anchor = resolveScheduleAnchor(item);
     if (!anchor) continue;
-    addAnchorToOccupied(anchor, occupiedTimeStarts, occupiedTimeSlots, occupiedBookingAnchors);
+    addAnchorToOccupied(
+      anchor,
+      occupiedTimeStarts,
+      occupiedTimeSlots,
+      occupiedBookingAnchors,
+      blockedDurationMinutes,
+    );
     ordersWithItemAnchors.add(item.orderId);
   }
 
@@ -239,7 +248,13 @@ export async function getOccupiedBookNowSlots(
 
     const anchor = resolveScheduleAnchor(order);
     if (anchor) {
-      addAnchorToOccupied(anchor, occupiedTimeStarts, occupiedTimeSlots, occupiedBookingAnchors);
+      addAnchorToOccupied(
+        anchor,
+        occupiedTimeStarts,
+        occupiedTimeSlots,
+        occupiedBookingAnchors,
+        blockedDurationMinutes,
+      );
       continue;
     }
 
@@ -250,6 +265,7 @@ export async function getOccupiedBookNowSlots(
         occupiedTimeStarts,
         occupiedTimeSlots,
         occupiedBookingAnchors,
+        blockedDurationMinutes,
       );
       occupiedTimeSlots.add(bucket);
     }
@@ -279,6 +295,7 @@ function slotHasZeroPartnerCapacity(
  *
  * Only slot-start labels that appear in BOOK_NOW_START_TIME_SLOTS (7:00 AM –
  * 8:00 PM, 30-min steps) are emitted. A missing key means "not yet computed"
+ * 7:00 PM, 30-min steps) are emitted. A missing key means "not yet computed"
  * (treat the same as the capacity being unknown, not zero).
  *
  * A value of 0 means every eligible partner is occupied during that window.
@@ -445,6 +462,9 @@ export type PartnerCapacityLocation = {
   area?: string;
   lat?: number;
   lng?: number;
+  requiredPartnerUid?: string;
+  excludeOrderId?: string;
+  excludeTaskIds?: string[];
 };
 
 type EligibleCapacityPartner = {
@@ -523,6 +543,7 @@ export async function getPartnerCapacityForSlots(
 
     const uid = String(record.uid || '').trim();
     if (!uid) continue;
+    if (location?.requiredPartnerUid && uid !== location.requiredPartnerUid) continue;
     eligiblePartners.push({
       uid,
       workShifts: Array.isArray(pp.workShifts) ? (pp.workShifts as string[]) : [],
@@ -544,6 +565,10 @@ export async function getPartnerCapacityForSlots(
     status: { $in: [...PARTNER_OCCUPIED_TASK_STATUSES] },
     scheduledDate: { $gte: range.start, $lte: range.end },
     scheduledTimeStart: { $exists: true, $ne: null },
+    ...(location?.excludeOrderId ? { bookingOrderId: { $ne: location.excludeOrderId } } : {}),
+    ...(location?.excludeTaskIds?.length
+      ? { _id: { $nin: location.excludeTaskIds } }
+      : {}),
   })
     .select('assigneeUid scheduledTimeStart scheduledTimeEnd estimatedDuration')
     .lean();
@@ -611,6 +636,9 @@ export async function assertBookNowSlotAvailable(params: {
   area?: string;
   lat?: number;
   lng?: number;
+  requiredPartnerUid?: string;
+  excludeOrderId?: string;
+  excludeTaskIds?: string[];
 }): Promise<void> {
   const date = String(params.date || '').trim();
   const city = normalizeCity(params.city);
@@ -638,9 +666,12 @@ export async function assertBookNowSlotAvailable(params: {
     area: params.area,
     lat: params.lat,
     lng: params.lng,
+    requiredPartnerUid: params.requiredPartnerUid,
+    excludeOrderId: params.excludeOrderId,
+    excludeTaskIds: params.excludeTaskIds,
   });
 
   if (slotHasZeroPartnerCapacity(capacity, slotToCheck)) {
-    throw new Error('SLOT_UNAVAILABLE');
+    throw new Error(params.requiredPartnerUid ? 'ASSIGNED_HELPER_UNAVAILABLE' : 'SLOT_UNAVAILABLE');
   }
 }

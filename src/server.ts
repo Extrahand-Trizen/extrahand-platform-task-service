@@ -15,6 +15,7 @@ import { RecurringVisitScheduler } from './schedulers/RecurringVisitScheduler';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
 import { initRedis, disconnectRedis } from './config/redis';
+import { BookNowCatalogBootstrap } from './services/BookNowCatalogBootstrap';
 async function startServer() {
   try {
     // Connect to MongoDB
@@ -22,6 +23,10 @@ async function startServer() {
       await Database.connectToDb();
     } else {
       logger.warn('⚠️ MONGODB_URI not provided, some features may not work');
+    }
+
+    if (config.MONGODB_URI) {
+      await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
     }
 
     // Initialize clients

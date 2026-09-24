@@ -37,6 +37,7 @@ export class BookingController {
       consultationMeta,
       gstExempt,
       preferredHelperGender,
+      serviceRecipient,
     } = req.body;
 
     const hasItems = Array.isArray(items) && items.length > 0;
@@ -72,6 +73,7 @@ export class BookingController {
       consultationMeta,
       gstExempt: gstExempt === true,
       preferredHelperGender,
+      serviceRecipient,
     });
 
     res.status(201).json({
@@ -97,6 +99,7 @@ export class BookingController {
 
     const data = await BookingService.getSlotAvailability(date, city, {
       durationMinutes: Number(req.query.durationMinutes),
+      availabilityMode: req.query.availabilityMode === 'hourly' ? 'hourly' : 'standard',
       area: String(req.query.area || '').trim() || undefined,
       lat: Number(req.query.lat),
       lng: Number(req.query.lng),

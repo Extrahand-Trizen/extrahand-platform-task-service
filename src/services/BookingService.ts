@@ -40,6 +40,7 @@ import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 import {
   assertHourlyInstantOperatingHours,
+  assertHourlyScheduledSlotWithinOperatingHours,
   assertHourlySingleVisitCheckout,
   isHourlyCatalogLineInput,
   isHourlyResolvedLine,
@@ -69,7 +70,7 @@ import {
   resolveTaskStartForCancellationPolicy,
 } from './cancellation/cancellationContext';
 import { config } from '../config/env';
-import type { BookingFulfillmentType } from '../models/BookingOrder';
+import type { BookingFulfillmentType, BookingServiceRecipient } from '../models/BookingOrder';
 import {
   isHelperAssignedOnTask,
   type HourlyCancellationOrchestratorResult,
@@ -82,12 +83,18 @@ import {
   type ReschedulePartnerState,
 } from '../utils/reschedulePolicy';
 import { ProfileUtils } from '../utils/ProfileUtils';
+import { LocationPricingService } from './LocationPricingService';
+import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
+import { NotificationClient } from './NotificationClient';
+import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { resolveRescheduleEndTime } from '../utils/rescheduleSchedule';
 
 
 type BookingAddress = {
   label?: string;
   line1: string;
   line2?: string;
+  area?: string;
   city: string;
   state?: string;
   pinCode: string;
@@ -209,6 +216,33 @@ const RESCHEDULE_SLOT_STARTS = [
   '7:30 PM',
   '8:00 PM',
 ];
+const HOURLY_RESCHEDULE_SLOT_STARTS = [
+  '7:00 AM',
+  '7:30 AM',
+  '8:00 AM',
+  '8:30 AM',
+  '9:00 AM',
+  '9:30 AM',
+  '10:00 AM',
+  '10:30 AM',
+  '11:00 AM',
+  '11:30 AM',
+  '12:00 PM',
+  '12:30 PM',
+  '1:00 PM',
+  '1:30 PM',
+  '2:00 PM',
+  '2:30 PM',
+  '3:00 PM',
+  '3:30 PM',
+  '4:00 PM',
+  '4:30 PM',
+  '5:00 PM',
+  '5:30 PM',
+  '6:00 PM',
+  '6:30 PM',
+  '7:00 PM',
+];
 
 function partnerStateSeverity(state: ReschedulePartnerState): number {
   switch (state) {
@@ -234,6 +268,56 @@ function normalizePreferredHelperGender(
   if (raw === 'male' || raw === 'man') return 'male';
   if (raw === 'female' || raw === 'woman') return 'female';
   throw new BadRequestError('preferredHelperGender must be any, male, or female');
+}
+
+function normalizeServiceRecipient(value: unknown): BookingServiceRecipient | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'object') {
+    throw new BadRequestError('serviceRecipient must be an object');
+  }
+  const input = value as Record<string, unknown>;
+  const type = String(input.type || '').trim().toLowerCase();
+  if (type === 'self') {
+    const name = String(input.name || '').trim();
+    const mobile = String(input.mobile || '').replace(/\D/g, '');
+    return {
+      type: 'self',
+      ...(name ? { name } : {}),
+      ...(mobile ? { mobile: mobile.slice(-10) } : {}),
+    };
+  }
+  if (type !== 'someone_else') {
+    throw new BadRequestError('serviceRecipient.type must be self or someone_else');
+  }
+  const name = String(input.name || '').trim();
+  const mobile = String(input.mobile || '').replace(/\D/g, '');
+  if (!name || !/^\d{10}$/.test(mobile)) {
+    throw new BadRequestError('Someone else bookings require a full name and valid 10-digit mobile number');
+  }
+  return { type: 'someone_else', name, mobile };
+}
+
+async function resolveServiceRecipient(
+  value: unknown,
+  customerProfileId: mongoose.Types.ObjectId,
+): Promise<BookingServiceRecipient | undefined> {
+  const normalized = normalizeServiceRecipient(value);
+  if (!normalized || normalized.type === 'someone_else') return normalized;
+
+  const profile = await ProfileUtils.getByProfileId(
+    customerProfileId,
+    'name firstName lastName displayName phone phoneNumber mobile',
+  );
+  const name = ProfileUtils.resolveProfileDisplayName(profile) || normalized.name;
+  const rawMobile = profile?.phone || profile?.phoneNumber || profile?.mobile || normalized.mobile;
+  const mobileDigits = String(rawMobile || '').replace(/\D/g, '');
+  const mobile = mobileDigits.length >= 10 ? mobileDigits.slice(-10) : normalized.mobile;
+
+  return {
+    type: 'self',
+    ...(name ? { name } : {}),
+    ...(mobile ? { mobile } : {}),
+  };
 }
 
 function parseCalendarDate(date: string): Date {
@@ -266,6 +350,40 @@ function minutesToSlot(totalMinutes: number): string {
 function defaultSlotEnd(start: string): string {
   const minutes = parseSlotMinutes(start);
   return minutes == null ? '' : minutesToSlot(minutes + 30);
+}
+
+function isHourlyBookingItem(item: {
+  durationMinutes?: number;
+  skuSnapshot?: { categorySlug?: string };
+}): boolean {
+  return (
+    Number(item.durationMinutes || 0) > 0 &&
+    String(item.skuSnapshot?.categorySlug || '').trim().toLowerCase() === 'hourly-helper'
+  );
+}
+
+function resolveStoredBookingDuration(
+  items: Array<{ durationMinutes?: number }>,
+  fallbackDurations: Array<{ estimatedDuration?: number }> = [],
+): number {
+  const durations = items
+    .map((item) => Number(item.durationMinutes || 0))
+    .filter((duration) => Number.isFinite(duration) && duration > 0);
+  if (durations.length) return Math.max(...durations);
+  const taskDurations = fallbackDurations
+    .map((task) => Number(task.estimatedDuration || 0))
+    .filter((duration) => Number.isFinite(duration) && duration > 0);
+  return taskDurations.length ? Math.max(...taskDurations) : 30;
+}
+
+function formatScheduleDateKey(date?: Date | null): string | null {
+  if (!date || Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
 }
 
 function roundCurrency(value: number): number {
@@ -518,10 +636,10 @@ export class BookingService {
   }
 
   /** Legacy path: resolve from MongoDB catalog (e.g. API-only checkout). */
-  private static async resolveLineFromCatalog(line: BookingLineInput): Promise<ResolvedLine> {
+  private static async resolveLineFromCatalog(line: BookingLineInput, address?: BookingAddress): Promise<ResolvedLine> {
     const normalized = this.normalizeLineInput(line);
     try {
-      return await this.resolveLineFromCatalogOnce(normalized);
+      return await this.resolveLineFromCatalogOnce(normalized, address);
     } catch (err) {
       // Hourly always uses catalog pricing; auto-seed if SKUs were never bootstrapped.
       if (err instanceof NotFoundError && isHourlyCatalogLineInput(normalized)) {
@@ -533,13 +651,13 @@ export class BookingService {
           },
         );
         await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
-        return this.resolveLineFromCatalogOnce(normalized);
+        return this.resolveLineFromCatalogOnce(normalized, address);
       }
       throw err;
     }
   }
 
-  private static async resolveLineFromCatalogOnce(normalized: BookingLineInput): Promise<ResolvedLine> {
+  private static async resolveLineFromCatalogOnce(normalized: BookingLineInput, address?: BookingAddress): Promise<ResolvedLine> {
     const { sku, variants, addons, category } = await CatalogService.getSkuDetail(
       normalized.skuSlug!,
       normalized.categorySlug,
@@ -559,16 +677,29 @@ export class BookingService {
     }
 
     const quantity = normalized.quantity || 1;
+    const resolvedHourlyPrice = isHourlyResolvedLine({
+      pricingUnit: sku.pricingUnit,
+      categorySlug: category?.slug,
+    }) && address && sku._id
+      ? await LocationPricingService.resolveHourlyPriceForAddress({ skuId: sku._id, address })
+      : null;
+    const authoritativePrice = resolvedHourlyPrice?.effectiveOfferPrice ?? sku.pricing.offerPrice;
     const lineTotal = computeLinePrice(
-      sku.basePrice,
+      authoritativePrice,
       variant?.priceDelta || 0,
       selectedAddons.map((a) => a.price),
       quantity,
     );
 
+    const catalogDurationMinutes = sku.durationMinutes + (variant?.durationDeltaMinutes || 0);
     const durationMinutes = resolveBookNowLineDurationMinutes(
-      sku.durationMinutes + (variant?.durationDeltaMinutes || 0),
-      normalized.durationMinutes,
+      catalogDurationMinutes,
+      isHourlyResolvedLine({
+        pricingUnit: sku.pricingUnit,
+        categorySlug: category?.slug,
+      })
+        ? undefined
+        : normalized.durationMinutes,
     );
     const title = `${sku.name}${variant && !variant.isDefault ? ` — ${variant.name}` : ''}`;
 
@@ -594,15 +725,15 @@ export class BookingService {
     };
   }
 
-  private static async resolveLine(line: BookingLineInput): Promise<ResolvedLine> {
+  private static async resolveLine(line: BookingLineInput, address?: BookingAddress): Promise<ResolvedLine> {
     // Hourly: always Mongo catalog price authority (never client name+price path).
     if (isHourlyCatalogLineInput(line)) {
-      return this.resolveLineFromCatalog(line);
+      return this.resolveLineFromCatalog(line, address);
     }
     if (this.hasClientCatalogLine(line)) {
       return this.resolveLineFromClient(line);
     }
-    return this.resolveLineFromCatalog(line);
+    return this.resolveLineFromCatalog(line, address);
   }
 
   static async createBooking(params: {
@@ -633,6 +764,7 @@ export class BookingService {
     consultationMeta?: ConsultationBookingMeta;
     gstExempt?: boolean;
     preferredHelperGender?: 'any' | 'male' | 'female' | string;
+    serviceRecipient?: BookingServiceRecipient | unknown;
   }) {
     const {
       customerUid,
@@ -655,6 +787,10 @@ export class BookingService {
     const fulfillmentType = parseBookingFulfillmentType(params.fulfillmentType);
     const preferredHelperGender = normalizePreferredHelperGender(
       params.preferredHelperGender,
+    );
+    const serviceRecipient = await resolveServiceRecipient(
+      params.serviceRecipient,
+      customerProfileId,
     );
     const {
       serviceFlowType,
@@ -802,7 +938,7 @@ export class BookingService {
       }
     }
 
-    const resolvedLines = await Promise.all(normalizedRawLines.map((line) => this.resolveLine(line)));
+    const resolvedLines = await Promise.all(normalizedRawLines.map((line) => this.resolveLine(line, address)));
 
     assertHourlySingleVisitCheckout({
       lines: resolvedLines,
@@ -827,8 +963,12 @@ export class BookingService {
       }
 
       const schedule = resolveBookNowLineSchedule({
-        lineSchedule: normalizedRawLines[index],
-        legacySchedule,
+        lineSchedule: isHourlyOrder
+          ? { ...normalizedRawLines[index], durationMinutes: undefined }
+          : normalizedRawLines[index],
+        legacySchedule: isHourlyOrder
+          ? { ...legacySchedule, durationMinutes: undefined }
+          : legacySchedule,
         catalogDurationMinutes: line.durationMinutes,
       });
 
@@ -846,6 +986,15 @@ export class BookingService {
     });
 
     if (!skipSlotChecks) {
+      for (const line of resolvedLinesWithSchedule) {
+        if (isHourlyOrder && isHourlyResolvedLine(line) && line.schedule) {
+          assertHourlyScheduledSlotWithinOperatingHours({
+            scheduledTimeStart: line.schedule.scheduledTimeStart,
+            durationMinutes: line.schedule.durationMinutes,
+          });
+        }
+      }
+
       const slotChecks = collectDistinctBookNowSlotChecks(
         resolvedLinesWithSchedule.map((line) => line.schedule),
       );
@@ -927,6 +1076,7 @@ export class BookingService {
       pendingLines: resolvedLinesWithSchedule.map(serializePendingLine),
       bookingNotes: notes?.trim() || undefined,
       ...(preferredHelperGender ? { preferredHelperGender } : {}),
+      ...(serviceRecipient ? { serviceRecipient } : {}),
       serviceFlowType: normalizedOrderServiceFlowType,
       bookingKind: normalizedOrderBookingKind,
       serviceType: normalizedOrderServiceType,
@@ -1807,6 +1957,9 @@ export class BookingService {
               ...(order.preferredHelperGender
                 ? { preferredHelperGender: order.preferredHelperGender }
                 : {}),
+              ...(order.serviceRecipient
+                ? { serviceRecipient: order.serviceRecipient }
+                : {}),
               serviceFlowType: line.serviceFlowType || order.serviceFlowType || 'standard',
               bookingKind: line.bookingKind || order.bookingKind || 'standard',
               serviceType:
@@ -1972,6 +2125,7 @@ export class BookingService {
     city: string,
     opts?: {
       durationMinutes?: number;
+      availabilityMode?: 'hourly' | 'standard';
       area?: string;
       lat?: number;
       lng?: number;
@@ -1984,7 +2138,11 @@ export class BookingService {
     const lat = Number(opts?.lat);
     const lng = Number(opts?.lng);
     const [occupied, partnerCapacityBySlot] = await Promise.all([
-      getOccupiedBookNowSlots(date, city),
+      getOccupiedBookNowSlots(
+        date,
+        city,
+        opts?.availabilityMode === 'standard' ? 3 * 60 : undefined,
+      ),
       getPartnerCapacityForSlots(date, city, durationMinutes, {
         area: opts?.area,
         lat: Number.isFinite(lat) ? lat : undefined,
@@ -1995,7 +2153,9 @@ export class BookingService {
       date: String(date || '').trim(),
       city: String(city || '').trim(),
       ...occupied,
-      partnerCapacityBySlot,
+      partnerCapacityBySlot: opts?.availabilityMode === 'hourly'
+        ? partnerCapacityBySlot
+        : {},
     };
   }
 
@@ -2012,9 +2172,11 @@ export class BookingService {
     const taskIds = items.map((item) => item.taskId).filter(Boolean);
     const tasks = taskIds.length
       ? await Task.find({ _id: { $in: taskIds } })
-          .select('status assigneeId assigneeUid executionPhase startedAt arrivedAt')
+              .select('status assigneeId assigneeUid executionPhase startedAt arrivedAt estimatedDuration')
           .lean()
       : [];
+    const hourlyItems = items.filter(isHourlyBookingItem);
+            const durationMinutes = resolveStoredBookingDuration(items, tasks);
     const rescheduleCount = Number(order.rescheduleCount || 0);
     const remainingReschedules = Math.max(0, MAX_ONE_TIME_RESCHEDULES - rescheduleCount);
     const scheduledAt = resolveScheduledAt({
@@ -2046,6 +2208,20 @@ export class BookingService {
         rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
         remainingReschedules,
         maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+      };
+    }
+    if (hourlyItems.length > 1) {
+      return {
+        allowed: false,
+        chargeRequired: false,
+        reasonCode: 'MULTI_DAY_HOURLY_UNSUPPORTED',
+        partnerState: 'unassigned',
+        message: 'Multi-day Hourly bookings cannot be rescheduled yet. Please contact support.',
+        rescheduleCount,
+        rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
+        remainingReschedules,
+        maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+        durationMinutes,
       };
     }
     const tasksById = new Map(tasks.map((task) => [String(task._id), task]));
@@ -2141,6 +2317,10 @@ export class BookingService {
       rescheduleLimit: MAX_ONE_TIME_RESCHEDULES,
       remainingReschedules,
       maxReschedules: MAX_ONE_TIME_RESCHEDULES,
+      durationMinutes,
+      currentScheduledDate: formatScheduleDateKey(order.scheduledDate),
+      currentScheduledTimeStart: order.scheduledTimeStart,
+      currentScheduledTimeEnd: order.scheduledTimeEnd,
     };
   }
 
@@ -2149,7 +2329,9 @@ export class BookingService {
     if (!eligibility.allowed) {
       throw new BadRequestError(eligibility.message || 'This booking cannot be rescheduled');
     }
-    const order = await BookingOrder.findOne({ orderId }).select('customerUid address').lean();
+    const order = await BookingOrder.findOne({
+      orderId,
+    }).select('customerUid address scheduledDate scheduledTimeStart').lean();
     if (!order) throw new NotFoundError('Booking not found');
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
 
@@ -2157,30 +2339,65 @@ export class BookingService {
     parseCalendarDate(dateKey);
     const city = String(order.address?.city || '').trim();
     const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
-      .select('durationMinutes')
+      .select('taskId skuSnapshot durationMinutes')
       .lean();
-    const durationMinutes = Math.max(
-      30,
-      ...items.map((item) => Number(item.durationMinutes || 0)),
+    const taskIds = items.map((item) => item.taskId).filter(Boolean);
+    const assignedTasks = taskIds.length
+      ? await Task.find({ _id: { $in: taskIds } }).select('assigneeUid estimatedDuration').lean()
+      : [];
+    const durationMinutes = resolveStoredBookingDuration(items, assignedTasks);
+    const requiredPartnerUid = Array.from(
+      new Set(assignedTasks.map((task) => String(task.assigneeUid || '').trim()).filter(Boolean)),
     );
+    if (requiredPartnerUid.length > 1) {
+      throw new BadRequestError('Multi-day Hourly bookings cannot be rescheduled yet. Please contact support.');
+    }
+    const hourly = items.some(isHourlyBookingItem);
     const lat = Number(order.address?.coordinates?.[1]);
     const lng = Number(order.address?.coordinates?.[0]);
     const partnerCapacityBySlot = await getPartnerCapacityForSlots(dateKey, city, durationMinutes, {
       area: resolveBookingAreaForCapacity(order.address || {}),
       lat: Number.isFinite(lat) ? lat : undefined,
       lng: Number.isFinite(lng) ? lng : undefined,
+      requiredPartnerUid: requiredPartnerUid[0],
+      excludeOrderId: orderId,
+      excludeTaskIds: taskIds.map(String),
     });
-    const slots = RESCHEDULE_SLOT_STARTS.map((start) => {
+    const slotStarts = hourly ? HOURLY_RESCHEDULE_SLOT_STARTS : RESCHEDULE_SLOT_STARTS;
+    const todayKey = formatScheduleDateKey(new Date());
+    const currentBookingDateKey = formatScheduleDateKey(order.scheduledDate);
+    const currentBookingStartMinutes = parseSlotMinutes(String(order.scheduledTimeStart || ''));
+    const slots = slotStarts.map((start) => {
       const normalized = normalizeBookNowSlotLabel(start);
       const capacity = partnerCapacityBySlot[normalized];
+      const isBeforeOrCurrentTodaySlot =
+        dateKey === todayKey &&
+        currentBookingDateKey === todayKey &&
+        currentBookingStartMinutes != null &&
+        parseSlotMinutes(normalized) != null &&
+        parseSlotMinutes(normalized)! <= currentBookingStartMinutes;
       const unavailable =
         (typeof capacity === 'number' && capacity === 0) ||
-        isBookNowSlotWithinLeadTime(normalized, dateKey);
+        isBookNowSlotWithinLeadTime(normalized, dateKey) ||
+        isBeforeOrCurrentTodaySlot ||
+        (hourly && (() => {
+          try {
+            assertHourlyScheduledSlotWithinOperatingHours({
+              scheduledTimeStart: normalized,
+              durationMinutes,
+            });
+            return false;
+          } catch {
+            return true;
+          }
+        })());
       return {
         id: normalized,
         label: normalized,
         startTime: normalized,
-        endTime: defaultSlotEnd(normalized),
+        endTime: hourly
+          ? resolveRescheduleEndTime(normalized, durationMinutes) || ''
+          : defaultSlotEnd(normalized),
         available: !unavailable,
       };
     });
@@ -2207,74 +2424,230 @@ export class BookingService {
     const scheduledDate = parseCalendarDate(dateKey);
     const scheduledTimeStart = normalizeBookNowSlotLabel(String(params.scheduledTimeStart || '').trim());
     if (!scheduledTimeStart) throw new BadRequestError('scheduledTimeStart is required');
-    const scheduledTimeEnd =
-      String(params.scheduledTimeEnd || '').trim() || defaultSlotEnd(scheduledTimeStart);
-    const timeSlot = deriveBookNowTimeSlot(scheduledTimeStart);
+    const initialOrder = await BookingOrder.findOne({ orderId });
+    if (!initialOrder) throw new NotFoundError('Booking not found');
+    if (initialOrder.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
 
-    const order = await BookingOrder.findOne({ orderId });
-    if (!order) throw new NotFoundError('Booking not found');
-    const rescheduleItems = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
-      .select('durationMinutes')
+    const initialItems = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
+      .select('taskId skuSnapshot durationMinutes')
       .lean();
-    const durationMinutes = Math.max(
-      30,
-      ...rescheduleItems.map((item) => Number(item.durationMinutes || 0)),
+    const hourly = initialItems.some(isHourlyBookingItem);
+    if (hourly && initialItems.length > 1) {
+      throw new BadRequestError('Multi-day Hourly bookings cannot be rescheduled yet. Please contact support.');
+    }
+    const initialTaskIds = initialItems.map((item) => item.taskId).filter(Boolean);
+    const initialTasks = initialTaskIds.length
+      ? await Task.find({ _id: { $in: initialTaskIds } }).select('assigneeUid estimatedDuration').lean()
+      : [];
+    const durationMinutes = resolveStoredBookingDuration(initialItems, initialTasks);
+    const assignedUids = Array.from(
+      new Set(initialTasks.map((task) => String(task.assigneeUid || '').trim()).filter(Boolean)),
     );
-    const lat = Number(order.address?.coordinates?.[1]);
-    const lng = Number(order.address?.coordinates?.[0]);
+    if (assignedUids.length > 1) {
+      throw new BadRequestError('Bookings with multiple assigned helpers cannot be rescheduled yet.');
+    }
+    const timeSlot = deriveBookNowTimeSlot(scheduledTimeStart);
+    const scheduledTimeEnd = hourly
+      ? resolveRescheduleEndTime(scheduledTimeStart, durationMinutes) || ''
+      : String(params.scheduledTimeEnd || '').trim() || defaultSlotEnd(scheduledTimeStart);
+    if (!scheduledTimeEnd) throw new BadRequestError('Could not resolve the new end time');
+    if (hourly) {
+      assertHourlyScheduledSlotWithinOperatingHours({ scheduledTimeStart, durationMinutes });
+    }
+
+    const lat = Number(initialOrder.address?.coordinates?.[1]);
+    const lng = Number(initialOrder.address?.coordinates?.[0]);
     await assertBookNowSlotAvailable({
       date: dateKey,
-      city: order.address.city,
+      city: initialOrder.address.city,
       scheduledTimeStart,
       timeSlot,
       durationMinutes,
-      area: resolveBookingAreaForCapacity(order.address),
+      area: resolveBookingAreaForCapacity(initialOrder.address),
       lat: Number.isFinite(lat) ? lat : undefined,
       lng: Number.isFinite(lng) ? lng : undefined,
+      requiredPartnerUid: assignedUids[0],
+      excludeOrderId: orderId,
+      excludeTaskIds: initialTaskIds.map(String),
     });
 
-    order.scheduledDate = scheduledDate;
-    order.scheduledTimeStart = scheduledTimeStart;
-    order.scheduledTimeEnd = scheduledTimeEnd;
-    order.timeSlot = timeSlot;
-    order.rescheduleCount = Number(order.rescheduleCount || 0) + 1;
-    order.lastRescheduledAt = new Date();
-    await order.save();
+    if (
+      formatScheduleDateKey(initialOrder.scheduledDate) === dateKey &&
+      normalizeBookNowSlotLabel(String(initialOrder.scheduledTimeStart || '')) === scheduledTimeStart
+    ) {
+      throw new BadRequestError('The new slot is the same as the current booking slot');
+    }
 
-    const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } });
-    const taskIds = items.map((item) => item.taskId).filter(Boolean);
-    await Promise.all([
-      ...items.map((item) => {
-        item.scheduledDate = scheduledDate;
-        item.scheduledTimeStart = scheduledTimeStart;
-        item.scheduledTimeEnd = scheduledTimeEnd;
-        item.timeSlot = timeSlot;
-        return item.save();
-      }),
-      taskIds.length
-        ? Task.updateMany(
-            { _id: { $in: taskIds } },
+    let updatedOrder: InstanceType<typeof BookingOrder> | null = null;
+    let updatedItems: InstanceType<typeof BookingItem>[] = [];
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async (transactionSession) => {
+        const order = await BookingOrder.findOne({ orderId, customerUid }).session(transactionSession);
+        if (!order) throw new NotFoundError('Booking not found');
+        if (!['paid', 'assigning', 'assigned'].includes(String(order.status || '').toLowerCase())) {
+          throw new BadRequestError(`Cannot reschedule booking in status ${order.status}`);
+        }
+        const currentCount = Number(order.rescheduleCount || 0);
+        if (currentCount >= MAX_ONE_TIME_RESCHEDULES) {
+          throw new BadRequestError('This booking has already been rescheduled twice. Please contact support.');
+        }
+        if (
+          formatScheduleDateKey(order.scheduledDate) === dateKey &&
+          normalizeBookNowSlotLabel(String(order.scheduledTimeStart || '')) === scheduledTimeStart
+        ) {
+          throw new BadRequestError('The new slot is the same as the current booking slot');
+        }
+
+        const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
+          .session(transactionSession);
+        if (hourly && items.length > 1) {
+          throw new BadRequestError('Multi-day Hourly bookings cannot be rescheduled yet. Please contact support.');
+        }
+        const transactionTaskIds = items.map((item) => item.taskId).filter(Boolean);
+        const transactionTasks = transactionTaskIds.length
+          ? await Task.find({ _id: { $in: transactionTaskIds } })
+              .select('assigneeUid estimatedDuration status executionPhase startedAt arrivedAt')
+              .session(transactionSession)
+              .lean()
+          : [];
+        const transactionDuration = resolveStoredBookingDuration(items, transactionTasks);
+        const transactionAssignedUids = Array.from(
+          new Set(transactionTasks.map((task) => String(task.assigneeUid || '').trim()).filter(Boolean)),
+        );
+        if (transactionAssignedUids.length > 1) {
+          throw new BadRequestError('Bookings with multiple assigned helpers cannot be rescheduled yet.');
+        }
+        const transactionPartnerStates = transactionTasks.map((task) =>
+          resolveReschedulePartnerState({
+            assigneeUid: task.assigneeUid,
+            executionPhase: task.executionPhase,
+            startedAt: task.startedAt,
+            arrivedAt: task.arrivedAt,
+            status: task.status,
+          }),
+        );
+        if (transactionPartnerStates.some((state) => state === 'started' || state === 'arrived')) {
+          throw new BadRequestError('This booking can no longer be rescheduled because work has started.');
+        }
+        const transactionEnd = hourly
+          ? resolveRescheduleEndTime(scheduledTimeStart, transactionDuration) || ''
+          : scheduledTimeEnd;
+        const transactionLat = Number(order.address?.coordinates?.[1]);
+        const transactionLng = Number(order.address?.coordinates?.[0]);
+        await assertBookNowSlotAvailable({
+          date: dateKey,
+          city: order.address.city,
+          scheduledTimeStart,
+          timeSlot,
+          durationMinutes: transactionDuration,
+          area: resolveBookingAreaForCapacity(order.address),
+          lat: Number.isFinite(transactionLat) ? transactionLat : undefined,
+          lng: Number.isFinite(transactionLng) ? transactionLng : undefined,
+          requiredPartnerUid: transactionAssignedUids[0],
+          excludeOrderId: orderId,
+          excludeTaskIds: transactionTaskIds.map(String),
+        });
+        if (hourly) {
+          assertHourlyScheduledSlotWithinOperatingHours({
+            scheduledTimeStart,
+            durationMinutes: transactionDuration,
+          });
+        }
+
+        const lastRescheduledAt = new Date();
+        order.scheduledDate = scheduledDate;
+        order.scheduledTimeStart = scheduledTimeStart;
+        order.scheduledTimeEnd = transactionEnd;
+        order.timeSlot = timeSlot;
+        order.rescheduleCount = currentCount + 1;
+        order.lastRescheduledAt = lastRescheduledAt;
+        await order.save({ session: transactionSession });
+
+        for (const item of items) {
+          item.scheduledDate = scheduledDate;
+          item.scheduledTimeStart = scheduledTimeStart;
+          item.scheduledTimeEnd = transactionEnd;
+          item.timeSlot = timeSlot;
+          await item.save({ session: transactionSession });
+        }
+
+        if (transactionTaskIds.length) {
+          await Task.updateMany(
+            { _id: { $in: transactionTaskIds } },
             {
               $set: {
                 scheduledDate,
                 scheduledTimeStart,
-                scheduledTimeEnd,
+                scheduledTimeEnd: transactionEnd,
                 timeSlot,
                 dateOption: 'on-date',
-                lastRescheduledAt: order.lastRescheduledAt,
+                lastRescheduledAt,
                 executionPhase: 'assigned',
-                executionPhaseUpdatedAt: order.lastRescheduledAt,
+                executionPhaseUpdatedAt: lastRescheduledAt,
               },
-              $unset: {
-                startOtp: 1,
-                onTheWayAt: 1,
-                arrivedAt: 1,
-              },
+              $unset: { startOtp: 1, onTheWayAt: 1, arrivedAt: 1 },
               $inc: { rescheduleCount: 1 },
             },
-          )
-        : Promise.resolve(),
-    ]);
+            { session: transactionSession },
+          );
+        }
+        updatedOrder = order;
+        updatedItems = items;
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    const taskId = String(updatedItems[0]?.taskId || '').trim();
+    const helperUid = assignedUids[0];
+    const scheduleLabel = `${dateKey} ${scheduledTimeStart}-${scheduledTimeEnd}`;
+    const notificationPromises: Promise<unknown>[] = [];
+    if (customerUid && taskId) {
+      notificationPromises.push(
+        InAppNotificationClient.send({
+          userId: customerUid,
+          title: 'Hourly booking rescheduled',
+          body: `Your Hourly-Based Work booking was rescheduled to ${scheduleLabel}.`,
+          type: 'success',
+          category: 'taskUpdates',
+          data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
+        }),
+        NotificationClient.send({
+          eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+          category: 'taskUpdates',
+          actorId: customerUid,
+          recipients: [customerUid],
+          entity: { type: 'task', id: taskId },
+          title: 'Hourly booking rescheduled',
+          body: `Your Hourly-Based Work booking was rescheduled to ${scheduleLabel}.`,
+          data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
+        }),
+      );
+    }
+    if (helperUid && taskId) {
+      notificationPromises.push(
+        InAppNotificationClient.send({
+          userId: helperUid,
+          title: 'Hourly booking schedule changed',
+          body: `The customer's Hourly-Based Work booking moved to ${scheduleLabel}.`,
+          type: 'info',
+          category: 'taskUpdates',
+          data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
+        }),
+        NotificationClient.send({
+          eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+          category: 'taskUpdates',
+          actorId: customerUid,
+          recipients: [helperUid],
+          entity: { type: 'task', id: taskId },
+          title: 'Hourly booking schedule changed',
+          body: `The customer's Hourly-Based Work booking moved to ${scheduleLabel}.`,
+          data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
+        }),
+      );
+    }
+    await Promise.allSettled(notificationPromises);
 
     logger.info('Booking rescheduled by customer', {
       orderId,
@@ -2284,7 +2657,7 @@ export class BookingService {
       reason: params.reason,
     });
 
-    return { order, items };
+    return { order: updatedOrder, items: updatedItems };
   }
 
   /**

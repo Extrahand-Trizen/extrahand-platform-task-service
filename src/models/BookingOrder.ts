@@ -12,6 +12,12 @@ export type BookingOrderStatus =
 /** Visit scheduling mode for a single BookingOrder (Instant | Scheduled). Not recurring. */
 export type BookingFulfillmentType = 'instant' | 'scheduled';
 
+export type BookingServiceRecipient = {
+  type: 'self' | 'someone_else';
+  name?: string;
+  mobile?: string;
+};
+
 export interface IBookingAddress {
   label?: string;
   line1: string;
@@ -70,6 +76,7 @@ export interface IBookingOrder extends Document {
    * Values align with Profile.gender: male | female | any.
    */
   preferredHelperGender?: 'any' | 'male' | 'female';
+  serviceRecipient?: BookingServiceRecipient;
   serviceFlowType?: 'standard' | 'consultation_project';
   bookingKind?: 'standard' | 'consultation' | 'project';
   serviceType?: string;
@@ -151,6 +158,15 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
       type: String,
       enum: ['any', 'male', 'female'],
       required: false,
+    },
+    serviceRecipient: {
+      type: {
+        type: String,
+        enum: ['self', 'someone_else'],
+        required: false,
+      },
+      name: { type: String, trim: true },
+      mobile: { type: String, trim: true },
     },
     serviceFlowType: {
       type: String,

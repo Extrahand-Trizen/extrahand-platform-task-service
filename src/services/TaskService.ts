@@ -321,7 +321,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce rescheduleCount';
 
 async function enrichBookNowTaskScheduleFromBooking(task: ITask): Promise<ITask> {
   if (!isBookNowTaskForCompletion(task)) return task;
@@ -951,6 +951,35 @@ export class TaskService {
       return row;
     });
 
+    const bookingOrderIds = Array.from(
+      new Set(
+        enrichedTasks
+          .map((task) => String((task as Record<string, unknown>).bookingOrderId || '').trim())
+          .filter(Boolean),
+      ),
+    );
+    if (bookingOrderIds.length > 0) {
+      const bookingOrders = await BookingOrder.find({ orderId: { $in: bookingOrderIds } })
+        .select('orderId total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount')
+        .lean();
+      const bookingById = new Map(bookingOrders.map((order) => [order.orderId, order]));
+      enrichedTasks = enrichedTasks.map((task) => {
+        const row = task as Record<string, any>;
+        const order = bookingById.get(String(row.bookingOrderId || '').trim());
+        if (!order) return row;
+        row.bookingOrderTotal = Number(order.subtotal ?? order.total ?? 0);
+        row.scheduledDate = row.scheduledDate ?? order.scheduledDate;
+        row.scheduledTimeStart = row.scheduledTimeStart ?? order.scheduledTimeStart;
+        row.scheduledTimeEnd = row.scheduledTimeEnd ?? order.scheduledTimeEnd;
+        row.timeSlot = row.timeSlot ?? order.timeSlot;
+        row.rescheduleCount = Math.max(
+          Number(row.rescheduleCount || 0),
+          Number(order.rescheduleCount || 0),
+        );
+        return row;
+      });
+    }
+
     if (includeFlags.applicationPreview && enrichedTasks.length > 0) {
       const previewMap = await buildApplicationPreviewsForTasks(
         enrichedTasks as Array<{ _id?: mongoose.Types.ObjectId | string; status?: string }>,
@@ -1032,6 +1061,25 @@ export class TaskService {
     }
 
     task = await enrichBookNowTaskScheduleFromBooking(task);
+
+    const bookingOrderIdForDetail = String((task as Record<string, unknown>).bookingOrderId || '').trim();
+    if (bookingOrderIdForDetail) {
+      const bookingOrder = await BookingOrder.findOne({ orderId: bookingOrderIdForDetail })
+        .select('orderId subtotal total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount')
+        .lean();
+      if (bookingOrder) {
+        (task as Record<string, unknown>).bookingOrderTotal = Number(
+          bookingOrder.subtotal ?? bookingOrder.total ?? 0,
+        );
+        (task as Record<string, unknown>).rescheduleCount = Number(
+          (task as Record<string, unknown>).rescheduleCount ?? bookingOrder.rescheduleCount ?? 0,
+        );
+        (task as Record<string, unknown>).scheduledDate ??= bookingOrder.scheduledDate;
+        (task as Record<string, unknown>).scheduledTimeStart ??= bookingOrder.scheduledTimeStart;
+        (task as Record<string, unknown>).scheduledTimeEnd ??= bookingOrder.scheduledTimeEnd;
+        (task as Record<string, unknown>).timeSlot ??= bookingOrder.timeSlot;
+      }
+    }
 
     // Book Now must never linger in `review` after proof — heal stale rows from older deploys.
     if (

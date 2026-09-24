@@ -33,6 +33,7 @@ import {
   canAccessPersonalAssistantCatalog,
   isPersonalAssistantCategorySlug,
 } from '../utils/personalAssistantCatalogVisibility';
+import { LocationPricingService } from './LocationPricingService';
 
 function assertObjectId(id: string, label = 'id'): string {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -119,8 +120,11 @@ function normalizeHubSectionServices(services: UpsertHubSectionInput['services']
   }));
 }
 
-function getSkuOfferPrice(sku: Pick<IServiceSku, 'basePrice' | 'offerDiscountType' | 'offerDiscountValue' | 'isOfferActive'>): number {
+function getSkuOfferPrice(sku: Pick<IServiceSku, 'basePrice' | 'offerPrice' | 'offerDiscountType' | 'offerDiscountValue' | 'isOfferActive'> & Partial<Pick<IServiceSku, 'pricingUnit'>>): number {
   const base = Math.max(0, Number(sku.basePrice || 0));
+  const configuredOffer = Number((sku as IServiceSku).offerPrice || 0);
+  if (configuredOffer > 0) return roundToInt(configuredOffer);
+  if (sku.pricingUnit === 'hourly') return base;
   if (!sku.isOfferActive) return base;
   const discountValue = Math.max(0, Number(sku.offerDiscountValue || 0));
   const discountType = sku.offerDiscountType || 'percent';
@@ -134,7 +138,7 @@ function getSkuOfferPrice(sku: Pick<IServiceSku, 'basePrice' | 'offerDiscountTyp
 }
 
 function enrichSkuPricing<T extends Record<string, unknown>>(
-  sku: T & Pick<IServiceSku, 'basePrice' | 'offerDiscountType' | 'offerDiscountValue' | 'isOfferActive'>,
+  sku: T & Pick<IServiceSku, 'basePrice' | 'offerPrice' | 'offerDiscountType' | 'offerDiscountValue' | 'isOfferActive'> & Partial<Pick<IServiceSku, 'pricingUnit'>>,
 ): EnrichedSku<T> {
   const originalPrice = Math.max(0, Number(sku.basePrice || 0));
   const offerPrice = getSkuOfferPrice(sku);
@@ -148,7 +152,7 @@ function enrichSkuPricing<T extends Record<string, unknown>>(
       originalPrice,
       offerPrice,
       savingsAmount,
-      isOfferActive: Boolean(sku.isOfferActive),
+      isOfferActive: offerPrice > 0 && offerPrice !== originalPrice,
       offerDiscountType: sku.offerDiscountType || 'percent',
       offerDiscountValue: Number(sku.offerDiscountValue || 0),
       appliedPercent,
@@ -413,7 +417,11 @@ export class CatalogService {
     return content;
   }
 
-  static async listSkusByCategorySlug(categorySlug: string, customerUid?: string | null) {
+  static async listSkusByCategorySlug(
+    categorySlug: string,
+    customerUid?: string | null,
+    location?: { area?: string; city?: string; state?: string; pinCode?: string; coordinates?: [number, number] },
+  ) {
     const category = await this.getCategoryBySlug(categorySlug, customerUid);
     const [skus, content] = await Promise.all([
       ServiceSku.find({ categoryId: category._id, isActive: true }).sort({ name: 1 }).lean(),
@@ -422,9 +430,39 @@ export class CatalogService {
         isActive: true,
       }).lean(),
     ]);
+    const hourlyPricing = location
+      ? await Promise.all(skus.map(async (sku) => {
+          if (sku.pricingUnit !== 'hourly') return null;
+          return LocationPricingService.resolveHourlyPriceForAddress({ skuId: sku._id, address: location });
+        }))
+      : [];
     return {
       category,
-      skus: skus.map((sku) => enrichSkuPricing(sku)),
+      skus: skus.map((sku, index) => {
+        const enriched = enrichSkuPricing(sku);
+        const resolved = hourlyPricing[index];
+        if (!resolved) return enriched;
+        const originalPrice = Math.max(0, Number(sku.basePrice || 0));
+        const offerPrice = Math.max(0, Number(resolved.effectiveOfferPrice || 0));
+        return {
+          ...sku,
+          offerPrice: offerPrice > 0 ? offerPrice : (sku.offerPrice || 0),
+          pricing: {
+            ...enriched.pricing,
+            originalPrice,
+            offerPrice,
+            savingsAmount: Math.max(0, originalPrice - offerPrice),
+            isOfferActive: offerPrice > 0 && offerPrice !== originalPrice,
+            appliedPercent: originalPrice > 0 && offerPrice < originalPrice ? roundToInt(((originalPrice - offerPrice) / originalPrice) * 100) : 0,
+            pricingSource: resolved.pricingSource,
+            locationType: resolved.locationType,
+            locationId: resolved.locationId,
+            pricingRuleId: resolved.pricingRuleId,
+            pricingVersion: resolved.version,
+            resolvedLocation: resolved.resolvedLocation,
+          },
+        };
+      }),
       content: content || null,
     };
   }
@@ -832,6 +870,7 @@ export class CatalogService {
     assertObjectId(id);
     const update: Record<string, unknown> = {};
     if (input.basePrice !== undefined) update.basePrice = input.basePrice;
+    if (input.offerPrice !== undefined) update.offerPrice = input.offerPrice;
     if (input.offerDiscountType !== undefined) update.offerDiscountType = input.offerDiscountType;
     if (input.offerDiscountValue !== undefined) update.offerDiscountValue = input.offerDiscountValue;
     if (input.isOfferActive !== undefined) update.isOfferActive = input.isOfferActive;

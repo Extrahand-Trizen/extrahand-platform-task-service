@@ -6,6 +6,7 @@ export interface IServiceSku extends Document {
   name: string;
   description?: string;
   basePrice: number;
+  offerPrice?: number;
   offerDiscountType?: 'percent' | 'flat';
   offerDiscountValue?: number;
   isOfferActive?: boolean;
@@ -24,6 +25,7 @@ const ServiceSkuSchema = new Schema<IServiceSku>(
     name: { type: String, required: true, trim: true },
     description: { type: String, trim: true },
     basePrice: { type: Number, required: true, min: 0 },
+    offerPrice: { type: Number, default: 0, min: 0 },
     offerDiscountType: { type: String, enum: ['percent', 'flat'], default: 'percent' },
     offerDiscountValue: { type: Number, default: 0, min: 0 },
     isOfferActive: { type: Boolean, default: false },
