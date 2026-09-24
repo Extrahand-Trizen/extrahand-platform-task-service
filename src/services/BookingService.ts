@@ -2351,12 +2351,18 @@ export class BookingService {
 
   static async getOrderForCustomer(orderId: string, customerUid: string) {
     const order = await BookingOrder.findOne({ orderId }).lean();
-    if (!order) throw new NotFoundError('Booking not found');
+    if (!order || order.isDeletedByCustomer === true || (order as any).isDeletedBySupport === true) {
+      throw new NotFoundError('Booking not found');
+    }
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
 
     const items = await BookingItem.find({ orderId }).lean();
     const taskIds = items.map((i) => i.taskId).filter(Boolean);
-    const tasks = await Task.find({ _id: { $in: taskIds } }).lean();
+    const tasks = await Task.find({
+      _id: { $in: taskIds },
+      isDeletedByCustomer: { $ne: true },
+      isDeletedBySupport: { $ne: true },
+    }).lean();
 
     return { order, items, tasks };
   }
@@ -2364,11 +2370,15 @@ export class BookingService {
   static async findOrderIdForTask(taskId: string, customerUid: string): Promise<string | null> {
     if (!mongoose.Types.ObjectId.isValid(taskId)) return null;
 
-    const task = await Task.findById(taskId).select('bookingOrderId requesterId').lean();
+    const task = await Task.findById(taskId).select('bookingOrderId requesterId isDeletedByCustomer isDeletedBySupport').lean();
+    if (!task || task.isDeletedByCustomer || (task as any)?.isDeletedBySupport) return null;
+
     if (task?.bookingOrderId) {
       const owned = await BookingOrder.findOne({
         orderId: task.bookingOrderId,
         customerUid,
+        isDeletedByCustomer: { $ne: true },
+        isDeletedBySupport: { $ne: true },
       })
         .select('orderId')
         .lean();
@@ -2382,7 +2392,12 @@ export class BookingService {
       .lean();
     if (!item?.orderId) return null;
 
-    const order = await BookingOrder.findOne({ orderId: item.orderId, customerUid })
+    const order = await BookingOrder.findOne({
+      orderId: item.orderId,
+      customerUid,
+      isDeletedByCustomer: { $ne: true },
+      isDeletedBySupport: { $ne: true },
+    })
       .select('orderId')
       .lean();
     return order ? item.orderId : null;
@@ -2393,6 +2408,7 @@ export class BookingService {
     const query = {
       customerUid,
       isDeletedByCustomer: { $ne: true },
+      isDeletedBySupport: { $ne: true },
     };
     const [orders, total] = await Promise.all([
       BookingOrder.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
