@@ -321,7 +321,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce rescheduleCount';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce rescheduleCount isDeletedByCustomer isDeletedBySupport';
 
 async function enrichBookNowTaskScheduleFromBooking(task: ITask): Promise<ITask> {
   if (!isBookNowTaskForCompletion(task)) return task;
@@ -456,10 +456,12 @@ export class TaskService {
     partnerVisibilityFilter?: Record<string, any> | null;
     /** When true the requesting end user may not see ANY Book Now pool jobs. */
     partnerVisibilityBlocked?: boolean;
+    /** Internal service caller (e.g. main-admin-service) */
+    isInternalService?: boolean;
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo, partnerVisibilityFilter, partnerVisibilityBlocked, limit = 50, page = 1 } = filters;
+    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo, partnerVisibilityFilter, partnerVisibilityBlocked, isInternalService, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -491,6 +493,8 @@ export class TaskService {
       !!sortBy && sortBy !== "recent";
 
     const isCacheable =
+      !isInternalService &&
+      bookingSource !== 'all' &&
       (status === "open" || (Array.isArray(status) && status.length === 1 && status[0] === "open")) &&
       !bookingSource &&
       !(excludeOverdue === true || excludeOverdue === 'true') &&
@@ -538,6 +542,13 @@ export class TaskService {
     // Build filters using $and to safely compose multiple $or filters
     const andClauses: any[] = [];
 
+    // Soft-deleted tasks must never appear in normal task listings (works list, browse, search).
+    // They are only accessible via the recycle bin.
+    andClauses.push({
+      isDeletedByCustomer: { $ne: true },
+      isDeletedBySupport: { $ne: true },
+    });
+
     // When bookingSource is explicitly specified (admin view), skip the marketplace-only
     // clause so book_now tasks are visible. Otherwise apply it to protect helper browse.
     if (bookingSource && bookingSource !== 'all') {
@@ -560,6 +571,9 @@ export class TaskService {
           ],
         });
       }
+    } else if (bookingSource === 'all' || isInternalService) {
+      // Admin requested "all" work types (or internal service call) — include BOTH book_now and posted_task.
+      // Do NOT apply the helper marketplace-only browse clause which excludes book_now tasks.
     } else {
       // Book Now tasks are not marketplace listings — hide from helper browse/discover.
       andClauses.push(buildMarketplaceBrowseClause());
@@ -567,7 +581,7 @@ export class TaskService {
     }
 
     // Status filter: support single value or array (e.g. "open,assigned" sent as array)
-    if (status) {
+    if (status && status !== 'all') {
       if (status === 'overdue') {
         // scheduledDate is stored as UTC midnight for a calendar day — compare
         // against start of today (UTC), not wall-clock now, or "today" is overdue
@@ -791,6 +805,11 @@ export class TaskService {
 
     const andClauses: any[] = [];
 
+    andClauses.push({
+      isDeletedByCustomer: { $ne: true },
+      isDeletedBySupport: { $ne: true },
+    });
+
     // Book Now tasks are ops-assigned â€” exclude from helper browse/nearby.
     andClauses.push(buildMarketplaceBrowseClause());
     andClauses.push(buildMarketplaceParentOnlyClause());
@@ -931,6 +950,7 @@ export class TaskService {
       requesterId: profileId,
       $or: [{ parentTaskId: { $exists: false } }, { parentTaskId: null }],
       isDeletedByCustomer: { $ne: true },
+      isDeletedBySupport: { $ne: true },
     };
     if (status) query.status = status;
 
@@ -1028,12 +1048,13 @@ export class TaskService {
       requesterId: new mongoose.Types.ObjectId(requesterId),
       status: "open",
       isDeletedByCustomer: { $ne: true },
+      isDeletedBySupport: { $ne: true },
       ...buildLiveOpenExpiryClause(new Date()),
     });
   }
 
   /** Get a single task by ID directly from MongoDB. */
-  static async getTaskById(taskId: string): Promise<ITask> {
+  static async getTaskById(taskId: string, options?: { allowDeleted?: boolean }): Promise<ITask> {
     // Avoid Mongoose CastError 500s for Book Now escrow placeholders (`booknow-pending-*`).
     assertMongoObjectIdTaskId(taskId);
 
@@ -1060,24 +1081,29 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
+    if (!options?.allowDeleted && (task.isDeletedByCustomer || task.isDeletedBySupport)) {
+      throw new NotFoundError("Task not found");
+    }
+
     task = await enrichBookNowTaskScheduleFromBooking(task);
 
-    const bookingOrderIdForDetail = String((task as Record<string, unknown>).bookingOrderId || '').trim();
+    const taskDetails = task as unknown as Record<string, unknown>;
+    const bookingOrderIdForDetail = String(taskDetails.bookingOrderId || '').trim();
     if (bookingOrderIdForDetail) {
       const bookingOrder = await BookingOrder.findOne({ orderId: bookingOrderIdForDetail })
         .select('orderId subtotal total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount')
         .lean();
       if (bookingOrder) {
-        (task as Record<string, unknown>).bookingOrderTotal = Number(
+        taskDetails.bookingOrderTotal = Number(
           bookingOrder.subtotal ?? bookingOrder.total ?? 0,
         );
-        (task as Record<string, unknown>).rescheduleCount = Number(
-          (task as Record<string, unknown>).rescheduleCount ?? bookingOrder.rescheduleCount ?? 0,
+        taskDetails.rescheduleCount = Number(
+          taskDetails.rescheduleCount ?? bookingOrder.rescheduleCount ?? 0,
         );
-        (task as Record<string, unknown>).scheduledDate ??= bookingOrder.scheduledDate;
-        (task as Record<string, unknown>).scheduledTimeStart ??= bookingOrder.scheduledTimeStart;
-        (task as Record<string, unknown>).scheduledTimeEnd ??= bookingOrder.scheduledTimeEnd;
-        (task as Record<string, unknown>).timeSlot ??= bookingOrder.timeSlot;
+        taskDetails.scheduledDate ??= bookingOrder.scheduledDate;
+        taskDetails.scheduledTimeStart ??= bookingOrder.scheduledTimeStart;
+        taskDetails.scheduledTimeEnd ??= bookingOrder.scheduledTimeEnd;
+        taskDetails.timeSlot ??= bookingOrder.timeSlot;
       }
     }
 
@@ -2122,19 +2148,80 @@ export class TaskService {
    */
   static async deleteTask(
     taskId: string,
-    profileId: mongoose.Types.ObjectId,
-    options?: { actorUid?: string },
+    profileId?: mongoose.Types.ObjectId,
+    options?: {
+      actorUid?: string;
+      isAdmin?: boolean;
+      adminUserId?: string;
+      reason?: string;
+    },
   ): Promise<{ deletionType: 'hard' | 'soft'; message: string }> {
     const task = await Task.findById(taskId);
     if (!task) {
       throw new NotFoundError("Task not found");
     }
 
-    if (!task.requesterId.equals(profileId)) {
+    const bookingOrderId = String(task.bookingOrderId || '').trim() || undefined;
+
+    // Admin deletion (from Main Admin Dashboard): soft-delete so it moves to Recycle Bin and is hidden everywhere else.
+    if (options?.isAdmin) {
+      const now = new Date();
+      const actorId = String(options?.adminUserId || options?.actorUid || (profileId ? profileId.toString() : 'main-admin'));
+      const reason = options?.reason ? String(options.reason).trim() : '';
+      const treeIds = await TaskService.collectTaskTreeIds(task);
+
+      await Task.updateMany(
+        { _id: { $in: treeIds } },
+        {
+          $set: {
+            isDeletedByCustomer: true,
+            deletedByCustomerAt: now,
+            deletedByCustomerId: actorId,
+            isDeletedBySupport: true,
+            deletedBySupportAt: now,
+            deletedBySupportId: actorId,
+            deleteReason: reason,
+          },
+        },
+      );
+
+      if (bookingOrderId) {
+        await BookingOrder.updateOne(
+          { orderId: bookingOrderId },
+          {
+            $set: {
+              isDeletedByCustomer: true,
+              deletedByCustomerAt: now,
+              deletedByCustomerId: actorId,
+              isDeletedBySupport: true,
+              deletedBySupportAt: now,
+              deletedBySupportId: actorId,
+              deleteReason: reason,
+            },
+          },
+        );
+      }
+
+      for (const id of treeIds) {
+        TaskService.invalidateTaskCache(String(id));
+      }
+      TaskService.invalidateTaskListCache();
+
+      logger.info(
+        `Task soft-deleted by admin: ${taskId} by ${actorId} (reason: ${reason || 'none'})`,
+      );
+
+      return {
+        deletionType: 'soft',
+        message: 'Work deleted successfully.',
+      };
+    }
+
+    if (!profileId || !task.requesterId.equals(profileId)) {
       throw new ForbiddenError("Not authorized to delete this task");
     }
 
-    if (task.isDeletedByCustomer) {
+    if (task.isDeletedByCustomer || task.isDeletedBySupport) {
       return {
         deletionType: 'soft',
         message: 'Work deleted successfully.',
@@ -2168,7 +2255,6 @@ export class TaskService {
     );
 
     const isBookNow = String(task.bookingSource || '') === 'book_now';
-    const bookingOrderId = String(task.bookingOrderId || '').trim() || undefined;
 
     let safety: Awaited<ReturnType<typeof PaymentClient.getTaskDeletionSafety>>;
     try {
@@ -2217,6 +2303,7 @@ export class TaskService {
       for (const id of taskIdsToDelete) {
         TaskService.invalidateTaskCache(String(id));
       }
+      TaskService.invalidateTaskListCache();
 
       logger.info(
         `Task hard-deleted: ${taskId} by user ${profileId.toString()} (including ${Math.max(0, taskIdsToDelete.length - 1)} visit child task(s))`,
@@ -2240,6 +2327,9 @@ export class TaskService {
           isDeletedByCustomer: true,
           deletedByCustomerAt: now,
           deletedByCustomerId: actorId,
+          isDeletedBySupport: true,
+          deletedBySupportAt: now,
+          deletedBySupportId: actorId,
         },
       },
     );
@@ -2252,6 +2342,9 @@ export class TaskService {
             isDeletedByCustomer: true,
             deletedByCustomerAt: now,
             deletedByCustomerId: actorId,
+            isDeletedBySupport: true,
+            deletedBySupportAt: now,
+            deletedBySupportId: actorId,
           },
         },
       );
@@ -2260,6 +2353,7 @@ export class TaskService {
     for (const id of treeIds) {
       TaskService.invalidateTaskCache(String(id));
     }
+    TaskService.invalidateTaskListCache();
 
     logger.info(
       `Task soft-deleted by customer: ${taskId} (status=${status}, bookNow=${isBookNow}) by ${actorId}`,
@@ -2269,6 +2363,149 @@ export class TaskService {
       deletionType: 'soft',
       message: 'Work deleted successfully.',
     };
+  }
+
+  /**
+   * Super Admin / Operations Recycle Bin listing: returns soft-deleted tasks.
+   */
+  static async getRecycleBinTasks(filters: {
+    page?: number;
+    limit?: number;
+    search?: string;
+  }): Promise<{ tasks: ITask[]; pagination: any }> {
+    const { page = 1, limit = 20, search } = filters;
+    const effectiveLimit = Math.min(Math.max(1, limit), 100);
+    const effectivePage = Math.max(1, page);
+    const skip = (effectivePage - 1) * effectiveLimit;
+
+    const query: any = {
+      $or: [
+        { isDeletedByCustomer: true },
+        { isDeletedBySupport: true },
+      ],
+    };
+
+    if (search && search.trim()) {
+      const s = search.trim();
+      query.$and = [
+        {
+          $or: [
+            { title: { $regex: s, $options: 'i' } },
+            { description: { $regex: s, $options: 'i' } },
+            { category: { $regex: s, $options: 'i' } },
+            { categoryLabel: { $regex: s, $options: 'i' } },
+            { bookingOrderId: { $regex: s, $options: 'i' } },
+          ],
+        },
+      ];
+    }
+
+    const [tasks, total] = await Promise.all([
+      Task.find(query)
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(effectiveLimit)
+        .lean(),
+      Task.countDocuments(query),
+    ]);
+
+    return {
+      tasks: tasks as unknown as ITask[],
+      pagination: {
+        page: effectivePage,
+        limit: effectiveLimit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / effectiveLimit)),
+      },
+    };
+  }
+
+  /**
+   * Restore a soft-deleted task from the recycle bin.
+   */
+  static async restoreTask(taskId: string): Promise<ITask> {
+    assertMongoObjectIdTaskId(taskId);
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const treeIds = await TaskService.collectTaskTreeIds(task);
+    await Task.updateMany(
+      { _id: { $in: treeIds } },
+      {
+        $set: {
+          isDeletedByCustomer: false,
+          isDeletedBySupport: false,
+        },
+        $unset: {
+          deletedByCustomerAt: 1,
+          deletedByCustomerId: 1,
+          deletedBySupportAt: 1,
+          deletedBySupportId: 1,
+          deleteReason: 1,
+        },
+      },
+    );
+
+    const bookingOrderId = String(task.bookingOrderId || '').trim();
+    if (bookingOrderId) {
+      await BookingOrder.updateOne(
+        { orderId: bookingOrderId },
+        {
+          $set: {
+            isDeletedByCustomer: false,
+            isDeletedBySupport: false,
+          },
+          $unset: {
+            deletedByCustomerAt: 1,
+            deletedByCustomerId: 1,
+            deletedBySupportAt: 1,
+            deletedBySupportId: 1,
+            deleteReason: 1,
+          },
+        },
+      );
+    }
+
+    for (const id of treeIds) {
+      TaskService.invalidateTaskCache(String(id));
+    }
+    TaskService.invalidateTaskListCache();
+
+    const restored = await Task.findById(taskId).lean();
+    return restored as unknown as ITask;
+  }
+
+  /**
+   * Permanently delete a task from the database.
+   */
+  static async permanentlyDeleteTask(taskId: string, reason?: string): Promise<{ success: boolean; message: string }> {
+    assertMongoObjectIdTaskId(taskId);
+    const task = await Task.findById(taskId);
+    if (!task) {
+      throw new NotFoundError("Task not found");
+    }
+
+    const treeIds = await TaskService.collectTaskTreeIds(task);
+    await TaskService.deleteTaskRelatedRecords(treeIds);
+    await Task.deleteMany({ _id: { $in: treeIds } });
+
+    const bookingOrderId = String(task.bookingOrderId || '').trim();
+    if (bookingOrderId) {
+      const remainingTasks = await Task.countDocuments({ bookingOrderId });
+      if (remainingTasks === 0) {
+        await BookingOrder.deleteOne({ orderId: bookingOrderId }).catch(() => {});
+      }
+    }
+
+    for (const id of treeIds) {
+      TaskService.invalidateTaskCache(String(id));
+    }
+    TaskService.invalidateTaskListCache();
+
+    logger.info(`Task permanently deleted: ${taskId} (${treeIds.length} tasks removed) reason: ${reason || 'none'}`);
+    return { success: true, message: 'Work permanently deleted' };
   }
 
   /**

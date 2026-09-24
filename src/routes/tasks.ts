@@ -27,6 +27,13 @@ router.post(
   asyncHandler(TaskController.getTasksBatch)
 );
 
+// GET /api/v1/tasks/recycle-bin — list soft-deleted tasks (service/admin only, must come before /:id)
+router.get(
+  "/recycle-bin",
+  serviceAuthMiddleware,
+  asyncHandler(TaskController.getRecycleBinTasks)
+);
+
 // GET /api/v1/tasks/nearby - Get nearby tasks (requires user location from profile)
 router.get(
   "/nearby",
@@ -183,6 +190,20 @@ router.delete(
   serviceAuthMiddleware,
   authMiddleware,
   asyncHandler(TaskController.deleteTask)
+);
+
+// POST /api/v1/tasks/:id/restore — Admin: restore a soft-deleted task (service/admin only)
+router.post(
+  "/:id/restore",
+  serviceAuthMiddleware,
+  asyncHandler(TaskController.restoreTask)
+);
+
+// DELETE /api/v1/tasks/:id/permanent — Admin: permanently delete a soft-deleted task (service/admin only)
+router.delete(
+  "/:id/permanent",
+  serviceAuthMiddleware,
+  asyncHandler(TaskController.permanentlyDeleteTask)
 );
 
 // PATCH /api/v1/tasks/:id/status - Update task status

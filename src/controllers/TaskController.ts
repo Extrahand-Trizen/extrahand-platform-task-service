@@ -88,6 +88,11 @@ export class TaskController {
       remotelyBool = remotely === 'true' ? true : remotely === 'false' ? false : null;
     }
 
+    const isInternalService =
+      (req as any).serviceName === 'main-admin-service' ||
+      req.headers['x-service-name'] === 'main-admin-service' ||
+      (req.user?.uid ? INTERNAL_SERVICE_UIDS.includes(req.user.uid) : false);
+
     const result = await TaskService.getTasks({
       status: statuses as any,
       excludeOverdue: excludeOverdue as string | undefined,
@@ -107,6 +112,7 @@ export class TaskController {
       bookingSource: bookingSource ? (bookingSource as string) : undefined,
       scheduledDateFrom: scheduledDateFrom ? (scheduledDateFrom as string) : undefined,
       scheduledDateTo: scheduledDateTo ? (scheduledDateTo as string) : undefined,
+      isInternalService,
       ...(await resolveBookNowVisibilityGuard(req, bookingSource ? (bookingSource as string) : undefined)),
       limit: limit ? parseInt(limit as string) : undefined,
       page: page ? parseInt(page as string) : undefined,
@@ -215,7 +221,8 @@ export class TaskController {
    */
   static async getTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     assertMongoObjectIdTaskId(req.params.id);
-    const task = await TaskService.getTaskById(req.params.id);
+    const isServiceCall = Boolean(req.headers['x-service-auth'] || (req as any).serviceName);
+    const task = await TaskService.getTaskById(req.params.id, { allowDeleted: isServiceCall });
 
     // Increment views in background so response is not blocked
     setImmediate(() => {
@@ -474,12 +481,22 @@ export class TaskController {
    * Hard-delete untouched open tasks, or soft-remove from customer lists.
    */
   static async deleteTask(req: AuthenticatedRequest, res: Response): Promise<void> {
-    if (!req.user!.profileId) {
+    const isServiceCall = Boolean(req.headers['x-service-auth'] || (req as any).serviceName);
+    const isAdmin = isServiceCall && (req.headers['x-service-name'] === 'main-admin-service' || (req as any).serviceName === 'main-admin-service');
+    const profileId = req.user?.profileId;
+
+    if (!isAdmin && !profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    const result = await TaskService.deleteTask(req.params.id, req.user!.profileId, {
-      actorUid: req.user!.uid,
+    const adminUserId = (req.headers['x-admin-user-id'] as string) || (req.headers['x-user-id'] as string) || req.body?.adminUserId;
+    const reason = req.body?.reason;
+
+    const result = await TaskService.deleteTask(req.params.id, profileId as any, {
+      actorUid: req.user?.uid || adminUserId || 'main-admin',
+      isAdmin,
+      adminUserId,
+      reason,
     });
 
     ApiResponse.success(res, { deletionType: result.deletionType }, result.message);
@@ -814,5 +831,39 @@ export class TaskController {
     }).lean();
 
     res.json({ success: true, tasks });
+  }
+
+  /**
+   * GET /api/v1/tasks/recycle-bin
+   * List soft-deleted tasks (service/admin access only).
+   */
+  static async getRecycleBinTasks(req: Request, res: Response): Promise<void> {
+    const page = req.query.page ? Number(req.query.page) : 1;
+    const limit = req.query.limit ? Number(req.query.limit) : 20;
+    const search = (req.query.search as string) || undefined;
+
+    const result = await TaskService.getRecycleBinTasks({ page, limit, search });
+    ApiResponse.paginated(res, result.tasks, 'Recycle bin tasks retrieved successfully', result.pagination);
+  }
+
+  /**
+   * POST /api/v1/tasks/:id/restore
+   * Restore a soft-deleted task (service/admin access only).
+   */
+  static async restoreTask(req: Request, res: Response): Promise<void> {
+    const { id } = req.params;
+    const restored = await TaskService.restoreTask(id);
+    ApiResponse.success(res, restored, 'Task restored successfully');
+  }
+
+  /**
+   * DELETE /api/v1/tasks/:id/permanent
+   * Permanently delete a soft-deleted task (service/admin access only).
+   */
+  static async permanentlyDeleteTask(req: Request, res: Response): Promise<void> {
+    const { id } = req.params;
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
+    const result = await TaskService.permanentlyDeleteTask(id, reason);
+    ApiResponse.success(res, result, result.message);
   }
 }

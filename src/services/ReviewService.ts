@@ -290,10 +290,12 @@ export class ReviewService {
     const maxSkip = (MAX_PAGE - 1) * effectiveLimit;
     const effectiveSkip = Math.min(Math.max(0, skip), maxSkip);
 
-    const query: any = { isPublic: true };
-    if (mongoose.Types.ObjectId.isValid(userId)) {
-      query.reviewedId = new mongoose.Types.ObjectId(userId);
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return { reviews: [] };
     }
+
+    const query: any = { isPublic: true };
+    query.reviewedId = new mongoose.Types.ObjectId(userId);
     if (rating !== null && rating !== undefined) {
       query.rating = rating;
     }
