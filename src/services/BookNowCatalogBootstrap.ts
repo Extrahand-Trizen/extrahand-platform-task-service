@@ -109,6 +109,19 @@ export class BookNowCatalogBootstrap {
       { $set: { offerPrice: 0 } },
     );
 
+    // Retire the temporary one-minute test SKU if it was seeded by an older build.
+    const retiredOneMinuteSku = await ServiceSku.findOneAndUpdate(
+      { categoryId: category._id, slug: 'hourly-1m' },
+      { $set: { isActive: false } },
+      { new: true },
+    );
+    if (retiredOneMinuteSku) {
+      await ServiceVariant.updateMany(
+        { skuId: retiredOneMinuteSku._id },
+        { $set: { isActive: false } },
+      );
+    }
+
     let skus = 0;
     for (const def of HOURLY_DURATION_SKUS) {
       const sku = await ServiceSku.findOneAndUpdate(

@@ -15,6 +15,8 @@ export const BOOK_NOW_SLOTS_BLOCKED_PER_BOOKING = 1;
 
 /** Same-day slots that have already started are rejected. No extra lead buffer. */
 export const BOOK_NOW_MIN_LEAD_TIME_MINUTES = 0;
+/** Standard services cannot be booked inside the next three hours. */
+export const BOOK_NOW_STANDARD_MIN_LEAD_TIME_MINUTES = 3 * 60;
 
 const BOOK_NOW_SLOT_STEP_MINUTES = 30;
 
@@ -141,6 +143,7 @@ export function isBookNowSlotWithinLeadTime(
   slot: string,
   date: string,
   now = new Date(),
+  leadTimeMinutes = BOOK_NOW_MIN_LEAD_TIME_MINUTES,
 ): boolean {
   const dateKey = String(date || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false;
@@ -150,7 +153,7 @@ export function isBookNowSlotWithinLeadTime(
 
   const slotMinutes = parseHourlySlotToMinutes(slot);
   if (slotMinutes == null) return false;
-  return slotMinutes < nowMinutes + BOOK_NOW_MIN_LEAD_TIME_MINUTES;
+  return slotMinutes < nowMinutes + Math.max(0, leadTimeMinutes);
 }
 
 function buildCityFilter(city: string) {
@@ -197,6 +200,7 @@ export async function getOccupiedBookNowSlots(
   date: string,
   city: string,
   blockedDurationMinutes = BOOK_NOW_SLOT_STEP_MINUTES,
+  location?: { lat?: number; lng?: number },
 ): Promise<BookNowOccupiedSlots> {
   const range = bookingDateRange(date);
   const cityFilter = buildCityFilter(city);
@@ -208,14 +212,35 @@ export async function getOccupiedBookNowSlots(
     'address.city': cityFilter,
     status: { $in: BLOCKING_STATUSES },
   })
-    .select('orderId scheduledDate scheduledTimeStart timeSlot')
+    .select('orderId scheduledDate scheduledTimeStart timeSlot address.coordinates')
     .lean();
 
-  if (!orders.length) {
+  const requestLat = Number(location?.lat);
+  const requestLng = Number(location?.lng);
+  const hasRequestCoordinates =
+    Number.isFinite(requestLat) &&
+    Number.isFinite(requestLng) &&
+    !(requestLat === 0 && requestLng === 0);
+  const relevantOrders = hasRequestCoordinates
+    ? orders.filter((order) => {
+        const coordinates = (order.address as { coordinates?: unknown } | undefined)?.coordinates;
+        if (!Array.isArray(coordinates) || coordinates.length < 2) return false;
+        const orderLng = Number(coordinates[0]);
+        const orderLat = Number(coordinates[1]);
+        return (
+          Number.isFinite(orderLat) &&
+          Number.isFinite(orderLng) &&
+          haversineKm(requestLat, requestLng, orderLat, orderLng) <=
+            BOOK_NOW_WORK_AREA_PROXIMITY_KM
+        );
+      })
+    : orders;
+
+  if (!relevantOrders.length) {
     return { occupiedTimeStarts: [], occupiedTimeSlots: [], occupiedBookingAnchors: [] };
   }
 
-  const orderIds = orders.map((order) => order.orderId);
+  const orderIds = relevantOrders.map((order) => order.orderId);
   const items = await BookingItem.find({
     orderId: { $in: orderIds },
     status: { $ne: 'cancelled' },
@@ -242,7 +267,7 @@ export async function getOccupiedBookNowSlots(
     ordersWithItemAnchors.add(item.orderId);
   }
 
-  for (const order of orders) {
+  for (const order of relevantOrders) {
     if (ordersWithItemAnchors.has(order.orderId)) continue;
     if (!isScheduledDateOnQueryDate(order.scheduledDate, range)) continue;
 
@@ -633,6 +658,7 @@ export async function assertBookNowSlotAvailable(params: {
   scheduledTimeStart?: string;
   timeSlot?: BookNowTimeBucket;
   durationMinutes?: number;
+  availabilityMode?: 'hourly' | 'standard';
   area?: string;
   lat?: number;
   lng?: number;
@@ -651,14 +677,26 @@ export async function assertBookNowSlotAvailable(params: {
 
   if (!date || !city) return;
 
-  if (scheduledTimeStart && isBookNowSlotWithinLeadTime(scheduledTimeStart, date)) {
+  const leadTimeMinutes =
+    params.availabilityMode === 'hourly'
+      ? BOOK_NOW_MIN_LEAD_TIME_MINUTES
+      : BOOK_NOW_STANDARD_MIN_LEAD_TIME_MINUTES;
+
+  if (
+    scheduledTimeStart &&
+    isBookNowSlotWithinLeadTime(scheduledTimeStart, date, new Date(), leadTimeMinutes)
+  ) {
     throw new Error('SLOT_TOO_SOON');
   }
 
   const slotToCheck = scheduledTimeStart || (timeSlot ? bucketAnchorSlot(timeSlot) : '');
   if (!slotToCheck) return;
 
-  if (!scheduledTimeStart && timeSlot && isBookNowSlotWithinLeadTime(slotToCheck, date)) {
+  if (
+    !scheduledTimeStart &&
+    timeSlot &&
+    isBookNowSlotWithinLeadTime(slotToCheck, date, new Date(), leadTimeMinutes)
+  ) {
     throw new Error('SLOT_TOO_SOON');
   }
 

@@ -995,33 +995,36 @@ export class BookingService {
         }
       }
 
-      const slotChecks = collectDistinctBookNowSlotChecks(
-        resolvedLinesWithSchedule.map((line) => line.schedule),
-      );
-      for (const slotCheck of slotChecks) {
-        try {
-          await assertBookNowSlotAvailable({
-            date: slotCheck.date,
-            city: address.city,
-            scheduledTimeStart: slotCheck.scheduledTimeStart,
-            timeSlot: slotCheck.timeSlot,
-            durationMinutes: slotCheck.durationMinutes,
-            area: resolveBookingAreaForCapacity(address),
-            lat: Array.isArray(address.coordinates) ? address.coordinates[1] : undefined,
-            lng: Array.isArray(address.coordinates) ? address.coordinates[0] : undefined,
-          });
-        } catch (error) {
-          if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
-            throw new BadRequestError(
-              'No helper is free for this full time window. Please choose another slot.',
-            );
+      if (!isHourlyOrder) {
+        const slotChecks = collectDistinctBookNowSlotChecks(
+          resolvedLinesWithSchedule.map((line) => line.schedule),
+        );
+        for (const slotCheck of slotChecks) {
+          try {
+            await assertBookNowSlotAvailable({
+              date: slotCheck.date,
+              city: address.city,
+              scheduledTimeStart: slotCheck.scheduledTimeStart,
+              timeSlot: slotCheck.timeSlot,
+              durationMinutes: slotCheck.durationMinutes,
+              availabilityMode: 'standard',
+              area: resolveBookingAreaForCapacity(address),
+              lat: Array.isArray(address.coordinates) ? address.coordinates[1] : undefined,
+              lng: Array.isArray(address.coordinates) ? address.coordinates[0] : undefined,
+            });
+          } catch (error) {
+            if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
+              throw new BadRequestError(
+                'No helper is free for this full time window. Please choose another slot.',
+              );
+            }
+            if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
+              throw new BadRequestError(
+                'That time has already passed. Please choose a later time slot.',
+              );
+            }
+            throw error;
           }
-          if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
-            throw new BadRequestError(
-              'That time has already passed. Please choose a later time slot.',
-            );
-          }
-          throw error;
         }
       }
     }
@@ -1337,6 +1340,9 @@ export class BookingService {
             amount: rawOrder.amount,
             currency: rawOrder.currency || 'INR',
             ...(typeof rawOrder.keyId === 'string' ? { keyId: rawOrder.keyId } : {}),
+            ...(rawOrder.paymentEnvironment === 'test' || rawOrder.paymentEnvironment === 'live'
+              ? { paymentEnvironment: rawOrder.paymentEnvironment }
+              : {}),
           }
         : escrowResult.order;
 
@@ -2141,7 +2147,11 @@ export class BookingService {
       getOccupiedBookNowSlots(
         date,
         city,
-        opts?.availabilityMode === 'standard' ? 3 * 60 : undefined,
+        undefined,
+        {
+          lat: Number.isFinite(lat) ? lat : undefined,
+          lng: Number.isFinite(lng) ? lng : undefined,
+        },
       ),
       getPartnerCapacityForSlots(date, city, durationMinutes, {
         area: opts?.area,
@@ -2463,6 +2473,7 @@ export class BookingService {
       scheduledTimeStart,
       timeSlot,
       durationMinutes,
+      availabilityMode: hourly ? 'hourly' : 'standard',
       area: resolveBookingAreaForCapacity(initialOrder.address),
       lat: Number.isFinite(lat) ? lat : undefined,
       lng: Number.isFinite(lng) ? lng : undefined,
@@ -2541,6 +2552,7 @@ export class BookingService {
           scheduledTimeStart,
           timeSlot,
           durationMinutes: transactionDuration,
+          availabilityMode: hourly ? 'hourly' : 'standard',
           area: resolveBookingAreaForCapacity(order.address),
           lat: Number.isFinite(transactionLat) ? transactionLat : undefined,
           lng: Number.isFinite(transactionLng) ? transactionLng : undefined,

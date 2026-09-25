@@ -421,7 +421,7 @@ export class CatalogService {
     categorySlug: string,
     customerUid?: string | null,
     location?: { area?: string; city?: string; state?: string; pinCode?: string; coordinates?: [number, number] },
-  ) {
+  ): Promise<any> {
     const category = await this.getCategoryBySlug(categorySlug, customerUid);
     const [skus, content] = await Promise.all([
       ServiceSku.find({ categoryId: category._id, isActive: true }).sort({ name: 1 }).lean(),
