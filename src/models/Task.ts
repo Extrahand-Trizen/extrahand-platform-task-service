@@ -1,4 +1,5 @@
 import mongoose, { Schema, Model, Document } from "mongoose";
+import type { BookingServiceRecipient } from './BookingOrder';
 
 export type ProjectExecutionStatus =
   | 'not_started'
@@ -401,6 +402,7 @@ export interface ITask extends Document {
    * Copied from BookingOrder; used by BookNowAutoAssignService ranking only.
    */
   preferredHelperGender?: 'any' | 'male' | 'female';
+  serviceRecipient?: BookingServiceRecipient;
 
   /** Partner who accepted this Book Now lead */
   partnerId?: mongoose.Types.ObjectId | null;
@@ -1010,6 +1012,15 @@ const TaskSchema = new Schema<ITask>(
       type: String,
       enum: ['any', 'male', 'female'],
       required: false,
+    },
+    serviceRecipient: {
+      type: {
+        type: String,
+        enum: ['self', 'someone_else'],
+        required: true,
+      },
+      name: { type: String, trim: true },
+      mobile: { type: String, trim: true },
     },
     assignmentStatus: {
       type: String,

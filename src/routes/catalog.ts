@@ -3,6 +3,7 @@ import { CatalogController } from '../controllers/CatalogController';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
 import { optionalAuthMiddleware } from '../middleware/auth';
 import { asyncHandler } from '../middleware/errorHandler';
+import { LocationPricingController } from '../controllers/LocationPricingController';
 
 const router = Router();
 
@@ -35,6 +36,20 @@ router.put(
   asyncHandler(CatalogController.upsertHelpSupportCategory),
 );
 router.patch('/internal/help-support/:id', asyncHandler(CatalogController.patchHelpSupportCategory));
+
+// Isolated operational Location Master and Hourly Pricing APIs.
+router.post('/internal/location-pricing/ensure-canonical-location', asyncHandler(LocationPricingController.ensureCanonicalLocation));
+router.get('/internal/location-pricing/locations', asyncHandler(LocationPricingController.listLocations));
+router.post('/internal/location-pricing/locations/:type', asyncHandler(LocationPricingController.createLocation));
+router.patch('/internal/location-pricing/locations/:type/:id', asyncHandler(LocationPricingController.updateLocation));
+router.post('/internal/location-pricing/locations/:type/:id/activate', asyncHandler(LocationPricingController.activateLocation));
+router.post('/internal/location-pricing/locations/:type/:id/deactivate', asyncHandler(LocationPricingController.deactivateLocation));
+router.get('/internal/location-pricing/hourly-skus', asyncHandler(LocationPricingController.listHourlySkus));
+router.get('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.listHourlyPrices));
+router.post('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.createHourlyPrice));
+router.patch('/internal/location-pricing/hourly-prices/:id', asyncHandler(LocationPricingController.updateHourlyPrice));
+router.post('/internal/location-pricing/hourly-prices/resolve', asyncHandler(LocationPricingController.resolveHourlyPrice));
+router.post('/internal/location-pricing/resolve-address', asyncHandler(LocationPricingController.resolveAddress));
 
 router.get('/categories', asyncHandler(CatalogController.listCategories));
 router.get('/book-now/hub', asyncHandler(CatalogController.getBookNowHubCatalog));

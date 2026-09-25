@@ -82,6 +82,10 @@ router.get(
 // Must be registered BEFORE gatewayAuthMiddleware so it is not rejected as a gateway request.
 router.use('/stats', statsRoutes);
 
+// Catalog reads are public to customers; service auth still protects the route from direct access.
+// Register before the user gateway-auth layer so guest customers can receive DB-backed prices/durations.
+router.use('/catalog', catalogRoutes);
+
 // Gateway auth middleware (requires gateway auth)
 router.use(gatewayAuthMiddleware);
 
@@ -137,7 +141,6 @@ router.use('/matches', matchRoutes);
 router.use('/uploads', uploadRoutes);
 router.use('/test/reminders', testReminderRoutes); // Test endpoints (dev only)
 router.use('/analytics', analyticsRoutes);
-router.use('/catalog', catalogRoutes);
 router.use('/bookings', bookingsRoutes);
 router.use('/admin/assignments', assignmentsRoutes);
 router.use('/book-now', partnerBookNowRoutes);

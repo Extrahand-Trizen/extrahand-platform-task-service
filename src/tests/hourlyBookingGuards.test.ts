@@ -4,6 +4,7 @@
  */
 import assert from 'assert';
 import {
+  assertHourlyScheduledSlotWithinOperatingHours,
   assertHourlySingleVisitCheckout,
   hourInTimeZone,
   isHourlyCatalogLineInput,
@@ -176,12 +177,34 @@ function testHourInTimezone() {
   assert.strictEqual(hourInTimeZone(d, 'Asia/Kolkata'), 16);
 }
 
+function testScheduledSlotCutoff() {
+  assert.doesNotThrow(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '6:00 PM',
+      durationMinutes: 60,
+    }),
+  );
+  assert.throws(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '8:00 PM',
+      durationMinutes: 60,
+    }),
+  );
+  assert.throws(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '5:00 PM',
+      durationMinutes: 240,
+    }),
+  );
+}
+
 function run() {
   testDetectHourlyInput();
   testIsHourlyResolvedIndependentOfLineCount();
   testParseFulfillmentType();
   testAssertSingleVisit();
   testHourInTimezone();
+  testScheduledSlotCutoff();
   console.log('hourlyBookingGuards.test.ts: all passed');
 }
 

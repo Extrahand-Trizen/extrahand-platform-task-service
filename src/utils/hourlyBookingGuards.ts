@@ -1,11 +1,10 @@
 import { BadRequestError } from '../errors/AppError';
 import {
-  HOURLY_ALLOWED_DURATION_MINUTES,
-  HOURLY_DURATION_SET,
   HOURLY_HELPER_CATEGORY_SLUG,
   HOURLY_INSTANT_DEFAULT_END_HOUR,
   HOURLY_INSTANT_DEFAULT_START_HOUR,
   HOURLY_INSTANT_TIMEZONE,
+  HOURLY_SCHEDULED_END_HOUR,
 } from '../constants/hourlyBooking';
 import type { BookingFulfillmentType } from '../models/BookingOrder';
 
@@ -66,10 +65,8 @@ function assertHourlyLineBasics(line: HourlyCheckoutLine): void {
   if (line.quantity !== 1) {
     throw new BadRequestError('Hourly Helper quantity must be 1');
   }
-  if (!HOURLY_DURATION_SET.has(line.durationMinutes)) {
-    throw new BadRequestError(
-      `Hourly duration must be one of: ${HOURLY_ALLOWED_DURATION_MINUTES.join(', ')} minutes`,
-    );
+  if (!Number.isInteger(line.durationMinutes) || line.durationMinutes < 1) {
+    throw new BadRequestError('Hourly duration must be greater than zero');
   }
   if (!(line.lineTotal > 0)) {
     throw new BadRequestError('Hourly Helper line total must be greater than zero');
@@ -128,6 +125,43 @@ export function hourInTimeZone(date: Date, timeZone: string): number {
   }).formatToParts(date);
   const hourPart = parts.find((p) => p.type === 'hour');
   return Number(hourPart?.value ?? '0');
+}
+
+function parseTimeLabelToMinutes(timeLabel: string): number | null {
+  const match = String(timeLabel || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+
+  let hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const period = match[3].toUpperCase();
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || minutes > 59) return null;
+
+  if (period === 'PM' && hours !== 12) hours += 12;
+  if (period === 'AM' && hours === 12) hours = 0;
+  return hours * 60 + minutes;
+}
+
+/** Scheduled Hourly bookings must start and finish within the 7 PM cutoff. */
+export function assertHourlyScheduledSlotWithinOperatingHours(params: {
+  scheduledTimeStart?: string;
+  durationMinutes: number;
+  endHour?: number;
+}): void {
+  const startMinutes = parseTimeLabelToMinutes(params.scheduledTimeStart || '');
+  const durationMinutes = Math.round(Number(params.durationMinutes));
+  const endHour = Number.isFinite(params.endHour)
+    ? Number(params.endHour)
+    : HOURLY_SCHEDULED_END_HOUR;
+
+  if (startMinutes == null || !Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+    throw new BadRequestError('Hourly Helper requires a valid start time and duration');
+  }
+
+  if (startMinutes >= endHour * 60 || startMinutes + durationMinutes > endHour * 60) {
+    throw new BadRequestError(
+      `Scheduled Hourly Helper bookings must finish by ${String(endHour).padStart(2, '0')}:00. Please choose an earlier slot.`,
+    );
+  }
 }
 
 /** Instant only inside configured local operating hours (default Asia/Kolkata 08:00–20:00). */

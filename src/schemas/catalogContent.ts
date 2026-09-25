@@ -42,6 +42,7 @@ export const patchSkuContentSchema = z
 export const patchOperationalSkuOfferSchema = z
   .object({
     basePrice: z.number().min(0).optional(),
+    offerPrice: z.number().min(0).optional(),
     offerDiscountType: z.enum(['percent', 'flat']).optional(),
     offerDiscountValue: z.number().min(0).optional(),
     isOfferActive: z.boolean().optional(),

@@ -34,9 +34,22 @@ export class CatalogController {
 
   static async getCategory(req: Request, res: Response): Promise<void> {
     const customerUid = getCatalogCustomerUid(req);
+    const coordinates = typeof req.query.coordinates === 'string'
+      ? String(req.query.coordinates).split(',').map(Number)
+      : [];
+    const parsedCoordinates = coordinates.length === 2 && coordinates.every(Number.isFinite)
+      ? [coordinates[0], coordinates[1]] as [number, number]
+      : undefined;
     const { category, skus, content } = await CatalogService.listSkusByCategorySlug(
       req.params.slug,
       customerUid,
+      {
+        area: typeof req.query.area === 'string' ? req.query.area : undefined,
+        city: typeof req.query.city === 'string' ? req.query.city : undefined,
+        state: typeof req.query.state === 'string' ? req.query.state : undefined,
+        pinCode: typeof req.query.pinCode === 'string' ? req.query.pinCode : undefined,
+        coordinates: parsedCoordinates,
+      },
     );
     res.json({ success: true, data: { category, skus, content } });
   }
