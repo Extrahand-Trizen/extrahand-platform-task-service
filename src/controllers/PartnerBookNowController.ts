@@ -914,6 +914,10 @@ export class PartnerBookNowController {
           category: task.category,
           categoryLabel: task.categoryLabel || task.category,
           status: task.status,
+          payoutAmount:
+            typeof task.budget === 'object' && task.budget
+              ? Number((task.budget as { amount?: number }).amount || 0)
+              : Number(task.budget || 0),
           budget: task.budget,
           location: task.location,
           scheduledDate: task.scheduledDate,
@@ -946,6 +950,7 @@ export class PartnerBookNowController {
         category: task.category,
         categoryLabel: task.categoryLabel,
         status: task.status,
+        payoutAmount: Number(task.deliveryFee || task.budget?.amount || 0),
         budget: task.budget,
         location: task.location,
         scheduledDate: task.scheduledDate,
