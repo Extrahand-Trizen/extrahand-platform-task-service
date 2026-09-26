@@ -291,6 +291,10 @@ function normalizeDateOnly(value: Date): Date {
   return d;
 }
 
+function indiaDateBoundary(value: string): Date {
+  return new Date(`${value}T00:00:00.000+05:30`);
+}
+
 function buildScheduleDates(params: {
   startDate: Date;
   endDate: Date;
@@ -618,9 +622,9 @@ export class TaskService {
 
     if (scheduledDateFrom || scheduledDateTo) {
       const scheduledDateRange: Record<string, Date> = {};
-      if (scheduledDateFrom) scheduledDateRange.$gte = normalizeDateOnly(new Date(`${scheduledDateFrom}T00:00:00.000Z`));
+      if (scheduledDateFrom) scheduledDateRange.$gte = indiaDateBoundary(scheduledDateFrom);
       if (scheduledDateTo) {
-        const endDate = normalizeDateOnly(new Date(`${scheduledDateTo}T00:00:00.000Z`));
+        const endDate = indiaDateBoundary(scheduledDateTo);
         endDate.setUTCDate(endDate.getUTCDate() + 1);
         scheduledDateRange.$lt = endDate;
       }
