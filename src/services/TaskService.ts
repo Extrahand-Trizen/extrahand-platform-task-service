@@ -129,6 +129,80 @@ function normalizeNormalTaskSlot(slot: string): string {
 }
 
 // Helper function to map frontend category values to backend enum values
+export function normalizeCreateTaskPayload(taskData: any): any {
+  const normalized = { ...taskData };
+
+  const categoryValue = normalized.category ?? normalized.type ?? normalized.categorySlug;
+  if (typeof categoryValue === 'string' && categoryValue.trim()) {
+    normalized.category = mapCategoryToEnum(categoryValue);
+  }
+
+  if (typeof normalized.dateOption === 'string') {
+    const value = String(normalized.dateOption).trim().toLowerCase().replace(/[_\s]+/g, '-');
+    const dateMap: Record<string, string> = {
+      'ondate': 'on-date',
+      'on-date': 'on-date',
+      'beforedate': 'before-date',
+      'before-date': 'before-date',
+      'before': 'before-date',
+      'flexible': 'flexible',
+      'on_date': 'on-date',
+      'before_date': 'before-date',
+    };
+    normalized.dateOption = dateMap[value] ?? normalized.dateOption;
+  }
+
+  if (typeof normalized.timeSlot === 'string') {
+    const value = String(normalized.timeSlot).trim().toLowerCase().replace(/[_\s]+/g, '-');
+    const timeSlotMap: Record<string, string> = {
+      morning: 'morning',
+      'mid-day': 'midday',
+      'midday': 'midday',
+      afternoon: 'afternoon',
+      evening: 'evening',
+    };
+    normalized.timeSlot = timeSlotMap[value] ?? undefined;
+  }
+
+  if (typeof normalized.flexibility === 'string') {
+    const value = String(normalized.flexibility).trim().toLowerCase().replace(/[_\s]+/g, '-');
+    const flexibilityMap: Record<string, string> = {
+      exact: 'strict',
+      strict: 'strict',
+      flexible: 'flexible',
+      'very-flexible': 'flexible',
+      'very_flexible': 'flexible',
+      anytime: 'anytime',
+      'any-time': 'anytime',
+    };
+    normalized.flexibility = flexibilityMap[value] ?? normalized.flexibility;
+  }
+
+  if (normalized.recurring && typeof normalized.recurring === 'object') {
+    const recurring = { ...normalized.recurring };
+    if (typeof recurring.frequency === 'string') {
+      const value = String(recurring.frequency).trim().toLowerCase();
+      const frequencyMap: Record<string, string> = {
+        daily: 'daily',
+        'dailY': 'daily',
+        weekly: 'weekly',
+        'weeklY': 'weekly',
+        monthly: 'custom',
+        custom: 'custom',
+      };
+      recurring.frequency = frequencyMap[value] ?? 'custom';
+    }
+    normalized.recurring = recurring;
+  }
+
+  if (normalized.budget && typeof normalized.budget === 'object' && typeof normalized.budget.amount === 'string') {
+    const parsed = Number(normalized.budget.amount);
+    normalized.budget.amount = Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return normalized;
+}
+
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
   if (!frontendCategory) return "other";
 
@@ -735,9 +809,7 @@ export class TaskService {
       try {
         const redis = getRedisClient();
         if (redis) {
-          await redis.set(cacheKey, JSON.stringify(result), {
-            EX: REDIS_TTLS.TASK_LIST_SECONDS,
-          });
+          await redis.set(cacheKey, JSON.stringify(result), 'EX', REDIS_TTLS.TASK_LIST_SECONDS);
           logger.info("Task list cache SET", {
             key: cacheKey,
             page: effectivePage,
@@ -1208,6 +1280,9 @@ export class TaskService {
     taskData: any,
     uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
+    const normalizedTaskData = normalizeCreateTaskPayload(taskData);
+    taskData = normalizedTaskData;
+
     // Delivery/pickup tasks have system-generated titles and descriptions â€” skip meaningful-text checks
     const isDeliveryPickup = [taskData.category, taskData.categorySlug].some((c: string) =>
       String(c || '').toLowerCase().includes('delivery') ||
