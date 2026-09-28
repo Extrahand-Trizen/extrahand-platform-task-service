@@ -305,15 +305,6 @@ export async function getOccupiedBookNowSlots(
   };
 }
 
-function slotHasZeroPartnerCapacity(
-  capacity: PartnerCapacityBySlot,
-  slot: string,
-): boolean {
-  const key = normalizeBookNowSlotLabel(slot);
-  const value = capacity[key];
-  return typeof value === 'number' && value === 0;
-}
-
 // ─── Partner capacity ─────────────────────────────────────────────────────────
 
 /**
