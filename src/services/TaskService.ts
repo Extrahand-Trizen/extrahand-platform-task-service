@@ -148,8 +148,10 @@ export function normalizeCreateTaskPayload(taskData: any): any {
       'flexible': 'flexible',
       'on_date': 'on-date',
       'before_date': 'before-date',
+      'anytime': 'flexible',
     };
-    normalized.dateOption = dateMap[value] ?? normalized.dateOption;
+    const validDateOptions = new Set(['flexible', 'on-date', 'before-date']);
+    normalized.dateOption = dateMap[value] ?? (validDateOptions.has(value) ? value : 'flexible');
   }
 
   if (typeof normalized.timeSlot === 'string') {
@@ -157,11 +159,15 @@ export function normalizeCreateTaskPayload(taskData: any): any {
     const timeSlotMap: Record<string, string> = {
       morning: 'morning',
       'mid-day': 'midday',
-      'midday': 'midday',
+      midday: 'midday',
       afternoon: 'afternoon',
       evening: 'evening',
+      'morning-1': 'morning',
+      'afternoon-1': 'afternoon',
+      'evening-1': 'evening',
     };
-    normalized.timeSlot = timeSlotMap[value] ?? undefined;
+    const validTimeSlots = new Set(['morning', 'midday', 'afternoon', 'evening']);
+    normalized.timeSlot = timeSlotMap[value] ?? (validTimeSlots.has(value) ? value : undefined);
   }
 
   if (typeof normalized.flexibility === 'string') {
@@ -175,7 +181,8 @@ export function normalizeCreateTaskPayload(taskData: any): any {
       anytime: 'anytime',
       'any-time': 'anytime',
     };
-    normalized.flexibility = flexibilityMap[value] ?? normalized.flexibility;
+    const validFlexibility = new Set(['strict', 'flexible', 'anytime']);
+    normalized.flexibility = flexibilityMap[value] ?? (validFlexibility.has(value) ? value : 'flexible');
   }
 
   if (normalized.recurring && typeof normalized.recurring === 'object') {
@@ -184,9 +191,8 @@ export function normalizeCreateTaskPayload(taskData: any): any {
       const value = String(recurring.frequency).trim().toLowerCase();
       const frequencyMap: Record<string, string> = {
         daily: 'daily',
-        'dailY': 'daily',
         weekly: 'weekly',
-        'weeklY': 'weekly',
+        biweekly: 'weekly',
         monthly: 'custom',
         custom: 'custom',
       };
@@ -198,6 +204,10 @@ export function normalizeCreateTaskPayload(taskData: any): any {
   if (normalized.budget && typeof normalized.budget === 'object' && typeof normalized.budget.amount === 'string') {
     const parsed = Number(normalized.budget.amount);
     normalized.budget.amount = Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  if (normalized.budgetType && !['fixed', 'hourly'].includes(String(normalized.budgetType).toLowerCase())) {
+    normalized.budgetType = 'fixed';
   }
 
   return normalized;
@@ -1399,10 +1409,18 @@ export class TaskService {
         : undefined,
       scheduledTimeStart: taskData.scheduledTimeStart,
       scheduledTimeEnd: taskData.scheduledTimeEnd,
-      dateOption: taskData.dateOption,
-      timeSlot: taskData.timeSlot,
-      flexibility: taskData.flexibility || "flexible",
-      timeFlexibilityValue: taskData.timeFlexibilityValue,
+      dateOption: ['flexible', 'on-date', 'before-date'].includes(String(taskData.dateOption || '').trim().toLowerCase().replace(/[_\s]+/g, '-').replace('ondate', 'on-date').replace('beforedate', 'before-date'))
+        ? String(taskData.dateOption).trim().toLowerCase().replace(/[_\s]+/g, '-').replace('ondate', 'on-date').replace('beforedate', 'before-date')
+        : undefined,
+      timeSlot: ['morning', 'midday', 'afternoon', 'evening'].includes(String(taskData.timeSlot || '').trim().toLowerCase())
+        ? String(taskData.timeSlot).trim().toLowerCase()
+        : undefined,
+      flexibility: ['strict', 'flexible', 'anytime'].includes(String(taskData.flexibility || '').trim().toLowerCase())
+        ? String(taskData.flexibility).trim().toLowerCase()
+        : 'flexible',
+      timeFlexibilityValue: ['exact', '1h', '3h'].includes(String(taskData.timeFlexibilityValue || '').trim())
+        ? String(taskData.timeFlexibilityValue).trim()
+        : undefined,
       requirements: taskData.requirements || taskData.skillsRequired || [],
       images: taskData.images || [],
       tags: taskData.tags || [],
