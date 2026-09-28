@@ -114,6 +114,11 @@ function resolveBookingAreaForCapacity(address: {
   return undefined;
 }
 
+function resolveHourlyBookingAreaForCapacity(address: BookingAddress): string | undefined {
+  const area = String(address.area || '').trim();
+  return area || resolveBookingAreaForCapacity(address);
+}
+
 export type BookingLineInput = {
   skuSlug?: string;
   categorySlug?: string;
@@ -992,6 +997,31 @@ export class BookingService {
             scheduledTimeStart: line.schedule.scheduledTimeStart,
             durationMinutes: line.schedule.durationMinutes,
           });
+          try {
+            await assertBookNowSlotAvailable({
+              date: line.schedule.scheduledDate,
+              city: address.city,
+              scheduledTimeStart: line.schedule.scheduledTimeStart,
+              durationMinutes: line.schedule.durationMinutes,
+              availabilityMode: 'hourly',
+              area: resolveHourlyBookingAreaForCapacity(address),
+              lat: Array.isArray(address.coordinates) ? address.coordinates[1] : undefined,
+              lng: Array.isArray(address.coordinates) ? address.coordinates[0] : undefined,
+              preferredHelperGender,
+            });
+          } catch (error) {
+            if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
+              throw new BadRequestError(
+                'No eligible Hourly Helper is free for this full time window. Please choose another slot.',
+              );
+            }
+            if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
+              throw new BadRequestError(
+                'That time has already passed. Please choose a later time slot.',
+              );
+            }
+            throw error;
+          }
         }
       }
 
@@ -2135,6 +2165,7 @@ export class BookingService {
       area?: string;
       lat?: number;
       lng?: number;
+      preferredHelperGender?: 'any' | 'male' | 'female';
     },
   ) {
     const durationMinutes =
@@ -2157,6 +2188,8 @@ export class BookingService {
         area: opts?.area,
         lat: Number.isFinite(lat) ? lat : undefined,
         lng: Number.isFinite(lng) ? lng : undefined,
+        hourlyHelper: opts?.availabilityMode === 'hourly',
+        preferredHelperGender: opts?.preferredHelperGender,
       }),
     ]);
     return {
@@ -2480,6 +2513,7 @@ export class BookingService {
       requiredPartnerUid: assignedUids[0],
       excludeOrderId: orderId,
       excludeTaskIds: initialTaskIds.map(String),
+      preferredHelperGender: initialOrder.preferredHelperGender,
     });
 
     if (
@@ -2559,6 +2593,7 @@ export class BookingService {
           requiredPartnerUid: transactionAssignedUids[0],
           excludeOrderId: orderId,
           excludeTaskIds: transactionTaskIds.map(String),
+          preferredHelperGender: order.preferredHelperGender,
         });
         if (hourly) {
           assertHourlyScheduledSlotWithinOperatingHours({

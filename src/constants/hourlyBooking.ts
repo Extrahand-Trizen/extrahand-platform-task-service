@@ -85,5 +85,6 @@ export const HOURLY_INSTANT_DEFAULT_START_HOUR = 8;
 export const HOURLY_INSTANT_DEFAULT_END_HOUR = 19;
 export const HOURLY_INSTANT_TIMEZONE = 'Asia/Kolkata';
 
-/** Scheduled Hourly bookings must finish by 7:00 PM local time. */
-export const HOURLY_SCHEDULED_END_HOUR = 19;
+/** Scheduled Hourly bookings must finish by 8:00 PM local time. */
+export const HOURLY_SCHEDULED_START_HOUR = 7;
+export const HOURLY_SCHEDULED_END_HOUR = 20;

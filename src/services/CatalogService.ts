@@ -280,6 +280,66 @@ export class CatalogService {
     return category;
   }
 
+  static async getHourlyHelperSkusByCategoryId(
+    categoryId: string,
+    location?: { area?: string; city?: string; state?: string; pinCode?: string; coordinates?: [number, number] },
+  ): Promise<{ category: any; skus: any[] }> {
+    if (!categoryId || !mongoose.Types.ObjectId.isValid(String(categoryId))) {
+      throw new BadRequestError('A valid categoryId is required');
+    }
+
+    const category = await ServiceCategory.findOne({
+      _id: new mongoose.Types.ObjectId(String(categoryId)),
+      isActive: true,
+    }).lean();
+    if (!category) {
+      throw new NotFoundError('Category not found');
+    }
+
+    const skus = await ServiceSku.find({
+      categoryId: category._id,
+      isActive: true,
+    }).sort({ durationMinutes: 1, name: 1 }).lean();
+
+    const hourlyPricing = location
+      ? await Promise.all(skus.map(async (sku) => {
+          if (sku.pricingUnit !== 'hourly') return null;
+          return LocationPricingService.resolveHourlyPriceForAddress({ skuId: sku._id, address: location });
+        }))
+      : [];
+
+    return {
+      category,
+      skus: skus.map((sku, index) => {
+        const enriched = enrichSkuPricing(sku);
+        const resolved = hourlyPricing[index];
+        if (!resolved) return enriched;
+
+        const originalPrice = Math.max(0, Number(sku.basePrice || 0));
+        const offerPrice = Math.max(0, Number(resolved.effectiveOfferPrice || 0));
+
+        return {
+          ...sku,
+          offerPrice: offerPrice > 0 ? offerPrice : (sku.offerPrice || 0),
+          pricing: {
+            ...enriched.pricing,
+            originalPrice,
+            offerPrice,
+            savingsAmount: Math.max(0, originalPrice - offerPrice),
+            isOfferActive: offerPrice > 0 && offerPrice !== originalPrice,
+            appliedPercent: originalPrice > 0 && offerPrice < originalPrice ? roundToInt(((originalPrice - offerPrice) / originalPrice) * 100) : 0,
+            pricingSource: resolved.pricingSource,
+            locationType: resolved.locationType,
+            locationId: resolved.locationId,
+            pricingRuleId: resolved.pricingRuleId,
+            pricingVersion: resolved.version,
+            resolvedLocation: resolved.resolvedLocation,
+          },
+        };
+      }),
+    };
+  }
+
   static async getCategoryContent(categorySlug: string, customerUid?: string | null) {
     assertPersonalAssistantAccessible(categorySlug, customerUid);
     const content = await BookNowCategoryContent.findOne({

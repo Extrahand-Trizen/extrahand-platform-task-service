@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { BookingService } from '../services/BookingService';
+import { HourlyHelperAvailabilityService } from '../services/HourlyHelperAvailabilityService';
 import { AuthenticatedRequest } from '../types';
 import { BadRequestError } from '../errors/AppError';
 
@@ -103,7 +104,20 @@ export class BookingController {
       area: String(req.query.area || '').trim() || undefined,
       lat: Number(req.query.lat),
       lng: Number(req.query.lng),
+      preferredHelperGender: ['male', 'female', 'any'].includes(String(req.query.preferredHelperGender || '').trim().toLowerCase())
+        ? String(req.query.preferredHelperGender).trim().toLowerCase() as 'male' | 'female' | 'any'
+        : undefined,
     });
+    res.json({ success: true, data });
+  }
+
+  static async getHourlyHelperAvailability(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const area = String(req.query.area || '').trim();
+    if (!area) {
+      throw new BadRequestError('area is required');
+    }
+
+    const data = await HourlyHelperAvailabilityService.getExactAreaAvailability(area);
     res.json({ success: true, data });
   }
 

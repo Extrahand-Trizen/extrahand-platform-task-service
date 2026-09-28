@@ -53,6 +53,7 @@ router.post('/internal/location-pricing/resolve-address', asyncHandler(LocationP
 
 router.get('/categories', asyncHandler(CatalogController.listCategories));
 router.get('/book-now/hub', asyncHandler(CatalogController.getBookNowHubCatalog));
+router.get('/categories/hourly-helper/diagnostic', asyncHandler(CatalogController.getHourlyHelperSkusByCategoryId));
 router.get('/categories/:slug/packages', asyncHandler(CatalogController.getBookNowCategoryPackages));
 router.get('/categories/:slug/content', asyncHandler(CatalogController.getCategoryContent));
 router.get('/categories/:slug', asyncHandler(CatalogController.getCategory));

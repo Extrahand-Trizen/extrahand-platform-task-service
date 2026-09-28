@@ -4,6 +4,7 @@ import {
   HOURLY_INSTANT_DEFAULT_END_HOUR,
   HOURLY_INSTANT_DEFAULT_START_HOUR,
   HOURLY_INSTANT_TIMEZONE,
+  HOURLY_SCHEDULED_START_HOUR,
   HOURLY_SCHEDULED_END_HOUR,
 } from '../constants/hourlyBooking';
 import type { BookingFulfillmentType } from '../models/BookingOrder';
@@ -141,7 +142,7 @@ function parseTimeLabelToMinutes(timeLabel: string): number | null {
   return hours * 60 + minutes;
 }
 
-/** Scheduled Hourly bookings must start and finish within the 7 PM cutoff. */
+/** Scheduled Hourly bookings must fit inside 7:00 AM–8:00 PM on a 30-minute grid. */
 export function assertHourlyScheduledSlotWithinOperatingHours(params: {
   scheduledTimeStart?: string;
   durationMinutes: number;
@@ -157,9 +158,14 @@ export function assertHourlyScheduledSlotWithinOperatingHours(params: {
     throw new BadRequestError('Hourly Helper requires a valid start time and duration');
   }
 
-  if (startMinutes >= endHour * 60 || startMinutes + durationMinutes > endHour * 60) {
+  if (
+    startMinutes < HOURLY_SCHEDULED_START_HOUR * 60 ||
+    startMinutes >= endHour * 60 ||
+    startMinutes % 30 !== 0 ||
+    startMinutes + durationMinutes > endHour * 60
+  ) {
     throw new BadRequestError(
-      `Scheduled Hourly Helper bookings must finish by ${String(endHour).padStart(2, '0')}:00. Please choose an earlier slot.`,
+      `Scheduled Hourly Helper bookings must start from 07:00 and before 20:00 on a 30-minute grid, and finish by ${String(endHour).padStart(2, '0')}:00. Please choose another slot.`,
     );
   }
 }
