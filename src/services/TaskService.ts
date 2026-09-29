@@ -132,6 +132,12 @@ function normalizeNormalTaskSlot(slot: string): string {
 export function normalizeCreateTaskPayload(taskData: any): any {
   const normalized = { ...taskData };
 
+  const serviceRecipient = normalized.serviceRecipient;
+  normalized.serviceRecipient =
+    serviceRecipient && typeof serviceRecipient === 'object' && !Array.isArray(serviceRecipient)
+      ? { ...serviceRecipient, type: serviceRecipient.type || 'self' }
+      : { type: 'self' };
+
   const categoryValue = normalized.category ?? normalized.type ?? normalized.categorySlug;
   if (typeof categoryValue === 'string' && categoryValue.trim()) {
     normalized.category = mapCategoryToEnum(categoryValue);
@@ -1430,6 +1436,7 @@ export class TaskService {
       updatedAt: new Date(),
       ...(taskData.bookingSource ? { bookingSource: taskData.bookingSource } : {}),
       ...(taskData.preferredHelperGender ? { preferredHelperGender: taskData.preferredHelperGender } : {}),
+      serviceRecipient: taskData.serviceRecipient,
     };
 
     if (taskPayload.scheduledDate) {

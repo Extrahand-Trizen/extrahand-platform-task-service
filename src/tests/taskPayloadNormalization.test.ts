@@ -16,4 +16,14 @@ assert.equal(sanitized.timeSlot, 'morning');
 assert.equal(sanitized.flexibility, 'strict');
 assert.equal(sanitized.recurring.frequency, 'weekly');
 assert.equal(sanitized.category, 'repair');
+assert.deepEqual(sanitized.serviceRecipient, { type: 'self' });
+
+const recipient = normalizeCreateTaskPayload({
+  serviceRecipient: { type: 'someone_else', name: 'Sam', mobile: '1234567890' },
+});
+assert.deepEqual(recipient.serviceRecipient, {
+  type: 'someone_else',
+  name: 'Sam',
+  mobile: '1234567890',
+});
 console.log('task payload normalization ok');
