@@ -277,6 +277,18 @@ export class NotificationClient {
         createdAt: payload.createdAt || new Date()
       };
 
+      logger.info('[NOTIFICATION_HANDOFF] Posting push request', {
+        serviceName: this.serviceName,
+        endpoint: `${this.baseURL}/api/v1/notifications/send`,
+        eventKey: payload.eventKey,
+        category: payload.category,
+        recipientCount: sanitizedRecipients.length,
+        entityId: payload.entity.id,
+        eventId,
+        taskId: payload.data?.taskId,
+        action: payload.data?.action,
+      });
+
       await axios.post(
         `${this.baseURL}/api/v1/notifications/send`,
         sendPayload,
@@ -310,6 +322,10 @@ export class NotificationClient {
       } else if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError;
         logger.error('Failed to send notification', {
+          serviceName: this.serviceName,
+          entityId: payload.entity?.id,
+          taskId: payload.data?.taskId,
+          recipientCount: payload.recipients?.length || 0,
           eventKey: payload.eventKey,
           category: payload.category,
           status: axiosError.response?.status,
