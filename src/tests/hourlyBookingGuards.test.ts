@@ -180,19 +180,55 @@ function testHourInTimezone() {
 function testScheduledSlotCutoff() {
   assert.doesNotThrow(() =>
     assertHourlyScheduledSlotWithinOperatingHours({
-      scheduledTimeStart: '6:00 PM',
+      scheduledTimeStart: '7:00 PM',
       durationMinutes: 60,
+    }),
+  );
+  assert.doesNotThrow(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '7:30 PM',
+      durationMinutes: 30,
+    }),
+  );
+  assert.doesNotThrow(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '7:00 PM',
+      durationMinutes: 45,
     }),
   );
   assert.throws(() =>
     assertHourlyScheduledSlotWithinOperatingHours({
       scheduledTimeStart: '8:00 PM',
+      durationMinutes: 30,
+    }),
+  );
+  assert.throws(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '7:30 PM',
+      durationMinutes: 45,
+    }),
+  );
+  assert.throws(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '7:30 PM',
       durationMinutes: 60,
     }),
   );
   assert.throws(() =>
     assertHourlyScheduledSlotWithinOperatingHours({
-      scheduledTimeStart: '5:00 PM',
+      scheduledTimeStart: '7:15 PM',
+      durationMinutes: 30,
+    }),
+  );
+  assert.throws(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '6:30 AM',
+      durationMinutes: 30,
+    }),
+  );
+  assert.throws(() =>
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart: '7:00 PM',
       durationMinutes: 240,
     }),
   );

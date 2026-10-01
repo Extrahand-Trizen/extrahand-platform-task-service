@@ -129,6 +129,96 @@ function normalizeNormalTaskSlot(slot: string): string {
 }
 
 // Helper function to map frontend category values to backend enum values
+export function normalizeCreateTaskPayload(taskData: any): any {
+  const normalized = { ...taskData };
+
+  const serviceRecipient = normalized.serviceRecipient;
+  normalized.serviceRecipient =
+    serviceRecipient && typeof serviceRecipient === 'object' && !Array.isArray(serviceRecipient)
+      ? { ...serviceRecipient, type: serviceRecipient.type || 'self' }
+      : { type: 'self' };
+
+  const categoryValue = normalized.category ?? normalized.type ?? normalized.categorySlug;
+  if (typeof categoryValue === 'string' && categoryValue.trim()) {
+    normalized.category = mapCategoryToEnum(categoryValue);
+  }
+
+  if (typeof normalized.dateOption === 'string') {
+    const value = String(normalized.dateOption).trim().toLowerCase().replace(/[_\s]+/g, '-');
+    const dateMap: Record<string, string> = {
+      'ondate': 'on-date',
+      'on-date': 'on-date',
+      'beforedate': 'before-date',
+      'before-date': 'before-date',
+      'before': 'before-date',
+      'flexible': 'flexible',
+      'on_date': 'on-date',
+      'before_date': 'before-date',
+      'anytime': 'flexible',
+    };
+    const validDateOptions = new Set(['flexible', 'on-date', 'before-date']);
+    normalized.dateOption = dateMap[value] ?? (validDateOptions.has(value) ? value : 'flexible');
+  }
+
+  if (typeof normalized.timeSlot === 'string') {
+    const value = String(normalized.timeSlot).trim().toLowerCase().replace(/[_\s]+/g, '-');
+    const timeSlotMap: Record<string, string> = {
+      morning: 'morning',
+      'mid-day': 'midday',
+      midday: 'midday',
+      afternoon: 'afternoon',
+      evening: 'evening',
+      'morning-1': 'morning',
+      'afternoon-1': 'afternoon',
+      'evening-1': 'evening',
+    };
+    const validTimeSlots = new Set(['morning', 'midday', 'afternoon', 'evening']);
+    normalized.timeSlot = timeSlotMap[value] ?? (validTimeSlots.has(value) ? value : undefined);
+  }
+
+  if (typeof normalized.flexibility === 'string') {
+    const value = String(normalized.flexibility).trim().toLowerCase().replace(/[_\s]+/g, '-');
+    const flexibilityMap: Record<string, string> = {
+      exact: 'strict',
+      strict: 'strict',
+      flexible: 'flexible',
+      'very-flexible': 'flexible',
+      'very_flexible': 'flexible',
+      anytime: 'anytime',
+      'any-time': 'anytime',
+    };
+    const validFlexibility = new Set(['strict', 'flexible', 'anytime']);
+    normalized.flexibility = flexibilityMap[value] ?? (validFlexibility.has(value) ? value : 'flexible');
+  }
+
+  if (normalized.recurring && typeof normalized.recurring === 'object') {
+    const recurring = { ...normalized.recurring };
+    if (typeof recurring.frequency === 'string') {
+      const value = String(recurring.frequency).trim().toLowerCase();
+      const frequencyMap: Record<string, string> = {
+        daily: 'daily',
+        weekly: 'weekly',
+        biweekly: 'weekly',
+        monthly: 'custom',
+        custom: 'custom',
+      };
+      recurring.frequency = frequencyMap[value] ?? 'custom';
+    }
+    normalized.recurring = recurring;
+  }
+
+  if (normalized.budget && typeof normalized.budget === 'object' && typeof normalized.budget.amount === 'string') {
+    const parsed = Number(normalized.budget.amount);
+    normalized.budget.amount = Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  if (normalized.budgetType && !['fixed', 'hourly'].includes(String(normalized.budgetType).toLowerCase())) {
+    normalized.budgetType = 'fixed';
+  }
+
+  return normalized;
+}
+
 function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
   if (!frontendCategory) return "other";
 
@@ -737,9 +827,7 @@ export class TaskService {
       try {
         const redis = getRedisClient();
         if (redis) {
-          await redis.set(cacheKey, JSON.stringify(result), {
-            EX: REDIS_TTLS.TASK_LIST_SECONDS,
-          });
+          await redis.set(cacheKey, JSON.stringify(result), 'EX', REDIS_TTLS.TASK_LIST_SECONDS);
           logger.info("Task list cache SET", {
             key: cacheKey,
             page: effectivePage,
@@ -1210,6 +1298,9 @@ export class TaskService {
     taskData: any,
     uid?: string // Firebase UID for notifications (actorId)
   ): Promise<ITask> {
+    const normalizedTaskData = normalizeCreateTaskPayload(taskData);
+    taskData = normalizedTaskData;
+
     // Delivery/pickup tasks have system-generated titles and descriptions â€” skip meaningful-text checks
     const isDeliveryPickup = [taskData.category, taskData.categorySlug].some((c: string) =>
       String(c || '').toLowerCase().includes('delivery') ||
@@ -1326,10 +1417,18 @@ export class TaskService {
         : undefined,
       scheduledTimeStart: taskData.scheduledTimeStart,
       scheduledTimeEnd: taskData.scheduledTimeEnd,
-      dateOption: taskData.dateOption,
-      timeSlot: taskData.timeSlot,
-      flexibility: taskData.flexibility || "flexible",
-      timeFlexibilityValue: taskData.timeFlexibilityValue,
+      dateOption: ['flexible', 'on-date', 'before-date'].includes(String(taskData.dateOption || '').trim().toLowerCase().replace(/[_\s]+/g, '-').replace('ondate', 'on-date').replace('beforedate', 'before-date'))
+        ? String(taskData.dateOption).trim().toLowerCase().replace(/[_\s]+/g, '-').replace('ondate', 'on-date').replace('beforedate', 'before-date')
+        : undefined,
+      timeSlot: ['morning', 'midday', 'afternoon', 'evening'].includes(String(taskData.timeSlot || '').trim().toLowerCase())
+        ? String(taskData.timeSlot).trim().toLowerCase()
+        : undefined,
+      flexibility: ['strict', 'flexible', 'anytime'].includes(String(taskData.flexibility || '').trim().toLowerCase())
+        ? String(taskData.flexibility).trim().toLowerCase()
+        : 'flexible',
+      timeFlexibilityValue: ['exact', '1h', '3h'].includes(String(taskData.timeFlexibilityValue || '').trim())
+        ? String(taskData.timeFlexibilityValue).trim()
+        : undefined,
       requirements: taskData.requirements || taskData.skillsRequired || [],
       images: taskData.images || [],
       tags: taskData.tags || [],
@@ -1339,6 +1438,7 @@ export class TaskService {
       updatedAt: new Date(),
       ...(taskData.bookingSource ? { bookingSource: taskData.bookingSource } : {}),
       ...(taskData.preferredHelperGender ? { preferredHelperGender: taskData.preferredHelperGender } : {}),
+      serviceRecipient: taskData.serviceRecipient,
     };
 
     if (taskPayload.scheduledDate) {

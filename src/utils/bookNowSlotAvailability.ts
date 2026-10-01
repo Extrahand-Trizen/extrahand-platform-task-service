@@ -6,6 +6,8 @@ import {
   BOOK_NOW_WORK_AREA_PROXIMITY_KM,
   HYDERABAD_WORK_AREA_COORDS,
 } from '../constants/locations/hyderabadWorkAreaCoords';
+import { HOURLY_HELPER_CATEGORY_SLUG, HOURLY_SCHEDULED_END_HOUR, HOURLY_SCHEDULED_START_HOUR } from '../constants/hourlyBooking';
+import { partnerCategoryMatchesBookNowTask } from '../services/partnerVisibility';
 
 /** Only confirmed (paid) bookings block slots — not unpaid checkouts. */
 const BLOCKING_STATUSES: BookingOrderStatus[] = ['paid', 'assigning', 'assigned'];
@@ -303,36 +305,30 @@ export async function getOccupiedBookNowSlots(
   };
 }
 
-function slotHasZeroPartnerCapacity(
-  capacity: PartnerCapacityBySlot,
-  slot: string,
-): boolean {
-  const key = normalizeBookNowSlotLabel(slot);
-  const value = capacity[key];
-  return typeof value === 'number' && value === 0;
-}
-
 // ─── Partner capacity ─────────────────────────────────────────────────────────
 
 /**
  * Map of slot-start label → number of eligible partners who are FREE to
  * perform a service that starts at that slot.
  *
- * Only slot-start labels that appear in BOOK_NOW_START_TIME_SLOTS (7:00 AM –
- * 8:00 PM, 30-min steps) are emitted. A missing key means "not yet computed"
- * 7:00 PM, 30-min steps) are emitted. A missing key means "not yet computed"
- * (treat the same as the capacity being unknown, not zero).
+ * Standard capacity preserves the existing 7:00 AM–8:00 PM backend grid.
+ * Hourly capacity emits 7:00 AM–7:30 PM starts and marks duration overflow as zero.
+ * A missing key means "not yet computed" (not zero).
  *
  * A value of 0 means every eligible partner is occupied during that window.
  */
 export type PartnerCapacityBySlot = Record<string, number>;
 
 /** Active task statuses that mean a partner is occupied. */
-const PARTNER_OCCUPIED_TASK_STATUSES = new Set([
+export const PARTNER_OCCUPIED_TASK_STATUSES = new Set([
   'assigned',
   'started',
   'in_progress',
   'review',
+]);
+const HOURLY_PARTNER_OCCUPIED_TASK_STATUSES = new Set([
+  ...PARTNER_OCCUPIED_TASK_STATUSES,
+  'active',
 ]);
 
 /** Slot grid: 7:00 AM – 8:00 PM in 30-minute steps (mirrors BOOK_NOW_START_TIME_SLOTS). */
@@ -342,6 +338,29 @@ function buildSlotGrid(): number[] {
   return grid;
 }
 const SLOT_GRID_MINUTES = buildSlotGrid();
+
+function buildHourlySlotGrid(): number[] {
+  const grid: number[] = [];
+  for (let t = HOURLY_SCHEDULED_START_HOUR * 60; t < HOURLY_SCHEDULED_END_HOUR * 60; t += 30) {
+    grid.push(t);
+  }
+  return grid;
+}
+const HOURLY_SLOT_GRID_MINUTES = buildHourlySlotGrid();
+
+export function isHourlyCapacityCandidateWithinWindow(
+  startMinutes: number,
+  durationMinutes: number,
+): boolean {
+  return (
+    startMinutes >= HOURLY_SCHEDULED_START_HOUR * 60 &&
+    startMinutes < HOURLY_SCHEDULED_END_HOUR * 60 &&
+    startMinutes % 30 === 0 &&
+    Number.isFinite(durationMinutes) &&
+    durationMinutes > 0 &&
+    startMinutes + durationMinutes <= HOURLY_SCHEDULED_END_HOUR * 60
+  );
+}
 
 /** Same shift windows as BookNowAutoAssignService.checkTimingMatch. */
 const SHIFT_WINDOWS: Record<string, { startHour: number; endHour: number }> = {
@@ -353,6 +372,12 @@ const SHIFT_WINDOWS: Record<string, { startHour: number; endHour: number }> = {
   morning_full_time: { startHour: 8.0, endHour: 16.0 },
   general_day_full_time: { startHour: 10.0, endHour: 18.0 },
   evening_full_time: { startHour: 11.5, endHour: 19.5 },
+};
+
+const HOURLY_HELPER_SHIFT_WINDOWS: Record<string, { startHour: number; endHour: number }> = {
+  morning_full_time: { startHour: 7, endHour: 20 },
+  morning_rush: { startHour: 7, endHour: 13 },
+  afternoon_block: { startHour: 14, endHour: 20 },
 };
 
 function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -451,6 +476,7 @@ export function workShiftsCoverInterval(
   workShifts: string[],
   startMinutes: number,
   endMinutes: number,
+  hourlyHelper = false,
 ): boolean {
   if (!Array.isArray(workShifts) || workShifts.length === 0) return true;
   const startHour = startMinutes / 60;
@@ -459,7 +485,9 @@ export function workShiftsCoverInterval(
     const key = String(shiftId || '')
       .toLowerCase()
       .replace(/[-_\s]+/g, '_');
-    const window = SHIFT_WINDOWS[key];
+    const window = hourlyHelper
+      ? HOURLY_HELPER_SHIFT_WINDOWS[key] || SHIFT_WINDOWS[key]
+      : SHIFT_WINDOWS[key];
     if (window) {
       if (startHour >= window.startHour && endHour <= window.endHour) return true;
       continue;
@@ -487,6 +515,8 @@ export type PartnerCapacityLocation = {
   area?: string;
   lat?: number;
   lng?: number;
+  hourlyHelper?: boolean;
+  preferredHelperGender?: 'any' | 'male' | 'female';
   requiredPartnerUid?: string;
   excludeOrderId?: string;
   excludeTaskIds?: string[];
@@ -495,7 +525,54 @@ export type PartnerCapacityLocation = {
 type EligibleCapacityPartner = {
   uid: string;
   workShifts: string[];
+  gender?: string;
+  occupiedIntervals: Array<{ start: number; end: number }>;
 };
+
+function normalizePartnerGender(value: unknown): string | null {
+  const gender = String(value || '').trim().toLowerCase();
+  if (gender === 'male' || gender === 'man' || gender === 'm') return 'male';
+  if (gender === 'female' || gender === 'woman' || gender === 'f') return 'female';
+  return gender || null;
+}
+
+export function partnerMatchesHourlyHelperCategory(categories: unknown[]): boolean {
+  return partnerCategoryMatchesBookNowTask(categories, {
+    category: 'other',
+    categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
+    categoryLabel: 'Hourly Helper',
+  });
+}
+
+export function countPartnersAvailableForInterval(
+  partners: Array<{
+    workShifts: string[];
+    occupiedIntervals: Array<{ start: number; end: number }>;
+  }>,
+  candidateStart: number,
+  candidateEnd: number,
+  hourlyHelper = false,
+): number {
+  return partners.filter((partner) =>
+    workShiftsCoverInterval(partner.workShifts, candidateStart, candidateEnd, hourlyHelper) &&
+    !partner.occupiedIntervals.some(
+      ({ start, end }) => candidateStart < end && start < candidateEnd,
+    ),
+  ).length;
+}
+
+export function isPartnerTaskBlockingStatus(status: unknown, hourlyHelper = false): boolean {
+  return (hourlyHelper ? HOURLY_PARTNER_OCCUPIED_TASK_STATUSES : PARTNER_OCCUPIED_TASK_STATUSES)
+    .has(String(status || ''));
+}
+
+export function hasPartnerCapacityForSlot(
+  capacity: PartnerCapacityBySlot | undefined,
+  slot: string,
+): boolean {
+  const value = capacity?.[normalizeBookNowSlotLabel(slot)];
+  return typeof value === 'number' && value > 0;
+}
 
 /**
  * For a given date + city, return the number of eligible approved partners
@@ -547,6 +624,9 @@ export async function getPartnerCapacityForSlots(
         'partnerProfile.onLeave': 1,
         'partnerProfile.workAreas': 1,
         'partnerProfile.workShifts': 1,
+        'partnerProfile.categories': 1,
+        gender: 1,
+        'partnerProfile.gender': 1,
       },
     },
   ).toArray();
@@ -557,6 +637,15 @@ export async function getPartnerCapacityForSlots(
     const pp = (record.partnerProfile as Record<string, unknown>) || {};
     if (pp.status !== 'approved') continue;
     if (record.isAvailable === false || pp.onLeave === true) continue;
+    if (location?.hourlyHelper) {
+      const categories = Array.isArray(pp.categories) ? (pp.categories as unknown[]) : [];
+      if (!partnerMatchesHourlyHelperCategory(categories)) continue;
+      const preferredGender = location.preferredHelperGender;
+      if (preferredGender && preferredGender !== 'any') {
+        const gender = normalizePartnerGender(record.gender ?? pp.gender);
+        if (gender !== preferredGender) continue;
+      }
+    }
 
     const workAreas: string[] = Array.isArray(pp.workAreas)
       ? (pp.workAreas as string[])
@@ -572,11 +661,14 @@ export async function getPartnerCapacityForSlots(
     eligiblePartners.push({
       uid,
       workShifts: Array.isArray(pp.workShifts) ? (pp.workShifts as string[]) : [],
+      gender: normalizePartnerGender(record.gender ?? pp.gender) || undefined,
+      occupiedIntervals: [],
     });
   }
 
   if (!eligiblePartners.length) {
-    for (const slotMinutes of SLOT_GRID_MINUTES) {
+    const slotGrid = location?.hourlyHelper ? HOURLY_SLOT_GRID_MINUTES : SLOT_GRID_MINUTES;
+    for (const slotMinutes of slotGrid) {
       capacity[minutesToSlotLabel(slotMinutes)] = 0;
     }
     return capacity;
@@ -587,7 +679,13 @@ export async function getPartnerCapacityForSlots(
   // ── 2. Fetch active tasks for these partners on this date ───────────────────
   const activeTasks = await Task.find({
     assigneeUid: { $in: activePartnerUids },
-    status: { $in: [...PARTNER_OCCUPIED_TASK_STATUSES] },
+    status: {
+      $in: [
+        ...(location?.hourlyHelper
+          ? HOURLY_PARTNER_OCCUPIED_TASK_STATUSES
+          : PARTNER_OCCUPIED_TASK_STATUSES),
+      ],
+    },
     scheduledDate: { $gte: range.start, $lte: range.end },
     scheduledTimeStart: { $exists: true, $ne: null },
     ...(location?.excludeOrderId ? { bookingOrderId: { $ne: location.excludeOrderId } } : {}),
@@ -626,27 +724,25 @@ export async function getPartnerCapacityForSlots(
     partnerOccupied.get(uid)!.push({ start: startMin, end: endMin });
   }
 
-  const partnerByUid = new Map(eligiblePartners.map((partner) => [partner.uid, partner]));
+  for (const partner of eligiblePartners) {
+    partner.occupiedIntervals = partnerOccupied.get(partner.uid) || [];
+  }
 
   // ── 4. For each slot, count partners free for the FULL requested interval ───
-  for (const slotMinutes of SLOT_GRID_MINUTES) {
+  const slotGrid = location?.hourlyHelper ? HOURLY_SLOT_GRID_MINUTES : SLOT_GRID_MINUTES;
+  for (const slotMinutes of slotGrid) {
     const candidateStart = slotMinutes;
     const candidateEnd = slotMinutes + safeDuration;
-    let freeCount = 0;
-
-    for (const [uid, intervals] of partnerOccupied) {
-      const partner = partnerByUid.get(uid);
-      if (!partner) continue;
-      if (!workShiftsCoverInterval(partner.workShifts, candidateStart, candidateEnd)) {
-        continue;
-      }
-      const isBusy = intervals.some(
-        ({ start, end }) => candidateStart < end && start < candidateEnd,
-      );
-      if (!isBusy) freeCount += 1;
-    }
-
-    capacity[minutesToSlotLabel(slotMinutes)] = freeCount;
+    const outsideHourlyWindow = location?.hourlyHelper &&
+      !isHourlyCapacityCandidateWithinWindow(candidateStart, safeDuration);
+    capacity[minutesToSlotLabel(slotMinutes)] = outsideHourlyWindow
+      ? 0
+      : countPartnersAvailableForInterval(
+          eligiblePartners,
+          candidateStart,
+          candidateEnd,
+          location?.hourlyHelper,
+        );
   }
 
   return capacity;
@@ -665,6 +761,7 @@ export async function assertBookNowSlotAvailable(params: {
   requiredPartnerUid?: string;
   excludeOrderId?: string;
   excludeTaskIds?: string[];
+  preferredHelperGender?: 'any' | 'male' | 'female';
 }): Promise<void> {
   const date = String(params.date || '').trim();
   const city = normalizeCity(params.city);
@@ -675,7 +772,18 @@ export async function assertBookNowSlotAvailable(params: {
       ? Math.round(Number(params.durationMinutes))
       : BOOK_NOW_SLOT_STEP_MINUTES;
 
-  if (!date || !city) return;
+  if (!date || !city) {
+    if (params.availabilityMode === 'hourly') throw new Error('SLOT_UNAVAILABLE');
+    return;
+  }
+
+  if (params.availabilityMode === 'hourly') {
+    const { assertHourlyScheduledSlotWithinOperatingHours } = await import('./hourlyBookingGuards');
+    assertHourlyScheduledSlotWithinOperatingHours({
+      scheduledTimeStart,
+      durationMinutes,
+    });
+  }
 
   const leadTimeMinutes =
     params.availabilityMode === 'hourly'
@@ -700,16 +808,26 @@ export async function assertBookNowSlotAvailable(params: {
     throw new Error('SLOT_TOO_SOON');
   }
 
+  if (params.availabilityMode !== 'hourly') {
+    const slotStartMinutes = parseHourlySlotToMinutes(slotToCheck);
+    if (slotStartMinutes == null || slotStartMinutes < 7 * 60 || slotStartMinutes >= 20 * 60) {
+      throw new Error('SLOT_UNAVAILABLE');
+    }
+    return;
+  }
+
   const capacity = await getPartnerCapacityForSlots(date, city, durationMinutes, {
     area: params.area,
     lat: params.lat,
     lng: params.lng,
     requiredPartnerUid: params.requiredPartnerUid,
+    hourlyHelper: true,
+    preferredHelperGender: params.preferredHelperGender,
     excludeOrderId: params.excludeOrderId,
     excludeTaskIds: params.excludeTaskIds,
   });
 
-  if (slotHasZeroPartnerCapacity(capacity, slotToCheck)) {
+  if (!hasPartnerCapacityForSlot(capacity, slotToCheck)) {
     throw new Error(params.requiredPartnerUid ? 'ASSIGNED_HELPER_UNAVAILABLE' : 'SLOT_UNAVAILABLE');
   }
 }

@@ -16,6 +16,11 @@ router.get(
   asyncHandler(BookingController.getSlotAvailability),
 );
 router.get(
+  '/hourly-helper-availability',
+  authMiddleware,
+  asyncHandler(BookingController.getHourlyHelperAvailability),
+);
+router.get(
   '/by-task/:taskId',
   authMiddleware,
   asyncHandler(BookingController.getOrderIdForTask),

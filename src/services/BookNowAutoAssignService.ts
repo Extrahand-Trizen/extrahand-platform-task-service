@@ -11,6 +11,7 @@ import { resolvePartnerUidByPhone } from '../utils/resolvePartnerUidByPhone';
 import { partnerCategoryMatchesBookNowTask } from './partnerVisibility';
 import { notifyBookNowAssignment } from './AssignmentService';
 import AssignmentManagementRules from '../models/AssignmentManagementRules';
+import { workShiftsCoverInterval } from '../utils/bookNowSlotAvailability';
 
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
 const WORK_AREA_COORDS = HYDERABAD_WORK_AREA_COORDS;
@@ -197,6 +198,29 @@ function checkTimingMatch(workShifts: string[], task: ITask): boolean {
   // Some approved legacy partner profiles do not have shift slots backfilled yet.
   // Do not block auto-assignment when category and work-area already match.
   if (!workShifts || !Array.isArray(workShifts) || workShifts.length === 0) return true;
+
+  if (isHourlyTask(task) && task.scheduledTimeStart) {
+    const parseMinutes = (label: string): number | null => {
+      const match = String(label || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!match) return null;
+      let hours = Number(match[1]);
+      const minutes = Number(match[2]);
+      if (!Number.isInteger(hours) || hours < 1 || hours > 12 || minutes > 59) return null;
+      if (match[3].toUpperCase() === 'PM' && hours !== 12) hours += 12;
+      if (match[3].toUpperCase() === 'AM' && hours === 12) hours = 0;
+      return hours * 60 + minutes;
+    };
+    const startMinutes = parseMinutes(task.scheduledTimeStart);
+    if (startMinutes == null) return false;
+    const scheduledEnd = parseMinutes(String(task.scheduledTimeEnd || ''));
+    const estimatedDuration = Number(task.estimatedDuration || 0);
+    const endMinutes = scheduledEnd != null && scheduledEnd > startMinutes
+      ? scheduledEnd
+      : startMinutes + (Number.isFinite(estimatedDuration) && estimatedDuration > 0
+          ? estimatedDuration
+          : 30);
+    return workShiftsCoverInterval(workShifts, startMinutes, endMinutes, true);
+  }
 
   const taskTime = parseTaskTime(task);
   for (const shiftId of workShifts) {
@@ -506,11 +530,14 @@ export class BookNowAutoAssignService {
       for (const p of profiles) {
         const pp = (p.partnerProfile as any) || {};
         const categories: string[] = Array.isArray(pp.categories) ? pp.categories : [];
-        const workAreas: string[] = Array.isArray(pp.workAreas)
-          ? pp.workAreas
-          : Array.isArray(p.helperWorkAreas)
-          ? (p.helperWorkAreas as string[])
-          : [];
+        const workAreas: string[] =
+          isHourly && Array.isArray(p.helperWorkAreas) && (!Array.isArray(pp.workAreas) || pp.workAreas.length === 0)
+            ? (p.helperWorkAreas as string[])
+            : Array.isArray(pp.workAreas)
+            ? pp.workAreas
+            : Array.isArray(p.helperWorkAreas)
+            ? (p.helperWorkAreas as string[])
+            : [];
 
         if (!workAreas.length) continue;
         const normAreas = workAreas.map((a: string) => normalizeArea(a));
@@ -735,11 +762,14 @@ export class BookNowAutoAssignService {
         if (pp.status !== 'approved') continue;
 
         const categories: string[] = Array.isArray(pp.categories) ? pp.categories : [];
-        const workAreas: string[] = Array.isArray(pp.workAreas)
-          ? pp.workAreas
-          : Array.isArray(p.helperWorkAreas)
-          ? (p.helperWorkAreas as string[])
-          : [];
+        const workAreas: string[] =
+          isHourly && Array.isArray(p.helperWorkAreas) && (!Array.isArray(pp.workAreas) || pp.workAreas.length === 0)
+            ? (p.helperWorkAreas as string[])
+            : Array.isArray(pp.workAreas)
+            ? pp.workAreas
+            : Array.isArray(p.helperWorkAreas)
+            ? (p.helperWorkAreas as string[])
+            : [];
 
         if (!categories.length || !workAreas.length) continue;
 

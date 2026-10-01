@@ -162,37 +162,24 @@ export class ReminderScheduler {
               });
             }
 
+            // EmailServiceClient enforces the recipient's email/taskReminders preference.
             if (requesterProfile?.email && requesterProfile?.uid) {
-              // Check if user has enabled task reminder emails
-              const { NotificationPreferenceChecker } = await import('../services/NotificationPreferenceChecker');
-              const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                requesterProfile.uid,
-                'taskReminders'
-              );
-              
-              if (emailEnabled) {
-                EmailServiceClient.sendTaskReminder(requesterProfile.email, {
-                  recipientName: requesterProfile.name || requesterProfile.fullName || 'There',
-                  taskTitle: task.title,
-                  scheduledDate: scheduledDateStr,
-                  scheduledTime: scheduledTimeStr,
-                  location: locationStr,
-                  isTasker: false,
-                  otherPartyName: assigneeProfile?.name || assigneeProfile?.fullName,
-                  taskUrl,
-                  userId: requesterProfile.uid,
-                }).catch((err) =>
-                  logger.error('ReminderScheduler: Error sending task_reminder email to requester', {
-                    taskId: task._id,
-                    error: err instanceof Error ? err.message : 'Unknown error',
-                  })
-                );
-              } else {
-                logger.info('ReminderScheduler: Email notifications disabled for requester', {
+              EmailServiceClient.sendTaskReminder(requesterProfile.email, {
+                recipientName: requesterProfile.name || requesterProfile.fullName || 'There',
+                taskTitle: task.title,
+                scheduledDate: scheduledDateStr,
+                scheduledTime: scheduledTimeStr,
+                location: locationStr,
+                isTasker: false,
+                otherPartyName: assigneeProfile?.name || assigneeProfile?.fullName,
+                taskUrl,
+                userId: requesterProfile.uid,
+              }).catch((err) =>
+                logger.error('ReminderScheduler: Error sending task_reminder email to requester', {
                   taskId: task._id,
-                  userId: requesterProfile.uid
-                });
-              }
+                  error: err instanceof Error ? err.message : 'Unknown error',
+                })
+              );
             }
             if (assigneeProfile?.uid) {
               fireWhatsAppNotify({
@@ -213,36 +200,22 @@ export class ReminderScheduler {
             }
 
             if (assigneeProfile?.email && assigneeProfile?.uid) {
-              // Check if user has enabled task reminder emails
-              const { NotificationPreferenceChecker } = await import('../services/NotificationPreferenceChecker');
-              const emailEnabled = await NotificationPreferenceChecker.isEmailNotificationEnabled(
-                assigneeProfile.uid,
-                'taskReminders'
-              );
-              
-              if (emailEnabled) {
-                EmailServiceClient.sendTaskReminder(assigneeProfile.email, {
-                  recipientName: assigneeProfile.name || assigneeProfile.fullName || 'There',
-                  taskTitle: task.title,
-                  scheduledDate: scheduledDateStr,
-                  scheduledTime: scheduledTimeStr,
-                  location: locationStr,
-                  isTasker: true,
-                  otherPartyName: requesterProfile?.name || requesterProfile?.fullName,
-                  taskUrl,
-                  userId: assigneeProfile.uid,
-                }).catch((err) =>
-                  logger.error('ReminderScheduler: Error sending task_reminder email to assignee', {
-                    taskId: task._id,
-                    error: err instanceof Error ? err.message : 'Unknown error',
-                  })
-                );
-              } else {
-                logger.info('ReminderScheduler: Email notifications disabled for assignee', {
+              EmailServiceClient.sendTaskReminder(assigneeProfile.email, {
+                recipientName: assigneeProfile.name || assigneeProfile.fullName || 'There',
+                taskTitle: task.title,
+                scheduledDate: scheduledDateStr,
+                scheduledTime: scheduledTimeStr,
+                location: locationStr,
+                isTasker: true,
+                otherPartyName: requesterProfile?.name || requesterProfile?.fullName,
+                taskUrl,
+                userId: assigneeProfile.uid,
+              }).catch((err) =>
+                logger.error('ReminderScheduler: Error sending task_reminder email to assignee', {
                   taskId: task._id,
-                  userId: assigneeProfile.uid
-                });
-              }
+                  error: err instanceof Error ? err.message : 'Unknown error',
+                })
+              );
             }
           } catch (emailErr) {
             logger.error('ReminderScheduler: Error sending task_reminder emails', {

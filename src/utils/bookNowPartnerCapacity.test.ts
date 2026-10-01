@@ -4,7 +4,12 @@
  */
 import assert from 'assert';
 import {
+  countPartnersAvailableForInterval,
+  hasPartnerCapacityForSlot,
+  isHourlyCapacityCandidateWithinWindow,
+  isPartnerTaskBlockingStatus,
   locationKeysForPartnerCapacity,
+  partnerMatchesHourlyHelperCategory,
   partnerWorkAreasMatchLocationKeys,
   workShiftsCoverInterval,
 } from './bookNowSlotAvailability';
@@ -133,6 +138,102 @@ assert.strictEqual(partnerWorkAreasMatchLocationKeys(['Yapral'], ['Bengaluru']),
   assert.strictEqual(workShiftsCoverInterval(morningFull, 15 * 60, 16 * 60), true);
   assert.strictEqual(workShiftsCoverInterval(morningFull, 16 * 60, 18 * 60), false);
   assert.strictEqual(workShiftsCoverInterval([], 16 * 60, 18 * 60), true);
+  assert.strictEqual(workShiftsCoverInterval(morningFull, 7 * 60, 20 * 60, true), true);
+  assert.strictEqual(workShiftsCoverInterval(['morning_rush'], 7 * 60, 13 * 60, true), true);
+  assert.strictEqual(workShiftsCoverInterval(['morning_rush'], 13 * 60, 14 * 60, true), false);
+  assert.strictEqual(workShiftsCoverInterval(['afternoon_block'], 14 * 60, 20 * 60, true), true);
+  assert.strictEqual(workShiftsCoverInterval(['afternoon_block'], 13 * 60 + 30, 14 * 60, true), false);
 }
+
+{
+  const partners = [
+    { workShifts: [], occupiedIntervals: [{ start: 7 * 60, end: 8 * 60 }] },
+    { workShifts: [], occupiedIntervals: [{ start: 7 * 60 + 30, end: 8 * 60 + 30 }] },
+    { workShifts: [], occupiedIntervals: [{ start: 7 * 60 + 30, end: 9 * 60 }] },
+  ];
+  assert.strictEqual(countPartnersAvailableForInterval(partners, 7 * 60, 8 * 60), 0);
+  assert.strictEqual(countPartnersAvailableForInterval(partners, 7 * 60 + 30, 8 * 60 + 30), 0);
+  assert.strictEqual(countPartnersAvailableForInterval(partners, 8 * 60, 9 * 60), 1);
+  assert.strictEqual(countPartnersAvailableForInterval(partners, 8 * 60 + 30, 9 * 60 + 30), 2);
+  assert.strictEqual(countPartnersAvailableForInterval(partners, 9 * 60, 10 * 60), 3);
+}
+
+assert.strictEqual(
+  countPartnersAvailableForInterval(
+    [{ workShifts: ['morning_full_time'], occupiedIntervals: [] }],
+    7 * 60,
+    8 * 60,
+  ),
+  0,
+);
+assert.strictEqual(
+  countPartnersAvailableForInterval(
+    [{ workShifts: ['morning_full_time'], occupiedIntervals: [] }],
+    8 * 60,
+    9 * 60,
+  ),
+  1,
+);
+assert.strictEqual(
+  countPartnersAvailableForInterval(
+    [
+      { workShifts: ['morning_rush'], occupiedIntervals: [] },
+      { workShifts: ['afternoon_block'], occupiedIntervals: [] },
+    ],
+    7 * 60,
+    8 * 60,
+    true,
+  ),
+  1,
+);
+assert.strictEqual(
+  countPartnersAvailableForInterval(
+    [
+      { workShifts: ['morning_rush'], occupiedIntervals: [] },
+      { workShifts: ['afternoon_block'], occupiedIntervals: [] },
+    ],
+    14 * 60,
+    15 * 60,
+    true,
+  ),
+  1,
+);
+assert.strictEqual(countPartnersAvailableForInterval([], 10 * 60, 11 * 60), 0);
+assert.strictEqual(
+  countPartnersAvailableForInterval(
+    [{ workShifts: [], occupiedIntervals: [] }],
+    10 * 60,
+    11 * 60,
+  ),
+  1,
+);
+assert.strictEqual(
+  countPartnersAvailableForInterval(
+    [{ workShifts: [], occupiedIntervals: [{ start: 10 * 60, end: 11 * 60 }] }],
+    11 * 60,
+    12 * 60,
+  ),
+  1,
+);
+assert.strictEqual(partnerMatchesHourlyHelperCategory(['cleaning']), true);
+assert.strictEqual(partnerMatchesHourlyHelperCategory(['repair']), false);
+assert.strictEqual(partnerMatchesHourlyHelperCategory(['hourly-helper']), true);
+assert.strictEqual(hasPartnerCapacityForSlot({ '7:00 PM': 1 }, '7:00 PM'), true);
+assert.strictEqual(hasPartnerCapacityForSlot({ '7:00 PM': 0 }, '7:00 PM'), false);
+assert.strictEqual(hasPartnerCapacityForSlot({}, '7:00 PM'), false);
+assert.strictEqual(isPartnerTaskBlockingStatus('assigned'), true);
+assert.strictEqual(isPartnerTaskBlockingStatus('active', true), true);
+assert.strictEqual(isPartnerTaskBlockingStatus('active'), false);
+assert.strictEqual(isPartnerTaskBlockingStatus('in_progress'), true);
+assert.strictEqual(isPartnerTaskBlockingStatus('started'), true);
+assert.strictEqual(isPartnerTaskBlockingStatus('review'), true);
+assert.strictEqual(isPartnerTaskBlockingStatus('cancelled'), false);
+assert.strictEqual(isPartnerTaskBlockingStatus('completed'), false);
+assert.strictEqual(isHourlyCapacityCandidateWithinWindow(7 * 60, 30), true);
+assert.strictEqual(isHourlyCapacityCandidateWithinWindow(19 * 60, 30), true);
+assert.strictEqual(isHourlyCapacityCandidateWithinWindow(19 * 60 + 30, 30), true);
+assert.strictEqual(isHourlyCapacityCandidateWithinWindow(19 * 60 + 30, 45), false);
+assert.strictEqual(isHourlyCapacityCandidateWithinWindow(20 * 60, 30), false);
+assert.strictEqual(isHourlyCapacityCandidateWithinWindow(19 * 60 + 15, 30), false);
 
 console.log('bookNowPartnerCapacity.test.ts: all tests passed');

@@ -54,6 +54,30 @@ export class CatalogController {
     res.json({ success: true, data: { category, skus, content } });
   }
 
+  static async getHourlyHelperSkusByCategoryId(req: Request, res: Response): Promise<void> {
+    const categoryId = typeof req.query.categoryId === 'string' ? req.query.categoryId.trim() : '';
+    if (!categoryId) {
+      throw new ValidationError('categoryId is required');
+    }
+    const coordinates = typeof req.query.coordinates === 'string'
+      ? String(req.query.coordinates).split(',').map(Number)
+      : [];
+    const parsedCoordinates = coordinates.length === 2 && coordinates.every(Number.isFinite)
+      ? [coordinates[0], coordinates[1]] as [number, number]
+      : undefined;
+    const { category, skus } = await CatalogService.getHourlyHelperSkusByCategoryId(
+      categoryId,
+      {
+        area: typeof req.query.area === 'string' ? req.query.area : undefined,
+        city: typeof req.query.city === 'string' ? req.query.city : undefined,
+        state: typeof req.query.state === 'string' ? req.query.state : undefined,
+        pinCode: typeof req.query.pinCode === 'string' ? req.query.pinCode : undefined,
+        coordinates: parsedCoordinates,
+      },
+    );
+    res.json({ success: true, data: { category, skus } });
+  }
+
   static async getBookNowHubCatalog(req: Request, res: Response): Promise<void> {
     const previewLimit =
       req.query.previewLimit !== undefined ? Number(req.query.previewLimit) : undefined;

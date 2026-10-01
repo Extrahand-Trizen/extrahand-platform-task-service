@@ -9,38 +9,43 @@ export class NotificationPreferenceChecker {
   /**
    * Check if a user has enabled email notifications for a specific category.
    *
-   * Strategy: fail-open.
-   * - We BLOCK only when user-service explicitly returns canSend=false.
-   * - If the service is unreachable or misconfigured, we allow the email through.
-   *   This avoids blocking all task emails during user-service downtime.
-   * - The /can-send endpoint has no auth requirement, so a missing
-   *   SERVICE_AUTH_TOKEN no longer silently blocks all emails.
+   * Strategy: fail-closed.
+   * - We SEND only when user-service explicitly returns canSend=true.
+   * - If user-service is unreachable, rejects the call (user-service gates every route
+   *   behind SERVICE_AUTH_TOKEN), or returns an unexpected shape, the email is skipped.
+   *   Sending anyway would ignore users who turned email off; in-app/push still deliver.
    *
    * @param userUid - Firebase UID of the user
    * @param category - Notification category (e.g., 'taskUpdates')
-   * @returns true if email should be sent, false if user has disabled it
+   * @returns true if email should be sent, false if user has disabled it or it can't be verified
    */
   static async isEmailNotificationEnabled(
     userUid: string,
     category: 'taskUpdates' | 'keywordTaskAlerts' | 'recommendedTaskAlerts' | 'payments' | 'system' | 'taskReminders'
   ): Promise<boolean> {
-    try {
-      if (!this.userServiceUrl) {
-        logger.warn('NotificationPreferenceChecker: USER_SERVICE_URL not configured — allowing email (fail-open)');
-        return true;
-      }
+    if (!userUid) {
+      logger.warn('NotificationPreferenceChecker: Missing userUid — skipping email', { category });
+      return false;
+    }
 
+    if (!this.userServiceUrl) {
+      logger.error('NotificationPreferenceChecker: USER_SERVICE_URL not configured — skipping email', {
+        userUid,
+        category,
+      });
+      return false;
+    }
+
+    try {
       const headers: Record<string, string> = {
         'X-Service-Name': 'task-service',
       };
-
-      // Include auth token only if available — /can-send doesn't require it
       if (this.serviceAuthToken) {
         headers['X-Service-Auth'] = this.serviceAuthToken;
       }
 
       const response = await axios.get(
-        `${this.userServiceUrl}/api/v1/notification-preferences/${userUid}/can-send`,
+        `${this.userServiceUrl}/api/v1/notification-preferences/${encodeURIComponent(userUid)}/can-send`,
         {
           params: {
             channel: 'email',
@@ -53,31 +58,27 @@ export class NotificationPreferenceChecker {
 
       const canSend = response.data?.data?.canSend;
 
-      // Only block when user-service explicitly returns false
-      if (canSend === false) {
-        logger.info('NotificationPreferenceChecker: Email blocked — user preference is OFF', {
-          userUid,
-          category,
-        });
-        return false;
+      if (canSend === true) {
+        logger.info('NotificationPreferenceChecker: Email allowed', { userUid, category });
+        return true;
       }
 
-      logger.info('NotificationPreferenceChecker: Email allowed', {
+      logger.info('NotificationPreferenceChecker: Email blocked — user preference is OFF or unknown', {
         userUid,
         category,
         canSend,
       });
-
-      return true;
-
+      return false;
     } catch (error) {
-      // fail-open: don't block emails when user-service is temporarily unreachable
-      logger.warn('NotificationPreferenceChecker: Could not reach user-service — allowing email (fail-open)', {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      logger.error('NotificationPreferenceChecker: Preference check failed — skipping email', {
         userUid,
         category,
+        status,
+        hasServiceAuthToken: !!this.serviceAuthToken,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
-      return true;
+      return false;
     }
   }
 }
