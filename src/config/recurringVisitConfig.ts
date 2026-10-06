@@ -31,6 +31,9 @@ export const recurringVisitConfig = {
   /** Payment sync cooldown on listVisits (sync=false). */
   paymentSyncCooldownMs: Number(process.env.RECURRING_PAYMENT_SYNC_COOLDOWN_MS || 60_000),
 
+  /** Minimum seconds between background reconciles triggered by GET /tasks/:id for one plan. */
+  readReconcileCooldownSeconds: Number(process.env.RECURRING_READ_RECONCILE_COOLDOWN_SECONDS || 60),
+
   /** Scheduler batch size for overdue payment visits. */
   schedulerBatchSize: Number(process.env.RECURRING_SCHEDULER_BATCH_SIZE || 100),
 

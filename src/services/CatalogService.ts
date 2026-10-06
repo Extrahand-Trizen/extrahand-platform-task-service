@@ -33,7 +33,8 @@ import {
   canAccessPersonalAssistantCatalog,
   isPersonalAssistantCategorySlug,
 } from '../utils/personalAssistantCatalogVisibility';
-import { LocationPricingService } from './LocationPricingService';
+import { LocationPricingService, type PricedSku, type ResolvedSkuPrice } from './LocationPricingService';
+import { getSkuOfferPrice } from '../utils/skuPricing';
 
 function assertObjectId(id: string, label = 'id'): string {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -76,7 +77,44 @@ type PricingView = {
   offerDiscountType: 'percent' | 'flat';
   offerDiscountValue: number;
   appliedPercent: number;
+  globalOfferPrice?: number;
+  pricingSource?: ResolvedSkuPrice['pricingSource'];
+  locationType?: ResolvedSkuPrice['locationType'];
+  locationId?: unknown;
+  pricingRuleId?: unknown;
+  pricingVersion?: number | null;
 };
+
+export type CatalogLocationInput = {
+  area?: string;
+  city?: string;
+  state?: string;
+  pinCode?: string;
+  coordinates?: [number, number];
+};
+
+function hasCatalogLocation(location?: CatalogLocationInput): location is CatalogLocationInput {
+  return Boolean(location && (location.area || location.city || location.pinCode || location.coordinates));
+}
+
+function withResolvedPricing(pricing: PricingView, resolved: ResolvedSkuPrice): PricingView {
+  const originalPrice = Math.max(0, Number(resolved.basePrice || 0));
+  const offerPrice = Math.max(0, Number(resolved.effectiveOfferPrice || 0));
+  return {
+    ...pricing,
+    originalPrice,
+    offerPrice,
+    savingsAmount: Math.max(0, originalPrice - offerPrice),
+    isOfferActive: offerPrice > 0 && offerPrice !== originalPrice,
+    appliedPercent: originalPrice > 0 && offerPrice < originalPrice ? roundToInt(((originalPrice - offerPrice) / originalPrice) * 100) : 0,
+    globalOfferPrice: resolved.globalOfferPrice,
+    pricingSource: resolved.pricingSource,
+    locationType: resolved.locationType,
+    locationId: resolved.locationId,
+    pricingRuleId: resolved.pricingRuleId,
+    pricingVersion: resolved.version,
+  };
+}
 
 type EnrichedSku<T> = T & { pricing: PricingView };
 
@@ -118,23 +156,6 @@ function normalizeHubSectionServices(services: UpsertHubSectionInput['services']
     sortOrder: typeof service.sortOrder === 'number' ? service.sortOrder : index * 10,
     isActive: typeof service.isActive === 'boolean' ? service.isActive : true,
   }));
-}
-
-function getSkuOfferPrice(sku: Pick<IServiceSku, 'basePrice' | 'offerPrice' | 'offerDiscountType' | 'offerDiscountValue' | 'isOfferActive'> & Partial<Pick<IServiceSku, 'pricingUnit'>>): number {
-  const base = Math.max(0, Number(sku.basePrice || 0));
-  const configuredOffer = Number((sku as IServiceSku).offerPrice || 0);
-  if (configuredOffer > 0) return roundToInt(configuredOffer);
-  if (sku.pricingUnit === 'hourly') return base;
-  if (!sku.isOfferActive) return base;
-  const discountValue = Math.max(0, Number(sku.offerDiscountValue || 0));
-  const discountType = sku.offerDiscountType || 'percent';
-
-  if (discountType === 'flat') {
-    return Math.max(0, roundToInt(base - discountValue));
-  }
-
-  const price = base * (1 - discountValue / 100);
-  return Math.max(0, roundToInt(price));
 }
 
 function enrichSkuPricing<T extends Record<string, unknown>>(
@@ -301,43 +322,30 @@ export class CatalogService {
       isActive: true,
     }).sort({ durationMinutes: 1, name: 1 }).lean();
 
-    const hourlyPricing = location
-      ? await Promise.all(skus.map(async (sku) => {
-          if (sku.pricingUnit !== 'hourly') return null;
-          return LocationPricingService.resolveHourlyPriceForAddress({ skuId: sku._id, address: location });
-        }))
-      : [];
-
     return {
       category,
-      skus: skus.map((sku, index) => {
-        const enriched = enrichSkuPricing(sku);
-        const resolved = hourlyPricing[index];
-        if (!resolved) return enriched;
-
-        const originalPrice = Math.max(0, Number(sku.basePrice || 0));
-        const offerPrice = Math.max(0, Number(resolved.effectiveOfferPrice || 0));
-
-        return {
-          ...sku,
-          offerPrice: offerPrice > 0 ? offerPrice : (sku.offerPrice || 0),
-          pricing: {
-            ...enriched.pricing,
-            originalPrice,
-            offerPrice,
-            savingsAmount: Math.max(0, originalPrice - offerPrice),
-            isOfferActive: offerPrice > 0 && offerPrice !== originalPrice,
-            appliedPercent: originalPrice > 0 && offerPrice < originalPrice ? roundToInt(((originalPrice - offerPrice) / originalPrice) * 100) : 0,
-            pricingSource: resolved.pricingSource,
-            locationType: resolved.locationType,
-            locationId: resolved.locationId,
-            pricingRuleId: resolved.pricingRuleId,
-            pricingVersion: resolved.version,
-            resolvedLocation: resolved.resolvedLocation,
-          },
-        };
-      }),
+      skus: await this.enrichSkusWithLocationPricing(skus, location),
     };
+  }
+
+  private static async enrichSkusWithLocationPricing<T extends Record<string, unknown> & PricedSku>(
+    skus: T[],
+    location?: CatalogLocationInput,
+  ) {
+    if (!hasCatalogLocation(location)) return skus.map((sku) => enrichSkuPricing(sku));
+    const context = await LocationPricingService.buildPricingContext(location);
+    const priced = await LocationPricingService.priceSkus(skus, context);
+    return skus.map((sku) => {
+      const enriched = enrichSkuPricing(sku);
+      const resolved = priced.get(String(sku._id));
+      if (!resolved) return enriched;
+      const pricing = withResolvedPricing(enriched.pricing, resolved);
+      return {
+        ...sku,
+        offerPrice: pricing.offerPrice > 0 ? pricing.offerPrice : (sku.offerPrice || 0),
+        pricing: { ...pricing, resolvedLocation: context.resolvedLocation },
+      };
+    });
   }
 
   static async getCategoryContent(categorySlug: string, customerUid?: string | null) {
@@ -490,39 +498,9 @@ export class CatalogService {
         isActive: true,
       }).lean(),
     ]);
-    const hourlyPricing = location
-      ? await Promise.all(skus.map(async (sku) => {
-          if (sku.pricingUnit !== 'hourly') return null;
-          return LocationPricingService.resolveHourlyPriceForAddress({ skuId: sku._id, address: location });
-        }))
-      : [];
     return {
       category,
-      skus: skus.map((sku, index) => {
-        const enriched = enrichSkuPricing(sku);
-        const resolved = hourlyPricing[index];
-        if (!resolved) return enriched;
-        const originalPrice = Math.max(0, Number(sku.basePrice || 0));
-        const offerPrice = Math.max(0, Number(resolved.effectiveOfferPrice || 0));
-        return {
-          ...sku,
-          offerPrice: offerPrice > 0 ? offerPrice : (sku.offerPrice || 0),
-          pricing: {
-            ...enriched.pricing,
-            originalPrice,
-            offerPrice,
-            savingsAmount: Math.max(0, originalPrice - offerPrice),
-            isOfferActive: offerPrice > 0 && offerPrice !== originalPrice,
-            appliedPercent: originalPrice > 0 && offerPrice < originalPrice ? roundToInt(((originalPrice - offerPrice) / originalPrice) * 100) : 0,
-            pricingSource: resolved.pricingSource,
-            locationType: resolved.locationType,
-            locationId: resolved.locationId,
-            pricingRuleId: resolved.pricingRuleId,
-            pricingVersion: resolved.version,
-            resolvedLocation: resolved.resolvedLocation,
-          },
-        };
-      }),
+      skus: await this.enrichSkusWithLocationPricing(skus, location),
       content: content || null,
     };
   }
@@ -540,8 +518,9 @@ export class CatalogService {
       imageUrls?: string[];
       sortOrder?: number;
     }>;
+    priceBySkuId?: Map<string, ResolvedSkuPrice>;
   }): BookNowPackageListItem[] {
-    const { category, skus, contentBySkuSlug } = args;
+    const { category, skus, contentBySkuSlug, priceBySkuId } = args;
 
     const items = skus
       .map((sku) => {
@@ -553,6 +532,7 @@ export class CatalogService {
           contentBySkuSlug.get(normalizeContentIdentity(String(sku.name || ''))) ??
           null;
         const enriched = enrichSkuPricing(sku);
+        const resolvedPrice = priceBySkuId?.get(String(sku._id));
         const shortDescription = String(content?.shortDescription || '').trim();
         const fallbackDescription = String(sku.description || '').trim();
         const durationLabel = toDurationLabel(Number(sku.durationMinutes || 0));
@@ -569,7 +549,7 @@ export class CatalogService {
           name: String(sku.name || ''),
           description: shortDescription || fallbackDescription || durationLabel,
           durationMinutes: Number(sku.durationMinutes || 0),
-          pricing: enriched.pricing,
+          pricing: resolvedPrice ? withResolvedPricing(enriched.pricing, resolvedPrice) : enriched.pricing,
           content: content
             ? {
                 displayName: String(content.displayName || sku.name || ''),
@@ -602,7 +582,7 @@ export class CatalogService {
     return Array.from(dedupedByName.values()).sort(comparePackageListItems);
   }
 
-  static async getBookNowHubCatalog(previewLimit = 5, customerUid?: string | null) {
+  static async getBookNowHubCatalog(previewLimit = 5, customerUid?: string | null, location?: CatalogLocationInput) {
     const limit = Math.max(1, Math.min(Number(previewLimit || 5), 8));
     const [categories, skuContents, categoryContents] = await Promise.all([
       ServiceCategory.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).lean(),
@@ -616,6 +596,9 @@ export class CatalogService {
     const categoriesForHub = visibleCategories;
     const categoryIds = categoriesForHub.map((category) => category._id);
     const skus = await ServiceSku.find({ categoryId: { $in: categoryIds }, isActive: true }).lean();
+    const priceBySkuId = hasCatalogLocation(location)
+      ? await LocationPricingService.priceSkusForAddress(skus, location)
+      : undefined;
     const contentBySkuKey = new Map<string, (typeof skuContents)[number]>();
     skuContents.forEach((content) => {
       const normalizedCategory = normalizeCatalogLookup(content.categorySlug);
@@ -671,6 +654,7 @@ export class CatalogService {
         category,
         skus: categorySkus,
         contentBySkuSlug,
+        priceBySkuId,
       });
 
       if (items.length > 0) {
@@ -795,7 +779,7 @@ export class CatalogService {
     );
   }
 
-  static async getBookNowCategoryPackages(categorySlug: string, customerUid?: string | null) {
+  static async getBookNowCategoryPackages(categorySlug: string, customerUid?: string | null, location?: CatalogLocationInput) {
     const category = await this.getCategoryBySlug(categorySlug, customerUid);
     const normalizedCategorySlug = normalizeCatalogLookup(category.slug);
     const [skus, skuContents, categoryContent] = await Promise.all([
@@ -841,8 +825,57 @@ export class CatalogService {
         category,
         skus,
         contentBySkuSlug,
+        priceBySkuId: hasCatalogLocation(location)
+          ? await LocationPricingService.priceSkusForAddress(skus, location)
+          : undefined,
       }),
     };
+  }
+
+  /**
+   * Match Book Now cart lines to active SKUs by explicit SKU id, then by slug within the line's category.
+   * A slug shared by several categories without a category match stays unmatched rather than guessing.
+   */
+  static async matchBookNowLineSkus(
+    lines: Array<{ catalogSkuId?: string; categorySlug?: string; skuSlug?: string }>,
+  ): Promise<Array<IServiceSku | null>> {
+    const skuIds = lines
+      .map((line) => String(line.catalogSkuId || ''))
+      .filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const slugs = new Set<string>();
+    for (const line of lines) {
+      const slug = String(line.skuSlug || '').trim();
+      if (!slug) continue;
+      slugs.add(slug);
+      slugs.add(normalizeCatalogLookup(slug));
+    }
+    if (skuIds.length === 0 && slugs.size === 0) return lines.map(() => null);
+
+    const skus = await ServiceSku.find({
+      isActive: true,
+      $or: [
+        ...(skuIds.length ? [{ _id: { $in: skuIds } }] : []),
+        ...(slugs.size ? [{ slug: { $in: [...slugs] } }] : []),
+      ],
+    }).lean<IServiceSku[]>();
+    const categories = await ServiceCategory.find({
+      _id: { $in: [...new Set(skus.map((sku) => String(sku.categoryId)))] },
+    }).select('slug').lean();
+    const categorySlugById = new Map(categories.map((category) => [String(category._id), category.slug]));
+
+    return lines.map((line) => {
+      const byId = line.catalogSkuId ? skus.find((sku) => String(sku._id) === String(line.catalogSkuId)) : undefined;
+      if (byId) return byId;
+      const slug = normalizeCatalogLookup(String(line.skuSlug || ''));
+      if (!slug) return null;
+      const candidates = skus.filter((sku) => normalizeCatalogLookup(sku.slug) === slug);
+      const categorySlug = line.categorySlug ? resolveCategoryAlias(normalizeCatalogLookup(line.categorySlug)) : '';
+      const inCategory = categorySlug
+        ? candidates.find((sku) => categorySlugById.get(String(sku.categoryId)) === categorySlug)
+        : undefined;
+      if (inCategory) return inCategory;
+      return candidates.length === 1 ? candidates[0] : null;
+    });
   }
 
   static async getSkuDetail(skuSlug: string, categorySlug?: string, customerUid?: string | null) {

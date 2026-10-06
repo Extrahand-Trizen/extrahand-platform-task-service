@@ -45,6 +45,8 @@ router.patch('/internal/location-pricing/locations/:type/:id', asyncHandler(Loca
 router.post('/internal/location-pricing/locations/:type/:id/activate', asyncHandler(LocationPricingController.activateLocation));
 router.post('/internal/location-pricing/locations/:type/:id/deactivate', asyncHandler(LocationPricingController.deactivateLocation));
 router.get('/internal/location-pricing/hourly-skus', asyncHandler(LocationPricingController.listHourlySkus));
+router.get('/internal/location-pricing/categories', asyncHandler(LocationPricingController.listPricingCategories));
+router.get('/internal/location-pricing/skus', asyncHandler(LocationPricingController.listPricingSkus));
 router.get('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.listHourlyPrices));
 router.post('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.createHourlyPrice));
 router.patch('/internal/location-pricing/hourly-prices/:id', asyncHandler(LocationPricingController.updateHourlyPrice));
@@ -53,6 +55,7 @@ router.post('/internal/location-pricing/resolve-address', asyncHandler(LocationP
 
 router.get('/categories', asyncHandler(CatalogController.listCategories));
 router.get('/book-now/hub', asyncHandler(CatalogController.getBookNowHubCatalog));
+router.post('/book-now/location-quote', asyncHandler(CatalogController.getBookNowLocationQuote));
 router.get('/categories/hourly-helper/diagnostic', asyncHandler(CatalogController.getHourlyHelperSkusByCategoryId));
 router.get('/categories/:slug/packages', asyncHandler(CatalogController.getBookNowCategoryPackages));
 router.get('/categories/:slug/content', asyncHandler(CatalogController.getCategoryContent));

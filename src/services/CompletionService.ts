@@ -285,12 +285,16 @@ export class CompletionService {
       );
     }
 
+    if (task.status === 'completed' && task.completionStatus === 'approved') {
+      return task.toObject();
+    }
     if (task.status !== 'review' || task.completionStatus !== 'pending_approval') {
       throw new BadRequestError('Task is not pending approval');
     }
 
-    const updatedTask = await Task.findByIdAndUpdate(
-      taskId,
+    // Conditional transition: a repeated / concurrent approve must not re-run payout and plan side effects.
+    const updatedTask = await Task.findOneAndUpdate(
+      { _id: taskId, status: 'review', completionStatus: 'pending_approval' },
       {
         status: 'completed',
         completionStatus: 'approved',
@@ -300,6 +304,14 @@ export class CompletionService {
       },
       { new: true, runValidators: true }
     ).lean();
+
+    if (!updatedTask) {
+      const latest = await Task.findById(taskId).lean();
+      if (latest?.status === 'completed' && latest?.completionStatus === 'approved') {
+        return latest;
+      }
+      throw new BadRequestError('Task is not pending approval');
+    }
 
     logger.info(`Task ${taskId} completion approved by poster ${taskOwnerProfileId}`);
 
@@ -336,6 +348,18 @@ export class CompletionService {
       }
     }
 
+    setImmediate(() => {
+      void CompletionService.sendApprovedCompletionNotifications(taskId, previousTask, updatedTask);
+    });
+
+    await CompletionService.processApprovedCompletionPayout(taskId, previousTask, updatedTask);
+  }
+
+  private static async sendApprovedCompletionNotifications(
+    taskId: string,
+    previousTask: any,
+    updatedTask: any,
+  ): Promise<void> {
     try {
       const Profiles = mongoose.connection.collection('profiles');
       const assigneeProfile = updatedTask?.assigneeId
@@ -495,7 +519,13 @@ export class CompletionService {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  }
 
+  private static async processApprovedCompletionPayout(
+    taskId: string,
+    previousTask: any,
+    updatedTask: any,
+  ): Promise<void> {
     const performerUid = updatedTask?.assigneeUid || previousTask.assigneeUid;
     const hasAssigneeId = !!updatedTask?.assigneeId;
     logger.info('[PAYOUT_DEBUG] Checking auto-payout eligibility', {

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import mongoose from 'mongoose';
 import Task, { type ITask } from '../models/Task';
 import BookingOrder from '../models/BookingOrder';
+import { buildOriginalScheduleFields, buildRescheduleHistoryEntry } from '../models/rescheduleHistory';
 import BookingItem from '../models/BookingItem';
 import ServiceQuotation from '../models/ServiceQuotation';
 import { CatalogService } from './CatalogService';
@@ -38,6 +39,9 @@ import {
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { BookNowAutoAssignService } from './BookNowAutoAssignService';
+import { HourlyHelperAvailabilityService } from './HourlyHelperAvailabilityService';
+import { buildHourlyServiceAreaCandidates } from '../utils/hourlyHelperServiceArea';
+import { HOURLY_HELPER_COMING_SOON_CODE } from '../constants/hourlyBooking';
 import {
   assertHourlyInstantOperatingHours,
   assertHourlyScheduledSlotWithinOperatingHours,
@@ -84,6 +88,7 @@ import {
 } from '../utils/reschedulePolicy';
 import { ProfileUtils } from '../utils/ProfileUtils';
 import { LocationPricingService } from './LocationPricingService';
+import { locationAdjustedUnitPrice } from '../utils/skuPricing';
 import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import { NotificationClient } from './NotificationClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
@@ -119,6 +124,32 @@ function resolveHourlyBookingAreaForCapacity(address: BookingAddress): string | 
   return area || resolveBookingAreaForCapacity(address);
 }
 
+/**
+ * Hourly Helper is bookable only when an eligible helper works in the
+ * customer's exact named area. Returns the eligible helper uids.
+ */
+async function assertHourlyHelperAvailableForAddress(address: BookingAddress): Promise<string[]> {
+  const candidates = buildHourlyServiceAreaCandidates({
+    area: address.area,
+    city: address.city,
+    state: address.state,
+    address: address.line1,
+  });
+  const helpers = await HourlyHelperAvailabilityService.findEligibleHelpers(candidates);
+  if (helpers.length === 0) {
+    logger.info('Hourly Helper booking rejected: no eligible helper in exact area', {
+      candidates,
+      city: address.city,
+      pinCode: address.pinCode,
+    });
+    throw new BadRequestError(
+      'Hourly Helper is coming soon in your area. Please choose another service location.',
+      HOURLY_HELPER_COMING_SOON_CODE,
+    );
+  }
+  return helpers.map((helper) => helper.uid);
+}
+
 export type BookingLineInput = {
   skuSlug?: string;
   categorySlug?: string;
@@ -128,6 +159,12 @@ export type BookingLineInput = {
   addonSlugs?: string[];
   quantity?: number;
   bathroomCount?: number;
+  fridgeDoorType?: string;
+  sofaTierId?: string;
+  acVariantId?: string;
+  applianceVariantId?: string;
+  /** Catalog SKU _id the app priced this line from; used to apply location pricing. */
+  catalogSkuId?: string;
   /** From mobile app package catalog — preferred over MongoDB SKU lookup */
   name?: string;
   unitPrice?: number;
@@ -143,6 +180,36 @@ export type BookingLineInput = {
   bookingKind?: BookingKind;
   serviceType?: string;
   consultationMeta?: ConsultationBookingMeta;
+};
+
+const VARIANT_PRICED_LINE_FIELDS = ['bathroomCount', 'fridgeDoorType', 'sofaTierId', 'acVariantId', 'applianceVariantId'] as const;
+
+/** Variant options are priced in the app relative to the package price, so location pricing scales them. */
+function isVariantPricedLine(line: BookingLineInput): boolean {
+  return VARIANT_PRICED_LINE_FIELDS.some((field) => line[field] != null && line[field] !== '');
+}
+
+function isConsultationOrProjectLine(line: BookingLineInput): boolean {
+  return Boolean(line.consultationMeta)
+    || line.serviceFlowType === 'consultation_project'
+    || line.bookingKind === 'consultation'
+    || line.bookingKind === 'project';
+}
+
+function clientUnitPrice(line: BookingLineInput): number | null {
+  const quantity = line.quantity && line.quantity > 0 ? line.quantity : 1;
+  if (line.unitPrice != null && Number.isFinite(line.unitPrice)) return Number(line.unitPrice);
+  if (line.lineTotal != null && Number.isFinite(line.lineTotal)) return Number(line.lineTotal) / quantity;
+  return null;
+}
+
+export type BookNowLineLocationQuote = {
+  index: number;
+  unitPrice: number | null;
+  lineTotal: number | null;
+  globalUnitPrice: number | null;
+  pricingSource: 'global' | 'area' | 'pincode' | 'city' | 'catalog' | 'client';
+  locationAdjusted: boolean;
 };
 
 type ResolvedLine = {
@@ -582,6 +649,107 @@ export class BookingService {
     return Boolean(name && hasPrice);
   }
 
+  /**
+   * Client-priced fixed lines carry the app's global price; when the booking address has a location rule
+   * for the SKU, replace it (non-variant lines) or scale it by locationPrice / globalPrice (variant lines).
+   */
+  private static async applyLocationPricesToClientLines(
+    lines: BookingLineInput[],
+    address?: BookingAddress,
+  ): Promise<{ lines: BookingLineInput[]; quotes: BookNowLineLocationQuote[] }> {
+    const eligible = lines.map((line) =>
+      Boolean(address)
+      && this.hasClientCatalogLine(line)
+      && !isHourlyCatalogLineInput(line)
+      && !isConsultationOrProjectLine(line)
+      && clientUnitPrice(line) != null,
+    );
+    const clientQuote = (line: BookingLineInput, index: number): BookNowLineLocationQuote => {
+      const unit = clientUnitPrice(line);
+      const quantity = line.quantity && line.quantity > 0 ? line.quantity : 1;
+      return {
+        index,
+        unitPrice: unit,
+        lineTotal: unit == null ? null : Math.round(unit * quantity * 100) / 100,
+        globalUnitPrice: unit,
+        pricingSource: 'client',
+        locationAdjusted: false,
+      };
+    };
+    if (!eligible.some(Boolean)) {
+      return { lines, quotes: lines.map(clientQuote) };
+    }
+
+    const normalized = lines.map((line) => (line.skuSlug || line.packageId ? this.normalizeLineInput(line) : line));
+    const matchedSkus = await CatalogService.matchBookNowLineSkus(
+      normalized.map((line, index) => (eligible[index] ? line : {})),
+    );
+    const skus = matchedSkus.filter((sku): sku is NonNullable<typeof sku> => Boolean(sku));
+    const prices = await LocationPricingService.priceSkusForAddress(skus, address);
+
+    const quotes: BookNowLineLocationQuote[] = [];
+    const pricedLines = lines.map((line, index) => {
+      const sku = matchedSkus[index];
+      const resolved = sku ? prices.get(String(sku._id)) : undefined;
+      const unit = clientUnitPrice(line);
+      if (!eligible[index] || !resolved || unit == null) {
+        quotes.push(clientQuote(line, index));
+        return line;
+      }
+      if (resolved.pricingSource === 'global') {
+        quotes.push({ ...clientQuote(line, index), pricingSource: 'global' });
+        return line;
+      }
+      const quantity = line.quantity && line.quantity > 0 ? line.quantity : 1;
+      const locationUnit = locationAdjustedUnitPrice({
+        clientUnitPrice: unit,
+        locationPrice: resolved.effectiveOfferPrice,
+        globalPrice: resolved.globalOfferPrice,
+        isVariantLine: isVariantPricedLine(line),
+      });
+      const lineTotal = Math.round(locationUnit * quantity * 100) / 100;
+      quotes.push({
+        index,
+        unitPrice: locationUnit,
+        lineTotal,
+        globalUnitPrice: unit,
+        pricingSource: resolved.pricingSource,
+        locationAdjusted: locationUnit !== unit,
+      });
+      return { ...line, unitPrice: locationUnit, lineTotal };
+    });
+    return { lines: pricedLines, quotes };
+  }
+
+  /** Same pricing the booking will charge, for showing cart/checkout totals before payment. */
+  static async quoteBookNowLinePrices(items: BookingLineInput[], address: BookingAddress) {
+    const { quotes } = await this.applyLocationPricesToClientLines(items, address);
+    const hourlyQuotes = await Promise.all(items.map(async (line, index) => {
+      if (!isHourlyCatalogLineInput(line)) return null;
+      try {
+        const resolved = await this.resolveLineFromCatalog(line, address);
+        return {
+          index,
+          unitPrice: Math.round((resolved.lineTotal / (resolved.quantity || 1)) * 100) / 100,
+          lineTotal: resolved.lineTotal,
+          globalUnitPrice: clientUnitPrice(line),
+          pricingSource: 'catalog' as const,
+          locationAdjusted: true,
+        };
+      } catch (error) {
+        logger.warn('Hourly line quote failed; keeping client price', {
+          index,
+          skuSlug: line.skuSlug || line.packageId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    }));
+    const lines = quotes.map((quote, index) => hourlyQuotes[index] ?? quote);
+    const total = lines.reduce((sum, line) => sum + (line.lineTotal ?? 0), 0);
+    return { items: lines, total: Math.round(total * 100) / 100 };
+  }
+
   /** Use package name + price from the mobile app (source of truth). */
   private static resolveLineFromClient(line: BookingLineInput): ResolvedLine {
     const normalized = this.normalizeLineInput(line);
@@ -682,13 +850,10 @@ export class BookingService {
     }
 
     const quantity = normalized.quantity || 1;
-    const resolvedHourlyPrice = isHourlyResolvedLine({
-      pricingUnit: sku.pricingUnit,
-      categorySlug: category?.slug,
-    }) && address && sku._id
+    const resolvedLocationPrice = address && sku._id
       ? await LocationPricingService.resolveHourlyPriceForAddress({ skuId: sku._id, address })
       : null;
-    const authoritativePrice = resolvedHourlyPrice?.effectiveOfferPrice ?? sku.pricing.offerPrice;
+    const authoritativePrice = resolvedLocationPrice?.effectiveOfferPrice ?? sku.pricing.offerPrice;
     const lineTotal = computeLinePrice(
       authoritativePrice,
       variant?.priceDelta || 0,
@@ -943,7 +1108,8 @@ export class BookingService {
       }
     }
 
-    const resolvedLines = await Promise.all(normalizedRawLines.map((line) => this.resolveLine(line, address)));
+    const { lines: locationPricedLines } = await this.applyLocationPricesToClientLines(normalizedRawLines, address);
+    const resolvedLines = await Promise.all(locationPricedLines.map((line) => this.resolveLine(line, address)));
 
     assertHourlySingleVisitCheckout({
       lines: resolvedLines,
@@ -955,6 +1121,11 @@ export class BookingService {
     assertBookNowFixedPriceMinimumCheckout(resolvedLines);
 
     const isHourlyOrder = resolvedLines.some(isHourlyResolvedLine);
+
+    const hourlyEligiblePartnerUids =
+      looksHourlyInput || isHourlyOrder
+        ? await assertHourlyHelperAvailableForAddress(address)
+        : undefined;
 
     // After resolve: Instant Hourly still skips slot lead-time checks.
     const skipSlotChecks = isHourlyOrder && fulfillmentType === 'instant';
@@ -1008,6 +1179,7 @@ export class BookingService {
               lat: Array.isArray(address.coordinates) ? address.coordinates[1] : undefined,
               lng: Array.isArray(address.coordinates) ? address.coordinates[0] : undefined,
               preferredHelperGender,
+              allowedPartnerUids: hourlyEligiblePartnerUids,
             });
           } catch (error) {
             if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
@@ -2163,6 +2335,9 @@ export class BookingService {
       durationMinutes?: number;
       availabilityMode?: 'hourly' | 'standard';
       area?: string;
+      /** Hourly: the booked address's own area / formatted address (no snapping). */
+      serviceArea?: string;
+      serviceAddress?: string;
       lat?: number;
       lng?: number;
       preferredHelperGender?: 'any' | 'male' | 'female';
@@ -2174,6 +2349,18 @@ export class BookingService {
         : 30;
     const lat = Number(opts?.lat);
     const lng = Number(opts?.lng);
+    const hourlyEligiblePartnerUids =
+      opts?.availabilityMode === 'hourly' && (opts.serviceAddress || opts.serviceArea)
+        ? (
+            await HourlyHelperAvailabilityService.findEligibleHelpers(
+              buildHourlyServiceAreaCandidates({
+                area: opts.serviceArea,
+                city,
+                address: opts.serviceAddress,
+              }),
+            )
+          ).map((helper) => helper.uid)
+        : undefined;
     const [occupied, partnerCapacityBySlot] = await Promise.all([
       getOccupiedBookNowSlots(
         date,
@@ -2190,6 +2377,7 @@ export class BookingService {
         lng: Number.isFinite(lng) ? lng : undefined,
         hourlyHelper: opts?.availabilityMode === 'hourly',
         preferredHelperGender: opts?.preferredHelperGender,
+        allowedPartnerUids: hourlyEligiblePartnerUids,
       }),
     ]);
     return {
@@ -2552,7 +2740,9 @@ export class BookingService {
         const transactionTaskIds = items.map((item) => item.taskId).filter(Boolean);
         const transactionTasks = transactionTaskIds.length
           ? await Task.find({ _id: { $in: transactionTaskIds } })
-              .select('assigneeUid estimatedDuration status executionPhase startedAt arrivedAt')
+              .select(
+                'assigneeUid estimatedDuration status executionPhase startedAt arrivedAt scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot originalScheduledDate',
+              )
               .session(transactionSession)
               .lean()
           : [];
@@ -2603,6 +2793,32 @@ export class BookingService {
         }
 
         const lastRescheduledAt = new Date();
+        const nextSchedule = {
+          scheduledDate,
+          scheduledTimeStart,
+          scheduledTimeEnd: transactionEnd,
+          timeSlot,
+        };
+        const historyMeta = {
+          rescheduledAt: lastRescheduledAt,
+          rescheduledBy: customerUid,
+          actorRole: 'customer' as const,
+          reason: params.reason,
+          chargeAmount: eligibility.chargeRequired ? eligibility.chargeAmount : undefined,
+        };
+        const previousOrderSchedule = {
+          scheduledDate: order.scheduledDate,
+          scheduledTimeStart: order.scheduledTimeStart,
+          scheduledTimeEnd: order.scheduledTimeEnd,
+          timeSlot: order.timeSlot,
+        };
+        if (!order.originalScheduledDate) {
+          Object.assign(order, buildOriginalScheduleFields(previousOrderSchedule));
+        }
+        order.rescheduleHistory = [
+          ...(order.rescheduleHistory || []),
+          buildRescheduleHistoryEntry({ previous: previousOrderSchedule, next: nextSchedule, ...historyMeta }),
+        ];
         order.scheduledDate = scheduledDate;
         order.scheduledTimeStart = scheduledTimeStart;
         order.scheduledTimeEnd = transactionEnd;
@@ -2619,23 +2835,45 @@ export class BookingService {
           await item.save({ session: transactionSession });
         }
 
-        if (transactionTaskIds.length) {
-          await Task.updateMany(
-            { _id: { $in: transactionTaskIds } },
-            {
-              $set: {
-                scheduledDate,
-                scheduledTimeStart,
-                scheduledTimeEnd: transactionEnd,
-                timeSlot,
-                dateOption: 'on-date',
-                lastRescheduledAt,
-                executionPhase: 'assigned',
-                executionPhaseUpdatedAt: lastRescheduledAt,
-              },
-              $unset: { startOtp: 1, onTheWayAt: 1, arrivedAt: 1 },
-              $inc: { rescheduleCount: 1 },
-            },
+        if (transactionTasks.length) {
+          await Task.bulkWrite(
+            transactionTasks.map((task) => {
+              const previousTaskSchedule = {
+                scheduledDate: task.scheduledDate,
+                scheduledTimeStart: task.scheduledTimeStart,
+                scheduledTimeEnd: task.scheduledTimeEnd,
+                timeSlot: task.timeSlot,
+              };
+              return {
+                updateOne: {
+                  filter: { _id: task._id },
+                  update: {
+                    $set: {
+                      scheduledDate,
+                      scheduledTimeStart,
+                      scheduledTimeEnd: transactionEnd,
+                      timeSlot,
+                      dateOption: 'on-date',
+                      lastRescheduledAt,
+                      executionPhase: 'assigned',
+                      executionPhaseUpdatedAt: lastRescheduledAt,
+                      ...(task.originalScheduledDate
+                        ? {}
+                        : buildOriginalScheduleFields(previousTaskSchedule)),
+                    },
+                    $unset: { startOtp: 1, onTheWayAt: 1, arrivedAt: 1 },
+                    $inc: { rescheduleCount: 1 },
+                    $push: {
+                      rescheduleHistory: buildRescheduleHistoryEntry({
+                        previous: previousTaskSchedule,
+                        next: nextSchedule,
+                        ...historyMeta,
+                      }),
+                    },
+                  },
+                },
+              };
+            }),
             { session: transactionSession },
           );
         }
@@ -2649,13 +2887,20 @@ export class BookingService {
     const taskId = String(updatedItems[0]?.taskId || '').trim();
     const helperUid = assignedUids[0];
     const scheduleLabel = `${dateKey} ${scheduledTimeStart}-${scheduledTimeEnd}`;
+    const serviceName = hourly
+      ? 'Hourly-Based Work'
+      : String(updatedItems[0]?.skuSnapshot?.name || '').trim() || 'service';
+    const customerTitle = hourly ? 'Hourly booking rescheduled' : 'Booking rescheduled';
+    const customerBody = `Your ${serviceName} booking was rescheduled to ${scheduleLabel}.`;
+    const helperTitle = hourly ? 'Hourly booking schedule changed' : 'Booking schedule changed';
+    const helperBody = `The customer's ${serviceName} booking moved to ${scheduleLabel}.`;
     const notificationPromises: Promise<unknown>[] = [];
     if (customerUid && taskId) {
       notificationPromises.push(
         InAppNotificationClient.send({
           userId: customerUid,
-          title: 'Hourly booking rescheduled',
-          body: `Your Hourly-Based Work booking was rescheduled to ${scheduleLabel}.`,
+          title: customerTitle,
+          body: customerBody,
           type: 'success',
           category: 'taskUpdates',
           data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
@@ -2666,8 +2911,8 @@ export class BookingService {
           actorId: customerUid,
           recipients: [customerUid],
           entity: { type: 'task', id: taskId },
-          title: 'Hourly booking rescheduled',
-          body: `Your Hourly-Based Work booking was rescheduled to ${scheduleLabel}.`,
+          title: customerTitle,
+          body: customerBody,
           data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
         }),
       );
@@ -2676,8 +2921,8 @@ export class BookingService {
       notificationPromises.push(
         InAppNotificationClient.send({
           userId: helperUid,
-          title: 'Hourly booking schedule changed',
-          body: `The customer's Hourly-Based Work booking moved to ${scheduleLabel}.`,
+          title: helperTitle,
+          body: helperBody,
           type: 'info',
           category: 'taskUpdates',
           data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
@@ -2688,8 +2933,8 @@ export class BookingService {
           actorId: customerUid,
           recipients: [helperUid],
           entity: { type: 'task', id: taskId },
-          title: 'Hourly booking schedule changed',
-          body: `The customer's Hourly-Based Work booking moved to ${scheduleLabel}.`,
+          title: helperTitle,
+          body: helperBody,
           data: { taskId, action: 'rescheduled', scheduledDate: dateKey, scheduledTimeStart },
         }),
       );

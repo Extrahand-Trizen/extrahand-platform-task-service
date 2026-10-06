@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
+import { RescheduleHistoryEntrySchema, type IRescheduleHistoryEntry } from './rescheduleHistory';
 
 export type BookingOrderStatus =
   | 'draft'
@@ -105,6 +106,10 @@ export interface IBookingOrder extends Document {
   };
   rescheduleCount?: number;
   lastRescheduledAt?: Date;
+  originalScheduledDate?: Date;
+  originalScheduledTimeStart?: string;
+  originalScheduledTimeEnd?: string;
+  rescheduleHistory?: IRescheduleHistoryEntry[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -214,6 +219,10 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     },
     rescheduleCount: { type: Number, default: 0, min: 0 },
     lastRescheduledAt: Date,
+    originalScheduledDate: Date,
+    originalScheduledTimeStart: String,
+    originalScheduledTimeEnd: String,
+    rescheduleHistory: { type: [RescheduleHistoryEntrySchema], default: undefined },
   },
   { timestamps: true }
 );

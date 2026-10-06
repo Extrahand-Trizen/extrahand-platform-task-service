@@ -42,6 +42,16 @@ export class LocationPricingController {
     res.json({ success: true, data: await LocationPricingService.listHourlySkus() });
   }
 
+  static async listPricingCategories(_req: Request, res: Response): Promise<void> {
+    res.json({ success: true, data: await LocationPricingService.listPricingCategories() });
+  }
+
+  static async listPricingSkus(req: Request, res: Response): Promise<void> {
+    const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
+    const sectionId = req.query.sectionId ? String(req.query.sectionId) : undefined;
+    res.json({ success: true, data: await LocationPricingService.listPricingSkus({ categoryId, sectionId }) });
+  }
+
   static async listHourlyPrices(req: Request, res: Response): Promise<void> {
     res.json({ success: true, data: await LocationPricingService.listHourlyPrices(req.query.skuId ? String(req.query.skuId) : undefined) });
   }

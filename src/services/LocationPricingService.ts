@@ -7,7 +7,10 @@ import LocationCityPincodeMap from '../models/LocationCityPincodeMap';
 import LocationPincodeAreaMap from '../models/LocationPincodeAreaMap';
 import HourlySkuLocationPrice, { HourlyLocationType } from '../models/HourlySkuLocationPrice';
 import ServiceSku from '../models/ServiceSku';
+import ServiceCategory from '../models/ServiceCategory';
+import BookNowHubSection from '../models/BookNowHubSection';
 import { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError';
+import { getSkuOfferPrice, type SkuPriceFields } from '../utils/skuPricing';
 
 export function normalizeLocationName(value: unknown): string {
   return String(value || '')
@@ -79,13 +82,105 @@ function pincode(value: unknown): string {
   return normalized;
 }
 
-function activeWindowFilter(now = new Date()) {
+function activeWindowConditions(now = new Date()) {
+  return [
+    { $or: [{ effectiveFrom: null }, { effectiveFrom: { $exists: false } }, { effectiveFrom: { $lte: now } }] },
+    { $or: [{ effectiveTo: null }, { effectiveTo: { $exists: false } }, { effectiveTo: { $gt: now } }] },
+  ];
+}
+
+type OrderedCandidate = { locationType: HourlyLocationType; locationId: mongoose.Types.ObjectId };
+
+export type ResolvedSkuPrice = {
+  skuId: unknown;
+  basePrice: number;
+  /** Price without any location rule; the denominator for scaling hard-coded option prices. */
+  globalOfferPrice: number;
+  effectiveOfferPrice: number;
+  pricingSource: 'global' | HourlyLocationType;
+  locationType: HourlyLocationType | null;
+  locationId: unknown;
+  pricingRuleId: unknown;
+  version: number | null;
+};
+
+export type LocationPricingContext = {
+  candidates: OrderedCandidate[];
+  resolvedLocation: Awaited<ReturnType<typeof LocationPricingService.resolveAddress>> | null;
+};
+
+export type PricedSku = SkuPriceFields & { _id: unknown };
+
+export type PricingSubcategory = {
+  id: string;
+  name: string;
+  categoryId: string;
+  sectionId?: string;
+};
+
+/** App categories such as Home Cleaning, with the subcategories shown inside them. */
+export type PricingCatalogGroup = {
+  id: string;
+  name: string;
+  subcategories: PricingSubcategory[];
+};
+
+const SECTION_NAME_PATTERNS: Record<string, RegExp> = {
+  repair: /repair|diagnosis|inspection/i,
+  servicing: /foam|servic/i,
+  'gas-refill': /gas/i,
+  'washing-machine': /washing[\s-]*machine/i,
+  refrigerator: /refrigerator|fridge/i,
+  'water-purifier': /purifier/i,
+  geyser: /geyser/i,
+};
+
+/** AC and appliance subcategories share one catalog category, so packages are split by name. */
+export function skuMatchesSection(sku: { name?: string; slug?: string }, sectionId?: string): boolean {
+  const section = String(sectionId || '').trim();
+  if (!section) return true;
+  const text = `${sku.name || ''} ${sku.slug || ''}`;
+  if (section === 'uninstall') return /uninstall/i.test(text);
+  if (section === 'install') return /install/i.test(text) && !/uninstall/i.test(text);
+  const pattern = SECTION_NAME_PATTERNS[section];
+  return pattern ? pattern.test(text) : true;
+}
+
+export type PricingSkuSummary = {
+  _id: unknown;
+  slug: string;
+  name: string;
+  categoryId: unknown;
+  pricingUnit?: string;
+  basePrice: number;
+  defaultPrice: number;
+  durationMinutes?: number;
+  isActive: boolean;
+};
+
+function toResolveAddressInput(address: any) {
   return {
-    isActive: true,
-    $and: [
-      { $or: [{ effectiveFrom: null }, { effectiveFrom: { $exists: false } }, { effectiveFrom: { $lte: now } }] },
-      { $or: [{ effectiveTo: null }, { effectiveTo: { $exists: false } }, { effectiveTo: { $gt: now } }] },
-    ],
+    area: address.area || address.addressDetails?.area || address.line2,
+    pincode: address.pinCode || address.pincode || address.addressDetails?.pinCode,
+    city: address.city || address.addressDetails?.city,
+    state: address.state || address.addressDetails?.state,
+    coordinates: address.coordinates,
+    rawAddress: address.rawAddress || address.displayAddress || address.fullAddress || address.line1 || address.address || address.formattedAddress,
+  };
+}
+
+function globalPrice(sku: PricedSku): ResolvedSkuPrice {
+  const effective = getSkuOfferPrice(sku);
+  return {
+    skuId: sku._id,
+    basePrice: Math.max(0, Number(sku.basePrice || 0)),
+    globalOfferPrice: effective,
+    effectiveOfferPrice: effective,
+    pricingSource: 'global',
+    locationType: null,
+    locationId: null,
+    pricingRuleId: null,
+    version: null,
   };
 }
 
@@ -276,10 +371,139 @@ export class LocationPricingService {
     return ServiceSku.find({ pricingUnit: 'hourly' }).sort({ durationMinutes: 1, name: 1 }).lean();
   }
 
-  static async listHourlyPrices(skuId?: string) {
+  static async listPricingCategories(): Promise<PricingCatalogGroup[]> {
+    const [hubSections, categories, counts] = await Promise.all([
+      BookNowHubSection.find({ isActive: true }).sort({ sortOrder: 1, title: 1 }).lean(),
+      ServiceCategory.find({ isActive: true }).select({ _id: 1, slug: 1, name: 1 }).lean(),
+      ServiceSku.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
+        { $match: { isActive: true } },
+        { $group: { _id: '$categoryId', count: { $sum: 1 } } },
+      ]),
+    ]);
+    const countByCategory = new Map(counts.map((item) => [String(item._id), item.count]));
+    const categoryBySlug = new Map(categories.map((category) => [category.slug, category]));
+    const coveredCategoryIds = new Set<string>();
+
+    const groups = hubSections.map((section) => {
+      const subcategories = [...section.services]
+        .filter((service) => service.isActive !== false)
+        .sort((left, right) => (left.sortOrder || 0) - (right.sortOrder || 0))
+        .flatMap((service) => {
+          const category = categoryBySlug.get(service.categorySlug);
+          if (!category || (countByCategory.get(String(category._id)) || 0) === 0) return [];
+          coveredCategoryIds.add(String(category._id));
+          return [{
+            id: service.serviceId,
+            name: service.label,
+            categoryId: String(category._id),
+            ...(service.sectionId ? { sectionId: service.sectionId } : {}),
+          }];
+        });
+      return { id: section.slug, name: section.title, subcategories };
+    }).filter((group) => group.subcategories.length > 0);
+
+    const groupedIds = new Set(groups.map((group) => group.id));
+    const groupedNames = new Set(groups.map((group) => group.name.trim().toLowerCase()));
+    const ungrouped = categories
+      .filter((category) => {
+        if (coveredCategoryIds.has(String(category._id)) || (countByCategory.get(String(category._id)) || 0) === 0) return false;
+        const name = (category.slug === 'hourly-helper' ? 'Hourly Helper' : category.name).trim().toLowerCase();
+        // A leftover catalog category can share the hub slug (home-cleaning) and would duplicate the parent.
+        return !groupedIds.has(category.slug) && !groupedNames.has(name);
+      })
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((category) => ({
+        id: category.slug,
+        name: category.slug === 'hourly-helper' ? 'Hourly Helper' : category.name,
+        subcategories: [{
+          id: category.slug,
+          name: category.slug === 'hourly-helper' ? 'Hourly Helper' : category.name,
+          categoryId: String(category._id),
+        }],
+      }));
+
+    return [...groups, ...ungrouped];
+  }
+
+  static async listPricingSkus(params: { categoryId?: string; sectionId?: string }): Promise<PricingSkuSummary[]> {
+    const query: any = {};
+    if (params.categoryId) query.categoryId = objectId(params.categoryId, 'categoryId');
+    const skus = await ServiceSku.find(query)
+      .select({ _id: 1, slug: 1, name: 1, categoryId: 1, pricingUnit: 1, basePrice: 1, offerPrice: 1, offerDiscountType: 1, offerDiscountValue: 1, isOfferActive: 1, durationMinutes: 1, isActive: 1 })
+      .sort({ durationMinutes: 1, name: 1 })
+      .lean();
+    const visibleSkus = params.sectionId
+      ? skus.filter((sku) => skuMatchesSection(sku, params.sectionId))
+      : skus;
+    return visibleSkus.map((sku) => ({
+      _id: sku._id,
+      slug: sku.slug,
+      name: sku.name,
+      categoryId: sku.categoryId,
+      pricingUnit: sku.pricingUnit,
+      basePrice: sku.basePrice,
+      defaultPrice: getSkuOfferPrice(sku),
+      durationMinutes: sku.durationMinutes,
+      isActive: sku.isActive,
+    }));
+  }
+
+  /** Rules are returned with a SKU summary so the portal can list prices across every category. */
+  static async listHourlyPrices(skuId?: string): Promise<Array<Record<string, unknown> & { sku: (PricingSkuSummary & { categorySlug: string; categoryName: string; parentCategoryId: string; parentCategoryName: string; subcategoryId: string; subcategoryName: string }) | null }>> {
     const query: any = {};
     if (skuId) query.skuId = objectId(skuId, 'skuId');
-    return HourlySkuLocationPrice.find(query).sort({ skuId: 1, locationType: 1 }).lean();
+    const rules = await HourlySkuLocationPrice.find(query).sort({ skuId: 1, locationType: 1 }).lean();
+    const skus = await ServiceSku.find({ _id: { $in: [...new Set(rules.map((rule) => String(rule.skuId)))] } })
+      .select({ _id: 1, slug: 1, name: 1, categoryId: 1, pricingUnit: 1, basePrice: 1, offerPrice: 1, offerDiscountType: 1, offerDiscountValue: 1, isOfferActive: 1, durationMinutes: 1, isActive: 1 })
+      .lean();
+    const [categories, hubSections] = await Promise.all([
+      ServiceCategory.find({ _id: { $in: [...new Set(skus.map((sku) => String(sku.categoryId)))] } })
+        .select({ _id: 1, slug: 1, name: 1 })
+        .lean(),
+      BookNowHubSection.find({ isActive: true }).select({ slug: 1, title: 1, services: 1 }).lean(),
+    ]);
+    const categoryById = new Map(categories.map((category) => [String(category._id), category]));
+    const hubServices = hubSections.flatMap((section) =>
+      section.services.map((service) => ({
+        parentId: section.slug,
+        parentName: section.title,
+        subcategoryId: service.serviceId,
+        subcategoryName: service.label,
+        categorySlug: service.categorySlug,
+        sectionId: service.sectionId,
+      })),
+    );
+    const skuById = new Map(skus.map((sku) => [String(sku._id), sku]));
+    return rules.map((rule) => {
+      const sku = skuById.get(String(rule.skuId));
+      const category = sku ? categoryById.get(String(sku.categoryId)) : undefined;
+      const placement = sku && category
+        ? hubServices.find((service) => service.categorySlug === category.slug && skuMatchesSection(sku, service.sectionId) && service.sectionId)
+          || hubServices.find((service) => service.categorySlug === category.slug && skuMatchesSection(sku, service.sectionId))
+        : undefined;
+      return {
+        ...(rule as Record<string, unknown>),
+        sku: sku
+          ? {
+              _id: sku._id,
+              slug: sku.slug,
+              name: sku.name,
+              pricingUnit: sku.pricingUnit,
+              basePrice: sku.basePrice,
+              defaultPrice: getSkuOfferPrice(sku),
+              durationMinutes: sku.durationMinutes,
+              isActive: sku.isActive,
+              categoryId: sku.categoryId,
+              categorySlug: category?.slug || '',
+              categoryName: category?.name || '',
+              parentCategoryId: placement?.parentId || category?.slug || '',
+              parentCategoryName: placement?.parentName || (category?.slug === 'hourly-helper' ? 'Hourly Helper' : category?.name || ''),
+              subcategoryId: placement?.subcategoryId || category?.slug || '',
+              subcategoryName: placement?.subcategoryName || category?.name || '',
+            }
+          : null,
+      };
+    });
   }
 
   static async createHourlyPrice(body: any) {
@@ -289,8 +513,8 @@ export class LocationPricingService {
     if (!['area', 'pincode', 'city'].includes(locationType)) throw new BadRequestError('Invalid locationType');
     const offerPrice = Number(body.offerPrice);
     if (!Number.isFinite(offerPrice) || offerPrice < 0) throw new BadRequestError('offerPrice must be a non-negative number');
-    const sku = await ServiceSku.findOne({ _id: skuObjectId, pricingUnit: 'hourly', isActive: true }).lean();
-    if (!sku) throw new NotFoundError('Active hourly SKU not found');
+    const sku = await ServiceSku.findOne({ _id: skuObjectId, isActive: true }).lean();
+    if (!sku) throw new NotFoundError('Active service SKU not found');
     const locationExists = locationType === 'area'
       ? await LocationArea.exists({ _id: locationObjectId, isActive: true })
       : locationType === 'city'
@@ -320,9 +544,86 @@ export class LocationPricingService {
 
   static async resolveHourlyPrice(body: any) {
     const skuId = objectId(body.skuId, 'skuId');
-    const sku = await ServiceSku.findOne({ _id: skuId, pricingUnit: 'hourly', isActive: true }).lean();
-    if (!sku) throw new NotFoundError('Active hourly SKU not found');
+    const sku = await ServiceSku.findOne({ _id: skuId, isActive: true }).lean();
+    if (!sku) throw new NotFoundError('Active service SKU not found');
+    const candidates = await this.buildOrderedCandidates(body);
+    const resolved = (await this.priceSkusWithCandidates([sku], candidates)).get(String(sku._id)) ?? globalPrice(sku);
+    return { ...resolved, basePrice: sku.basePrice };
+  }
 
+  static async resolveHourlyPriceForAddress(params: { skuId: unknown; address?: any }) {
+    const context = await this.buildPricingContext(params.address || {});
+    const pricing = await this.resolveHourlyPrice({
+      skuId: params.skuId,
+      areaId: context.resolvedLocation?.areaId,
+      pincodeId: context.resolvedLocation?.pincodeId,
+      cityId: context.resolvedLocation?.cityId,
+    });
+    return { ...pricing, resolvedLocation: context.resolvedLocation };
+  }
+
+  /** Resolve the address once so many SKUs can be priced for it with a single rules query. */
+  static async buildPricingContext(address: any): Promise<LocationPricingContext> {
+    const resolvedLocation = await this.resolveAddress(toResolveAddressInput(address || {}));
+    const candidates = await this.buildOrderedCandidates({
+      areaId: resolvedLocation.areaId,
+      pincodeId: resolvedLocation.pincodeId,
+      cityId: resolvedLocation.cityId,
+    });
+    return { candidates, resolvedLocation };
+  }
+
+  /** Every SKU gets an entry; SKUs without an applicable rule fall back to their default price. */
+  static async priceSkus(skus: PricedSku[], context: LocationPricingContext): Promise<Map<string, ResolvedSkuPrice>> {
+    const matched = await this.priceSkusWithCandidates(skus, context.candidates);
+    return new Map(skus.map((sku) => [String(sku._id), matched.get(String(sku._id)) ?? globalPrice(sku)]));
+  }
+
+  static async priceSkusForAddress(skus: PricedSku[], address: any): Promise<Map<string, ResolvedSkuPrice>> {
+    if (skus.length === 0) return new Map();
+    return this.priceSkus(skus, await this.buildPricingContext(address));
+  }
+
+  private static async priceSkusWithCandidates(skus: PricedSku[], candidates: OrderedCandidate[]): Promise<Map<string, ResolvedSkuPrice>> {
+    const result = new Map<string, ResolvedSkuPrice>();
+    if (skus.length === 0 || candidates.length === 0) return result;
+
+    const rules = await HourlySkuLocationPrice.find({
+      skuId: { $in: skus.map((sku) => sku._id) },
+      isActive: true,
+      $and: [
+        ...activeWindowConditions(),
+        { $or: candidates.map((candidate) => ({ locationType: candidate.locationType, locationId: candidate.locationId })) },
+      ],
+    }).sort({ version: -1 }).lean();
+
+    const ruleByKey = new Map<string, (typeof rules)[number]>();
+    for (const rule of rules) {
+      const key = `${String(rule.skuId)}:${rule.locationType}:${String(rule.locationId)}`;
+      if (!ruleByKey.has(key)) ruleByKey.set(key, rule);
+    }
+
+    for (const sku of skus) {
+      for (const candidate of candidates) {
+        const rule = ruleByKey.get(`${String(sku._id)}:${candidate.locationType}:${String(candidate.locationId)}`);
+        if (!rule) continue;
+        const fallback = globalPrice(sku);
+        result.set(String(sku._id), {
+          ...fallback,
+          effectiveOfferPrice: rule.offerPrice,
+          pricingSource: candidate.locationType,
+          locationType: candidate.locationType,
+          locationId: rule.locationId,
+          pricingRuleId: rule._id,
+          version: rule.version,
+        });
+        break;
+      }
+    }
+    return result;
+  }
+
+  private static async buildOrderedCandidates(body: any): Promise<OrderedCandidate[]> {
     const locationIds = buildLocationPriceCandidateOrder({
       areaId: body.areaId,
       pincodeId: body.pincodeId,
@@ -364,35 +665,7 @@ export class LocationPricingService {
       }
     }
 
-    const orderedCandidates = [...directCandidates, ...sameNameFallback.filter((candidate) => !directCandidates.some((item) => String(item.locationId) === String(candidate.locationId) && item.locationType === candidate.locationType))];
-
-    for (const item of orderedCandidates) {
-      const rule = await HourlySkuLocationPrice.findOne({ skuId, locationType: item.locationType, locationId: item.locationId, ...activeWindowFilter() }).sort({ version: -1 }).lean();
-      if (rule) return { skuId: sku._id, basePrice: sku.basePrice, effectiveOfferPrice: rule.offerPrice, pricingSource: item.locationType, locationType: item.locationType, locationId: rule.locationId, pricingRuleId: rule._id, version: rule.version };
-    }
-    const basePrice = Number(sku.basePrice || 0);
-    const globalOffer = Number(sku.offerPrice || 0);
-    const effectiveOfferPrice = globalOffer > 0 && globalOffer !== basePrice ? Math.round(globalOffer) : basePrice;
-    return { skuId: sku._id, basePrice, effectiveOfferPrice, pricingSource: 'global', locationType: null, locationId: null, pricingRuleId: null, version: null };
-  }
-
-  static async resolveHourlyPriceForAddress(params: { skuId: unknown; address?: any }) {
-    const address = params.address || {};
-    const resolved = await this.resolveAddress({
-      area: address.area || address.addressDetails?.area || address.line2,
-      pincode: address.pinCode || address.pincode || address.addressDetails?.pinCode,
-      city: address.city || address.addressDetails?.city,
-      state: address.state || address.addressDetails?.state,
-      coordinates: address.coordinates,
-      rawAddress: address.rawAddress || address.displayAddress || address.fullAddress || address.line1 || address.address || address.formattedAddress,
-    });
-    const pricing = await this.resolveHourlyPrice({
-      skuId: params.skuId,
-      areaId: resolved.areaId,
-      pincodeId: resolved.pincodeId,
-      cityId: resolved.cityId,
-    });
-    return { ...pricing, resolvedLocation: resolved };
+    return [...directCandidates, ...sameNameFallback.filter((candidate) => !directCandidates.some((item) => String(item.locationId) === String(candidate.locationId) && item.locationType === candidate.locationType))];
   }
 
   static async resolveAddress(body: any) {

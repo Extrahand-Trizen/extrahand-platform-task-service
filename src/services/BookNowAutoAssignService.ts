@@ -12,6 +12,8 @@ import { partnerCategoryMatchesBookNowTask } from './partnerVisibility';
 import { notifyBookNowAssignment } from './AssignmentService';
 import AssignmentManagementRules from '../models/AssignmentManagementRules';
 import { workShiftsCoverInterval } from '../utils/bookNowSlotAvailability';
+import { buildHourlyServiceAreaCandidates } from '../utils/hourlyHelperServiceArea';
+import { matchEligibleHourlyHelperArea } from './HourlyHelperAvailabilityService';
 
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
 const WORK_AREA_COORDS = HYDERABAD_WORK_AREA_COORDS;
@@ -750,6 +752,9 @@ export class BookNowAutoAssignService {
     }
 
     const isHourly = isHourlyTask(task);
+    if (isHourly) {
+      return BookNowAutoAssignService.findBestHourlyHelper(task, profiles, taskCoords);
+    }
     const preferredGender = resolvePreferredHelperGender(task);
     const orderedWorkAreas = buildOrderedWorkAreasForDispatch(task);
 
@@ -815,6 +820,51 @@ export class BookNowAutoAssignService {
     }
 
     return null;
+  }
+
+  /** Hourly Helper: exact named-area match only (no nearby-area expansion). */
+  private static findBestHourlyHelper(
+    task: ITask,
+    profiles: Record<string, unknown>[],
+    taskCoords: { lng: number; lat: number } | null,
+  ): EligiblePartner | null {
+    const location = (task.location || {}) as Record<string, unknown>;
+    const candidates = buildHourlyServiceAreaCandidates({
+      area: location.taskArea as string | undefined,
+      city: location.city as string | undefined,
+      state: location.state as string | undefined,
+      address: location.address as string | undefined,
+    });
+    const preferredGender = resolvePreferredHelperGender(task);
+    const eligible: EligiblePartner[] = [];
+
+    for (const p of profiles) {
+      const matchedArea = matchEligibleHourlyHelperArea(p, candidates);
+      if (!matchedArea) continue;
+
+      const pp = (p.partnerProfile as Record<string, unknown>) || {};
+      const workShifts: string[] = Array.isArray(pp.workShifts) ? (pp.workShifts as string[]) : [];
+      if (!checkTimingMatch(workShifts, task)) continue;
+
+      const partnerGender = readPartnerGender(p);
+      if (preferredGender && normalizePartnerGender(partnerGender) !== preferredGender) continue;
+
+      eligible.push({
+        uid: String(p.uid),
+        profileId: String(p._id),
+        name: String(p.name || p.fullName || 'Partner'),
+        distKm: resolvePartnerDistanceKm(taskCoords, p),
+        workArea: matchedArea,
+        workAreaDistKm: 0,
+        gender: partnerGender,
+      });
+    }
+
+    if (!eligible.length) return null;
+    if (preferredGender) {
+      return sortPartnersByDistance(eligible)[0];
+    }
+    return sortPartnersByPreferenceThenDistance(eligible, preferredGender)[0];
   }
 
   private static findBestPartnerForConsultation(

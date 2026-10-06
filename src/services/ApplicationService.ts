@@ -23,6 +23,7 @@ import {
   taskerHasBlockingActiveTask,
 } from "../utils/taskCommitment";
 import { RecurringVisitService } from "./RecurringVisitService";
+import { resolveRecurringAcceptedOfferAmount } from "./recurringVisitPaymentBinding";
 import { isRecurringVisitPlanTask } from "../utils/recurringVisitMeta";
 import { ApplicantProfileSnapshot, ProfileUtils } from "../utils/ProfileUtils";
 import { NegotiationUtils } from "../utils/NegotiationUtils";
@@ -803,6 +804,7 @@ export class ApplicationService {
           paymentConfirmed?: boolean;
         }
       | undefined;
+    let recurringAcceptedAmount: number | undefined;
 
     // Validate status transition
     if (status === "accepted") {
@@ -847,20 +849,42 @@ export class ApplicationService {
       const applicantProfile = await Profile.findOne({ _id: application.applicantId });
 
       if (isVisitPlan) {
-        const effectiveAcceptedAmount =
-          Number(application.negotiation?.currentAmount) > 0
-            ? Number(application.negotiation?.currentAmount)
-            : application.proposedBudget.amount;
+        const effectiveAcceptedAmount = resolveRecurringAcceptedOfferAmount(
+          application as unknown as Parameters<typeof resolveRecurringAcceptedOfferAmount>[0],
+        );
+        recurringAcceptedAmount = effectiveAcceptedAmount;
 
-        recurringVisitPayment = await RecurringVisitService.activatePlanOnApplicationAccept({
-          task,
-          applicationId,
-          applicantProfileId: application.applicantId,
-          applicantUid: applicantProfile?.uid || "",
-          acceptedAmount: effectiveAcceptedAmount,
-          preferredVisitId: recurringVisitId,
-          assignmentEscrowId,
-        });
+        // Atomic claim: concurrent accepts of different applications cannot both assign the plan.
+        const claim = await Task.updateOne(
+          {
+            _id: task._id,
+            $or: [{ assigneeId: null }, { assigneeId: application.applicantId }],
+          },
+          { $set: { assigneeId: application.applicantId } },
+        );
+        if (claim.matchedCount === 0) {
+          throw new ConflictError(
+            "Another helper has already been accepted for this recurring work."
+          );
+        }
+
+        try {
+          recurringVisitPayment = await RecurringVisitService.activatePlanOnApplicationAccept({
+            task,
+            applicationId,
+            applicantProfileId: application.applicantId,
+            applicantUid: applicantProfile?.uid || "",
+            acceptedAmount: effectiveAcceptedAmount,
+            preferredVisitId: recurringVisitId,
+            assignmentEscrowId,
+          });
+        } catch (error) {
+          await Task.updateOne(
+            { _id: task._id, assigneeId: application.applicantId, status: { $ne: "assigned" } },
+            { $unset: { assigneeId: "" } },
+          ).catch(() => undefined);
+          throw error;
+        }
 
         logger.info(
           recurringVisitPayment.paymentConfirmed
@@ -954,9 +978,10 @@ export class ApplicationService {
     }
     if (application.status === "accepted") {
       const effectiveAcceptedAmount =
-        Number(application.negotiation.currentAmount) > 0
+        recurringAcceptedAmount ??
+        (Number(application.negotiation.currentAmount) > 0
           ? Number(application.negotiation.currentAmount)
-          : application.proposedBudget.amount;
+          : application.proposedBudget.amount);
       application.negotiation.currentAmount = effectiveAcceptedAmount;
       application.negotiation.finalAmount = effectiveAcceptedAmount;
       application.negotiation.status = "accepted";

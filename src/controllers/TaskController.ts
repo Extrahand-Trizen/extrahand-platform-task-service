@@ -4,8 +4,9 @@ import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
 import Task from '../models/Task';
 import { ApplicationService } from '../services/ApplicationService';
-import { BadRequestError } from '../errors/AppError';
+import { BadRequestError, ConflictError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
+import { getRedisClient } from '../config/redis';
 import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
 import { getMeaningfulTextError } from '../utils/textValidation';
 import logger from '../config/logger';
@@ -282,13 +283,45 @@ export class TaskController {
       throw new BadRequestError(PHONE_NUMBER_ERROR);
     }
 
+    const idempotencyKey = String(req.headers['idempotency-key'] || '').trim().slice(0, 128);
+    const redis = idempotencyKey ? getRedisClient() : null;
+    const idemRedisKey = `task:create:idem:${String(req.user!.profileId)}:${idempotencyKey}`;
+    if (redis) {
+      // Same key from the same poster = same submission (client retry after timeout / double tap).
+      const claimed = await redis.set(idemRedisKey, 'pending', 'EX', 600, 'NX').catch(() => 'OK');
+      if (claimed !== 'OK') {
+        const existingId = await redis.get(idemRedisKey).catch(() => null);
+        if (existingId && existingId !== 'pending') {
+          const existing = await TaskService.getTaskById(existingId).catch(() => null);
+          if (existing) {
+            ApiResponse.created(res, existing, 'Task created successfully');
+            return;
+          }
+        }
+        throw new ConflictError('This work is already being posted. Please wait a moment.');
+      }
+    }
+
     // Pass both profileId (ObjectId) and uid (Firebase UID string)
     // profileId is used for database references, uid is used for notifications (actorId)
-    const task = await TaskService.createTask(
-      req.user!.profileId,
-      req.body,
-      req.user!.uid // Firebase UID for notification actorId
-    );
+    let task: Awaited<ReturnType<typeof TaskService.createTask>>;
+    try {
+      task = await TaskService.createTask(
+        req.user!.profileId,
+        req.body,
+        req.user!.uid // Firebase UID for notification actorId
+      );
+    } catch (error) {
+      if (redis) await redis.del(idemRedisKey).catch(() => undefined);
+      throw error;
+    }
+
+    if (redis) {
+      const createdId = String((task as { _id?: unknown; id?: unknown })._id ?? (task as { id?: unknown }).id ?? '');
+      if (createdId) {
+        await redis.set(idemRedisKey, createdId, 'EX', 24 * 60 * 60).catch(() => undefined);
+      }
+    }
 
     ApiResponse.created(res, task, 'Task created successfully');
   }
@@ -336,6 +369,7 @@ export class TaskController {
       scheduledTimeStart: req.body?.scheduledTimeStart,
       scheduledTimeEnd: req.body?.scheduledTimeEnd,
       reason: req.body?.reason,
+      actorUid: req.user!.uid,
     });
     ApiResponse.success(res, task, 'Task rescheduled successfully');
   }

@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Task, { ITask } from "../models/Task";
+import { buildOriginalScheduleFields, buildRescheduleHistoryEntry } from "../models/rescheduleHistory";
 import {
   BadRequestError,
   NotFoundError,
@@ -33,6 +34,7 @@ import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
+import { recurringVisitConfig } from '../config/recurringVisitConfig';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { BookNowAutoAssignService, isHourlyTask } from './BookNowAutoAssignService';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
@@ -411,7 +413,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce rescheduleCount isDeletedByCustomer isDeletedBySupport';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce rescheduleCount lastRescheduledAt originalScheduledDate originalScheduledTimeStart originalScheduledTimeEnd isDeletedByCustomer isDeletedBySupport';
 
 async function enrichBookNowTaskScheduleFromBooking(task: ITask): Promise<ITask> {
   if (!isBookNowTaskForCompletion(task)) return task;
@@ -1068,7 +1070,7 @@ export class TaskService {
     );
     if (bookingOrderIds.length > 0) {
       const bookingOrders = await BookingOrder.find({ orderId: { $in: bookingOrderIds } })
-        .select('orderId total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount')
+        .select('orderId total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount originalScheduledDate originalScheduledTimeStart originalScheduledTimeEnd')
         .lean();
       const bookingById = new Map(bookingOrders.map((order) => [order.orderId, order]));
       enrichedTasks = enrichedTasks.map((task) => {
@@ -1084,6 +1086,9 @@ export class TaskService {
           Number(row.rescheduleCount || 0),
           Number(order.rescheduleCount || 0),
         );
+        row.originalScheduledDate ??= order.originalScheduledDate;
+        row.originalScheduledTimeStart ??= order.originalScheduledTimeStart;
+        row.originalScheduledTimeEnd ??= order.originalScheduledTimeEnd;
         return row;
       });
     }
@@ -1179,7 +1184,7 @@ export class TaskService {
     const bookingOrderIdForDetail = String(taskDetails.bookingOrderId || '').trim();
     if (bookingOrderIdForDetail) {
       const bookingOrder = await BookingOrder.findOne({ orderId: bookingOrderIdForDetail })
-        .select('orderId subtotal total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount')
+        .select('orderId subtotal total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount originalScheduledDate originalScheduledTimeStart originalScheduledTimeEnd rescheduleHistory')
         .lean();
       if (bookingOrder) {
         taskDetails.bookingOrderTotal = Number(
@@ -1192,6 +1197,10 @@ export class TaskService {
         taskDetails.scheduledTimeStart ??= bookingOrder.scheduledTimeStart;
         taskDetails.scheduledTimeEnd ??= bookingOrder.scheduledTimeEnd;
         taskDetails.timeSlot ??= bookingOrder.timeSlot;
+        taskDetails.originalScheduledDate ??= bookingOrder.originalScheduledDate;
+        taskDetails.originalScheduledTimeStart ??= bookingOrder.originalScheduledTimeStart;
+        taskDetails.originalScheduledTimeEnd ??= bookingOrder.originalScheduledTimeEnd;
+        taskDetails.rescheduleHistory ??= bookingOrder.rescheduleHistory;
       }
     }
 
@@ -1228,11 +1237,11 @@ export class TaskService {
     }
 
     if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
-      const planDoc = await Task.findById(taskId);
-      if (planDoc) {
-        void RecurringVisitService.sanitizeOrphanedScheduleChildReferences(planDoc);
-      }
-      void RecurringVisitService.scheduleReconcilePlanState(taskId);
+      // Background repair only (reconcile also clears orphaned child links); throttled per plan
+      // so detail polling never turns into repeated whole-plan reconciles.
+      void RecurringVisitService.scheduleReconcilePlanState(taskId, {
+        cooldownSeconds: recurringVisitConfig.readReconcileCooldownSeconds,
+      });
 
       const taskRecord = task as unknown as Record<string, unknown>;
       const embeddedSchedule = Array.isArray(task.schedule) ? task.schedule : [];
@@ -2149,6 +2158,7 @@ export class TaskService {
       scheduledTimeStart?: string;
       scheduledTimeEnd?: string;
       reason?: string;
+      actorUid?: string;
     },
   ): Promise<ITask> {
     const eligibility = await TaskService.getRescheduleEligibility(taskId, profileId);
@@ -2168,12 +2178,34 @@ export class TaskService {
       throw new ForbiddenError('Not authorized to reschedule this task');
     }
 
+    const rescheduledAt = new Date();
+    const previousSchedule = {
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+      scheduledTimeEnd: task.scheduledTimeEnd,
+      timeSlot: task.timeSlot,
+    };
+    if (!task.originalScheduledDate) {
+      Object.assign(task, buildOriginalScheduleFields(previousSchedule));
+    }
+    task.rescheduleHistory = [
+      ...(task.rescheduleHistory || []),
+      buildRescheduleHistoryEntry({
+        previous: previousSchedule,
+        next: { scheduledDate, scheduledTimeStart, scheduledTimeEnd, timeSlot: task.timeSlot },
+        rescheduledAt,
+        rescheduledBy: params.actorUid || String(profileId),
+        actorRole: 'customer',
+        reason: params.reason,
+        chargeAmount: eligibility.chargeRequired ? eligibility.chargeAmount : undefined,
+      }),
+    ];
     task.scheduledDate = scheduledDate;
     task.scheduledTimeStart = scheduledTimeStart;
     task.scheduledTimeEnd = scheduledTimeEnd;
     task.dateOption = 'on-date';
     task.rescheduleCount = Number(task.rescheduleCount || 0) + 1;
-    task.lastRescheduledAt = new Date();
+    task.lastRescheduledAt = rescheduledAt;
     const helperCommitted = Boolean(task.assigneeId || task.assigneeUid || task.executionPhase);
     if (helperCommitted) {
       task.executionPhase = 'assigned';
@@ -2804,12 +2836,12 @@ export class TaskService {
       isRecurringVisitPlanTask(task as unknown as Record<string, unknown>) &&
       !task.parentTaskId
     ) {
-      const workChild = await RecurringVisitService.resolveActiveWorkChildTask(task);
-      if (workChild) {
+      const workChild = await RecurringVisitService.resolveWorkStartTaskOrSelf(task);
+      if (workChild.parentTaskId) {
         return TaskService.updateTaskStatus(String(workChild._id), profileId, status, options);
       }
       throw new BadRequestError(
-        "Recurring visit work must be started on the paid visit task, not the plan"
+        "Visit payment must be completed before the helper can start work"
       );
     }
 
@@ -3690,7 +3722,7 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const workTask = await RecurringVisitService.resolveWorkStartTaskOrSelf(task);
     const effectiveTaskId = String(workTask._id);
 
     const isPerformer = workTask.assigneeId?.equals(profileId) || false;
@@ -3928,7 +3960,7 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const workTask = await RecurringVisitService.resolveWorkStartTaskOrSelf(task);
     const effectiveTaskId = String(workTask._id);
 
     const isPerformer = workTask.assigneeId?.equals(profileId) || false;

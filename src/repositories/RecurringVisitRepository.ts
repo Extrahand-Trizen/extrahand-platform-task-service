@@ -1,9 +1,6 @@
 import mongoose from 'mongoose';
 import RecurringVisit, { type IRecurringVisit } from '../models/RecurringVisit';
-import {
-  BUFFER_COUNTED_VISIT_STATUSES,
-  isBufferCountedVisitStatus,
-} from '../config/recurringVisitConfig';
+import { BUFFER_COUNTED_VISIT_STATUSES } from '../config/recurringVisitConfig';
 
 export type RecurringVisitDoc = IRecurringVisit;
 export type RecurringVisitLean = Omit<IRecurringVisit, keyof mongoose.Document> & {
@@ -27,17 +24,6 @@ function toObjectId(id: string | mongoose.Types.ObjectId): mongoose.Types.Object
 }
 
 export class RecurringVisitRepository {
-  static async createVisit(input: RecurringVisitUpsertInput): Promise<RecurringVisitLean> {
-    const doc = await RecurringVisit.create(input);
-    return doc.toObject() as RecurringVisitLean;
-  }
-
-  static async createVisits(inputs: RecurringVisitUpsertInput[]): Promise<number> {
-    if (inputs.length === 0) return 0;
-    const result = await RecurringVisit.insertMany(inputs, { ordered: false });
-    return result.length;
-  }
-
   static async upsertVisits(inputs: RecurringVisitUpsertInput[]): Promise<{ upserted: number }> {
     if (inputs.length === 0) return { upserted: 0 };
 
@@ -63,10 +49,61 @@ export class RecurringVisitRepository {
     };
   }
 
-  static async findByVisitId(visitId: string): Promise<RecurringVisitLean | null> {
-    return RecurringVisit.findOne({ visitId: visitId.trim() })
+  /**
+   * Optimistic single-visit write: applies only when the row still carries the `updatedAt`
+   * it was read with. Returns false when another writer changed the visit first.
+   */
+  static async updateVisitIfUnchanged(
+    parentTaskId: mongoose.Types.ObjectId,
+    visitId: string,
+    expectedUpdatedAt: Date | null,
+    fields: Record<string, unknown>,
+    unsetFields: string[],
+    updatedAt: Date,
+  ): Promise<boolean> {
+    const update: Record<string, unknown> = { $set: { ...fields, updatedAt } };
+    if (unsetFields.length > 0) {
+      update.$unset = Object.fromEntries(unsetFields.map((key) => [key, '']));
+    }
+    const result = await RecurringVisit.updateOne(
+      { parentTaskId, visitId, updatedAt: expectedUpdatedAt },
+      update,
+      { timestamps: false },
+    );
+    return (result.matchedCount ?? 0) > 0;
+  }
+
+  /** Insert-only upsert: never overwrites a visit that already exists. */
+  static async insertVisitsIfMissing(inputs: RecurringVisitUpsertInput[]): Promise<void> {
+    if (inputs.length === 0) return;
+    const now = new Date();
+    await RecurringVisit.bulkWrite(
+      inputs.map((row) => ({
+        updateOne: {
+          filter: { parentTaskId: row.parentTaskId, visitId: row.visitId },
+          update: {
+            $setOnInsert: {
+              ...row,
+              createdAt: row.createdAt ?? now,
+              updatedAt: now,
+            },
+          },
+          upsert: true,
+          timestamps: false,
+        },
+      })),
+      { ordered: false },
+    );
+  }
+
+  static async listByParentAndVisitIds(
+    parentTaskId: mongoose.Types.ObjectId,
+    visitIds: string[],
+  ): Promise<RecurringVisitLean[]> {
+    if (visitIds.length === 0) return [];
+    return RecurringVisit.find({ parentTaskId, visitId: { $in: visitIds } })
       .select(DEFAULT_LIST_SELECT)
-      .lean() as Promise<RecurringVisitLean | null>;
+      .lean() as Promise<RecurringVisitLean[]>;
   }
 
   static async findByParentAndVisitId(
@@ -81,18 +118,6 @@ export class RecurringVisitRepository {
       .lean() as Promise<RecurringVisitLean | null>;
   }
 
-  static async findByParentAndIndex(
-    parentTaskId: string | mongoose.Types.ObjectId,
-    visitIndex: number,
-  ): Promise<RecurringVisitLean | null> {
-    return RecurringVisit.findOne({
-      parentTaskId: toObjectId(parentTaskId),
-      visitIndex,
-    })
-      .select(DEFAULT_LIST_SELECT)
-      .lean() as Promise<RecurringVisitLean | null>;
-  }
-
   static async listByParent(
     parentTaskId: string | mongoose.Types.ObjectId,
     options?: { select?: string },
@@ -101,20 +126,6 @@ export class RecurringVisitRepository {
       .select(options?.select || DEFAULT_LIST_SELECT)
       .sort({ visitIndex: 1, date: 1 })
       .lean() as Promise<RecurringVisitLean[]>;
-  }
-
-  static async listUpcoming(
-    parentTaskId: string | mongoose.Types.ObjectId,
-    limit?: number,
-  ): Promise<RecurringVisitLean[]> {
-    const q = RecurringVisit.find({
-      parentTaskId: toObjectId(parentTaskId),
-      status: { $in: [...BUFFER_COUNTED_VISIT_STATUSES] },
-    })
-      .select(DEFAULT_LIST_SELECT)
-      .sort({ date: 1, visitIndex: 1 });
-    if (limit) q.limit(limit);
-    return q.lean() as Promise<RecurringVisitLean[]>;
   }
 
   static async listPaymentPending(
@@ -178,59 +189,6 @@ export class RecurringVisitRepository {
       .lean() as Promise<RecurringVisitLean | null>;
   }
 
-  static async updateVisitStatus(
-    parentTaskId: string | mongoose.Types.ObjectId,
-    visitId: string,
-    status: IRecurringVisit['status'],
-    extra?: Partial<IRecurringVisit>,
-  ): Promise<RecurringVisitLean | null> {
-    return RecurringVisitRepository.updateVisit(parentTaskId, visitId, {
-      $set: { status, ...extra },
-    });
-  }
-
-  static async updatePaymentState(
-    parentTaskId: string | mongoose.Types.ObjectId,
-    visitId: string,
-    fields: Pick<
-      Partial<IRecurringVisit>,
-      | 'paymentStatus'
-      | 'escrowId'
-      | 'paidAt'
-      | 'amount'
-      | 'paymentDeadline'
-      | 'status'
-    >,
-  ): Promise<RecurringVisitLean | null> {
-    return RecurringVisitRepository.updateVisit(parentTaskId, visitId, { $set: fields });
-  }
-
-  static async linkChildTask(
-    parentTaskId: string | mongoose.Types.ObjectId,
-    visitId: string,
-    childTaskId: mongoose.Types.ObjectId,
-  ): Promise<RecurringVisitLean | null> {
-    return RecurringVisitRepository.updateVisit(parentTaskId, visitId, {
-      $set: { childTaskId },
-    });
-  }
-
-  static async unlinkChildTask(
-    parentTaskId: string | mongoose.Types.ObjectId,
-    visitId: string,
-  ): Promise<RecurringVisitLean | null> {
-    return RecurringVisitRepository.updateVisit(parentTaskId, visitId, {
-      $set: { childTaskId: null },
-    });
-  }
-
-  static async deleteByParentTaskId(
-    parentTaskId: string | mongoose.Types.ObjectId,
-  ): Promise<number> {
-    const result = await RecurringVisit.deleteMany({ parentTaskId: toObjectId(parentTaskId) });
-    return result.deletedCount ?? 0;
-  }
-
   static async getMaximumVisitIndex(
     parentTaskId: string | mongoose.Types.ObjectId,
   ): Promise<number> {
@@ -250,20 +208,6 @@ export class RecurringVisitRepository {
       .lean() as Promise<RecurringVisitLean | null>;
   }
 
-  static async getPlanStatusCounts(parentTaskId: string | mongoose.Types.ObjectId): Promise<
-    Record<string, number>
-  > {
-    const rows = await RecurringVisit.aggregate<{ _id: string; count: number }>([
-      { $match: { parentTaskId: toObjectId(parentTaskId) } },
-      { $group: { _id: '$status', count: { $sum: 1 } } },
-    ]);
-    const out: Record<string, number> = {};
-    for (const row of rows) {
-      out[row._id] = row.count;
-    }
-    return out;
-  }
-
   static async listChildTaskIds(parentTaskId: string | mongoose.Types.ObjectId): Promise<string[]> {
     const rows = await RecurringVisit.find({
       parentTaskId: toObjectId(parentTaskId),
@@ -274,9 +218,5 @@ export class RecurringVisitRepository {
     return rows
       .map((r) => (r.childTaskId ? String(r.childTaskId) : ''))
       .filter(Boolean);
-  }
-
-  static isBufferCountedStatus(status: string): boolean {
-    return isBufferCountedVisitStatus(status);
   }
 }

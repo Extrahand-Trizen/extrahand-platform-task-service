@@ -12,6 +12,7 @@ import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
 import { NotificationClient } from './NotificationClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { fireDialogWhatsAppForUser } from '../clients/fireDialogWhatsAppForUser';
 import { ProfileUtils } from '../utils/ProfileUtils';
 
 /**
@@ -190,11 +191,14 @@ export async function notifyBookNowAssignment(params: {
         action: 'partner_assigned',
         partnerName: displayName,
         partnerRating: helperRating,
+        recipientRole: 'customer',
+        eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
       },
     });
 
+    // BOOK_NOW_PARTNER_ASSIGNED is the partner ring key; the customer must not receive it.
     await NotificationClient.send({
-      eventKey: NOTIFICATION_EVENT_KEYS.BOOK_NOW_PARTNER_ASSIGNED,
+      eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
       category: 'taskUpdates',
       actorId: actorUid,
       recipients: [customerUid],
@@ -203,11 +207,32 @@ export async function notifyBookNowAssignment(params: {
       body: customerBody,
       data: {
         taskId,
+        taskTitle,
         action: 'partner_assigned',
         partnerName: displayName,
         partnerRating: helperRating,
+        recipientRole: 'customer',
       },
     });
+
+    // Only Book Now callers pass 'partner'; marketplace / helper-direct assignment pass 'tasker'.
+    if (recipientRole === 'partner') {
+      const waMinute = Math.floor(Date.now() / 60000);
+      fireDialogWhatsAppForUser({
+        uid: customerUid,
+        eventKey: 'PARTNER_ASSIGNED_CUSTOMER',
+        category: 'taskUpdates',
+        payload: {
+          title: customerTitle,
+          body: customerBody,
+          partnerName: displayName,
+          taskTitle,
+          taskId,
+        },
+        idempotencyKey:
+          `eh-push:${customerUid}:PARTNER_ASSIGNED_CUSTOMER:${taskId}:${waMinute}`.slice(0, 200),
+      });
+    }
   } catch (err: any) {
     logger.warn('Failed to send assignment notification to customer', {
       taskId,

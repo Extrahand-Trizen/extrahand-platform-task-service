@@ -217,7 +217,10 @@ assert.strictEqual(
 );
 assert.strictEqual(partnerMatchesHourlyHelperCategory(['cleaning']), true);
 assert.strictEqual(partnerMatchesHourlyHelperCategory(['repair']), false);
-assert.strictEqual(partnerMatchesHourlyHelperCategory(['hourly-helper']), true);
+assert.strictEqual(partnerMatchesHourlyHelperCategory(['hourly-helper']), false);
+assert.strictEqual(partnerMatchesHourlyHelperCategory(['home_services']), false);
+assert.strictEqual(partnerMatchesHourlyHelperCategory(['pest_control', 'painting']), false);
+assert.strictEqual(partnerMatchesHourlyHelperCategory(['electrician', 'cleaning']), true);
 assert.strictEqual(hasPartnerCapacityForSlot({ '7:00 PM': 1 }, '7:00 PM'), true);
 assert.strictEqual(hasPartnerCapacityForSlot({ '7:00 PM': 0 }, '7:00 PM'), false);
 assert.strictEqual(hasPartnerCapacityForSlot({}, '7:00 PM'), false);

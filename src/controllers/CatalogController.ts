@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
-import { CatalogService } from '../services/CatalogService';
+import { CatalogService, type CatalogLocationInput } from '../services/CatalogService';
+import { BookingService } from '../services/BookingService';
 import { AuthenticatedRequest } from '../types';
 import logger from '../config/logger';
 import { BadRequestError, ValidationError } from '../errors/AppError';
@@ -26,6 +27,22 @@ function getCatalogCustomerUid(req: Request): string | undefined {
   return (req as AuthenticatedRequest).user?.uid;
 }
 
+function parseCatalogLocation(query: Request['query']): CatalogLocationInput {
+  const coordinates = typeof query.coordinates === 'string'
+    ? String(query.coordinates).split(',').map(Number)
+    : [];
+  const parsedCoordinates = coordinates.length === 2 && coordinates.every(Number.isFinite)
+    ? [coordinates[0], coordinates[1]] as [number, number]
+    : undefined;
+  return {
+    area: typeof query.area === 'string' ? query.area : undefined,
+    city: typeof query.city === 'string' ? query.city : undefined,
+    state: typeof query.state === 'string' ? query.state : undefined,
+    pinCode: typeof query.pinCode === 'string' ? query.pinCode : undefined,
+    coordinates: parsedCoordinates,
+  };
+}
+
 export class CatalogController {
   static async listCategories(req: Request, res: Response): Promise<void> {
     const categories = await CatalogService.listCategories(getCatalogCustomerUid(req));
@@ -33,23 +50,10 @@ export class CatalogController {
   }
 
   static async getCategory(req: Request, res: Response): Promise<void> {
-    const customerUid = getCatalogCustomerUid(req);
-    const coordinates = typeof req.query.coordinates === 'string'
-      ? String(req.query.coordinates).split(',').map(Number)
-      : [];
-    const parsedCoordinates = coordinates.length === 2 && coordinates.every(Number.isFinite)
-      ? [coordinates[0], coordinates[1]] as [number, number]
-      : undefined;
     const { category, skus, content } = await CatalogService.listSkusByCategorySlug(
       req.params.slug,
-      customerUid,
-      {
-        area: typeof req.query.area === 'string' ? req.query.area : undefined,
-        city: typeof req.query.city === 'string' ? req.query.city : undefined,
-        state: typeof req.query.state === 'string' ? req.query.state : undefined,
-        pinCode: typeof req.query.pinCode === 'string' ? req.query.pinCode : undefined,
-        coordinates: parsedCoordinates,
-      },
+      getCatalogCustomerUid(req),
+      parseCatalogLocation(req.query),
     );
     res.json({ success: true, data: { category, skus, content } });
   }
@@ -59,21 +63,9 @@ export class CatalogController {
     if (!categoryId) {
       throw new ValidationError('categoryId is required');
     }
-    const coordinates = typeof req.query.coordinates === 'string'
-      ? String(req.query.coordinates).split(',').map(Number)
-      : [];
-    const parsedCoordinates = coordinates.length === 2 && coordinates.every(Number.isFinite)
-      ? [coordinates[0], coordinates[1]] as [number, number]
-      : undefined;
     const { category, skus } = await CatalogService.getHourlyHelperSkusByCategoryId(
       categoryId,
-      {
-        area: typeof req.query.area === 'string' ? req.query.area : undefined,
-        city: typeof req.query.city === 'string' ? req.query.city : undefined,
-        state: typeof req.query.state === 'string' ? req.query.state : undefined,
-        pinCode: typeof req.query.pinCode === 'string' ? req.query.pinCode : undefined,
-        coordinates: parsedCoordinates,
-      },
+      parseCatalogLocation(req.query),
     );
     res.json({ success: true, data: { category, skus } });
   }
@@ -84,6 +76,7 @@ export class CatalogController {
     const sections = await CatalogService.getBookNowHubCatalog(
       previewLimit,
       getCatalogCustomerUid(req),
+      parseCatalogLocation(req.query),
     );
     res.json({ success: true, data: sections });
   }
@@ -92,7 +85,15 @@ export class CatalogController {
     const data = await CatalogService.getBookNowCategoryPackages(
       req.params.slug,
       getCatalogCustomerUid(req),
+      parseCatalogLocation(req.query),
     );
+    res.json({ success: true, data });
+  }
+
+  static async getBookNowLocationQuote(req: Request, res: Response): Promise<void> {
+    const body = req.body || {};
+    if (!Array.isArray(body.items)) throw new ValidationError('items must be an array');
+    const data = await BookingService.quoteBookNowLinePrices(body.items, body.address || {});
     res.json({ success: true, data });
   }
 
