@@ -164,6 +164,8 @@ export class InAppNotificationClient {
 
       logger.info('InAppNotificationClient: Sending in-app notification', {
         userId: payload.userId,
+        taskId: payload.data?.taskId,
+        action: payload.data?.action,
         type: payload.type || 'info',
         category: payload.category
       });
@@ -189,7 +191,9 @@ export class InAppNotificationClient {
       );
 
       logger.info('InAppNotificationClient: In-app notification sent successfully', {
-        userId: payload.userId
+        userId: payload.userId,
+        taskId: payload.data?.taskId,
+        action: payload.data?.action,
       });
 
       return true;
@@ -197,6 +201,8 @@ export class InAppNotificationClient {
       const axiosError = error as AxiosError;
       logger.error('InAppNotificationClient: Failed to send in-app notification', {
         userId: payload.userId,
+        taskId: payload.data?.taskId,
+        action: payload.data?.action,
         status: axiosError.response?.status,
         message: axiosError.message
       });

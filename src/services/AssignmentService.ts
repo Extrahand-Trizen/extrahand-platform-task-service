@@ -138,8 +138,14 @@ export async function notifyBookNowAssignment(params: {
   const customerTitle = `${displayName} assigned`;
 
   if (notifyPartner) {
+    logger.info('[ASSIGNMENT_DELIVERY] Starting partner notification handoff', {
+      taskId,
+      helperUid,
+      recipientRole,
+      eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+    });
     try {
-      await InAppNotificationClient.send({
+      const inAppAccepted = await InAppNotificationClient.send({
         userId: helperUid,
         title: 'Work assigned to you',
         body: `You are now assigned to "${taskTitle}". Open the work to review the details.`,
@@ -151,7 +157,20 @@ export async function notifyBookNowAssignment(params: {
           recipientRole,
         },
       });
+      logger.info('[ASSIGNMENT_DELIVERY] In-app notification request finished', {
+        taskId,
+        helperUid,
+        recipientRole,
+        acceptedByNotificationService: inAppAccepted,
+      });
 
+      logger.info('[ASSIGNMENT_DELIVERY] Dispatching partner push request', {
+        taskId,
+        helperUid,
+        recipientRole,
+        eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
+        action: 'assigned',
+      });
       await NotificationClient.send({
         eventKey: NOTIFICATION_EVENT_KEYS.TASK_UPDATED,
         category: 'taskUpdates',

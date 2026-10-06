@@ -710,10 +710,12 @@ export class TaskService {
 
     if (scheduledDateFrom || scheduledDateTo) {
       const scheduledDateRange: Record<string, Date> = {};
-      if (scheduledDateFrom) scheduledDateRange.$gte = normalizeDateOnly(new Date(`${scheduledDateFrom}T00:00:00.000Z`));
+      if (scheduledDateFrom) {
+        scheduledDateRange.$gte = new Date(`${scheduledDateFrom}T00:00:00.000+05:30`);
+      }
       if (scheduledDateTo) {
-        const endDate = normalizeDateOnly(new Date(`${scheduledDateTo}T00:00:00.000Z`));
-        endDate.setUTCDate(endDate.getUTCDate() + 1);
+        const endDate = new Date(`${scheduledDateTo}T00:00:00.000+05:30`);
+        endDate.setDate(endDate.getDate() + 1);
         scheduledDateRange.$lt = endDate;
       }
       andClauses.push({ scheduledDate: scheduledDateRange });
