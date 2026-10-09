@@ -1,7 +1,6 @@
 import { Database } from '../config/database';
 import HourlyHelperLocationAvailability from '../models/HourlyHelperLocationAvailability';
 import LocationArea from '../models/LocationArea';
-import { canonicalServiceAreaName } from '../utils/hourlyHelperServiceArea';
 import mongoose from 'mongoose';
 
 async function unify() {

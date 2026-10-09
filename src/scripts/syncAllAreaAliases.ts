@@ -1,7 +1,6 @@
 import { Database } from '../config/database';
 import { HourlyHelperLocationAvailabilityService } from '../services/HourlyHelperLocationAvailabilityService';
 import HourlyHelperLocationAvailability from '../models/HourlyHelperLocationAvailability';
-import LocationArea from '../models/LocationArea';
 import mongoose from 'mongoose';
 
 async function syncAll() {

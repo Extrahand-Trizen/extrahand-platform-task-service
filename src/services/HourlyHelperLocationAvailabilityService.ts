@@ -12,6 +12,7 @@ import {
   canonicalServiceAreaName,
   partnerHasHourlyHelperCategory,
   resolvePartnerWorkAreas,
+  buildHourlyServiceAreaCandidates,
 } from '../utils/hourlyHelperServiceArea';
 import { HourlyHelperAvailabilityService } from './HourlyHelperAvailabilityService';
 
@@ -108,12 +109,18 @@ export class HourlyHelperLocationAvailabilityService {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean();
 
-    // 2. Synchronize all alias records for this area (ObjectId, displayName, canonicalName)
+    // 2. Synchronize all alias records for this area (ObjectId, displayName, canonicalName, lowercases)
     if (type === 'area') {
       const aliasIds: any[] = [];
       if (areaObjId) aliasIds.push(areaObjId);
       if (displayName) aliasIds.push(displayName);
       if (canonicalName && canonicalName !== displayName) aliasIds.push(canonicalName);
+      if (displayName.toLowerCase() !== canonicalName && displayName.toLowerCase() !== displayName) {
+        aliasIds.push(displayName.toLowerCase());
+      }
+      if (locIdStr.toLowerCase() !== locIdStr && !aliasIds.includes(locIdStr.toLowerCase())) {
+        aliasIds.push(locIdStr.toLowerCase());
+      }
 
       for (const aliasId of aliasIds) {
         await HourlyHelperLocationAvailability.updateOne(
@@ -144,6 +151,69 @@ export class HourlyHelperLocationAvailabilityService {
       updatedAt: updated.updatedAt,
       updatedBy: updated.updatedBy,
     };
+  }
+
+  /**
+   * Remove Hourly Helper availability configuration for a location.
+   * Safety guarantee: only removes the availability configuration in
+   * HourlyHelperLocationAvailability. Existing pricing rules, SKUs, helper configs,
+   * confirmed bookings and ongoing tasks remain strictly untouched.
+   * After removal, the location reverts to unconfigured and displays "Coming Soon".
+   */
+  static async removeLocationAvailability(params: {
+    locationType: LocationType;
+    locationId: string;
+  }): Promise<{ removedCount: number }> {
+    const locIdStr = String(params.locationId || '').trim();
+    if (!locIdStr) throw new BadRequestError('locationId is required');
+    const type = params.locationType;
+
+    const idsToDelete: any[] = [locIdStr];
+    if (mongoose.Types.ObjectId.isValid(locIdStr)) {
+      idsToDelete.push(new mongoose.Types.ObjectId(locIdStr));
+    }
+
+    if (type === 'area') {
+      let displayName = locIdStr;
+      if (mongoose.Types.ObjectId.isValid(locIdStr)) {
+        const areaDoc = await LocationArea.findById(new mongoose.Types.ObjectId(locIdStr)).lean();
+        if (areaDoc) {
+          displayName = areaDoc.displayName || areaDoc.canonicalName || locIdStr;
+        }
+      }
+      const canonicalName = canonicalServiceAreaName(displayName) || displayName.toLowerCase();
+
+      // Find any LocationArea records matching this area
+      const areas = await LocationArea.find({
+        $or: [
+          { displayName: new RegExp(`^${displayName.trim()}$`, 'i') },
+          { canonicalName: new RegExp(`^${canonicalName.trim()}$`, 'i') },
+        ],
+      }).lean();
+
+      for (const a of areas) {
+        idsToDelete.push(a._id);
+        if (a.displayName) idsToDelete.push(a.displayName);
+        if (a.canonicalName) idsToDelete.push(a.canonicalName);
+      }
+
+      idsToDelete.push(displayName);
+      idsToDelete.push(canonicalName);
+      if (displayName.toLowerCase() !== canonicalName) {
+        idsToDelete.push(displayName.toLowerCase());
+      }
+      if (locIdStr.toLowerCase() !== locIdStr) {
+        idsToDelete.push(locIdStr.toLowerCase());
+      }
+    }
+
+    const uniqueIds = Array.from(new Set(idsToDelete));
+    const result = await HourlyHelperLocationAvailability.deleteMany({
+      locationType: type,
+      locationId: { $in: uniqueIds },
+    });
+
+    return { removedCount: result.deletedCount || 0 };
   }
 
   /**
@@ -353,7 +423,7 @@ export class HourlyHelperLocationAvailabilityService {
       const keyCanon = `${loc.type}:${loc.canonicalName}`;
 
       const rec = loc.explicitRecord || explicitMap.get(key) || explicitMap.get(keyLower) || explicitMap.get(keyCanon);
-      const isEnabled = rec ? rec.isEnabled : true; // Default is enabled
+      const isEnabled = rec ? rec.isEnabled : false; // Enable-only: default is false
 
       if (params.isEnabled !== undefined && isEnabled !== params.isEnabled) {
         continue;
@@ -391,7 +461,9 @@ export class HourlyHelperLocationAvailabilityService {
 
   /**
    * Hierarchy Precedence Evaluation:
-   * Area -> Pincode -> City -> State -> Default (true)
+   * Area -> Pincode -> City -> State -> Default (false / Enable-Only)
+   * Only locations explicitly enabled in the Operations Portal return true.
+   * Disabled, removed, and unconfigured locations return false ("Coming Soon").
    */
   static async isHourlyHelperEnabledForAddress(input: {
     areaId?: unknown;
@@ -400,6 +472,7 @@ export class HourlyHelperLocationAvailabilityService {
     stateId?: unknown;
     areaName?: string;
     cityName?: string;
+    address?: string;
   }): Promise<boolean> {
     const candidates: Array<{ locationType: LocationType; locationId: string | mongoose.Types.ObjectId }> = [];
 
@@ -415,17 +488,33 @@ export class HourlyHelperLocationAvailabilityService {
     };
 
     push('area', input.areaId);
-    if (input.areaName) {
-      push('area', input.areaName);
-      const canon = canonicalServiceAreaName(input.areaName);
-      if (canon && canon !== input.areaName) push('area', canon);
+
+    // Collect all candidate area names (explicit areaName, plus any named areas from formatted address)
+    const areaNameCandidates = new Set<string>();
+    if (input.areaName) areaNameCandidates.add(input.areaName);
+
+    if (input.address) {
+      const extracted = buildHourlyServiceAreaCandidates({
+        area: input.areaName,
+        city: input.cityName,
+        address: input.address,
+      });
+      for (const item of extracted) {
+        areaNameCandidates.add(item);
+      }
+    }
+
+    for (const aName of areaNameCandidates) {
+      push('area', aName);
+      const canon = canonicalServiceAreaName(aName);
+      if (canon && canon !== aName) push('area', canon);
 
       // Also look up master LocationArea to find corresponding ObjectIds
       try {
         const areaDocs = await LocationArea.find({
           $or: [
-            { displayName: new RegExp(`^${input.areaName.trim()}$`, 'i') },
-            { canonicalName: new RegExp(`^${(canon || input.areaName).trim()}$`, 'i') },
+            { displayName: new RegExp(`^${aName.trim()}$`, 'i') },
+            { canonicalName: new RegExp(`^${(canon || aName).trim()}$`, 'i') },
           ],
         }).select('_id').lean();
         for (const doc of areaDocs) {
@@ -452,7 +541,7 @@ export class HourlyHelperLocationAvailabilityService {
     }
     push('state', input.stateId);
 
-    if (candidates.length === 0) return true; // Safe default
+    if (candidates.length === 0) return false; // Enable-only: no location candidates = Coming Soon
 
     const queryPairs = candidates.map((c) => ({
       locationType: c.locationType,
@@ -496,7 +585,7 @@ export class HourlyHelperLocationAvailabilityService {
       }
     }
 
-    return true; // Default when no explicit override exists
+    return false; // Enable-Only Selected Locations: unconfigured locations return false ("Coming Soon")
   }
 }
 
