@@ -7,6 +7,7 @@ import {
   resolvePartnerWorkAreas,
   type HourlyServiceAddressInput,
 } from '../utils/hourlyHelperServiceArea';
+import { HourlyHelperLocationAvailabilityService } from './HourlyHelperLocationAvailabilityService';
 
 export type HourlyHelperAvailabilityResult = {
   available: boolean;
@@ -120,9 +121,29 @@ export class HourlyHelperAvailabilityService {
   static async getAvailabilityForAddress(
     input: HourlyServiceAddressInput,
   ): Promise<HourlyHelperAvailabilityResult> {
-    return HourlyHelperAvailabilityService.getAvailabilityForCandidates(
-      buildHourlyServiceAreaCandidates(input),
-    );
+    const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
+      areaName: input.area || undefined,
+      cityName: input.city || undefined,
+    });
+    if (!isEnabled) {
+      return {
+        available: false,
+        eligibleHelperCount: 0,
+        area: input.area || input.address || '',
+        candidates: buildHourlyServiceAreaCandidates(input),
+        matchedAreas: [],
+      };
+    }
+    const candidates = buildHourlyServiceAreaCandidates(input);
+    const helpers = await HourlyHelperAvailabilityService.findEligibleHelpers(candidates);
+    const matchedAreas = Array.from(new Set(helpers.map((helper) => helper.matchedArea)));
+    return {
+      available: true,
+      eligibleHelperCount: helpers.length,
+      area: matchedAreas[0] || input.area || input.address || candidates[0] || '',
+      candidates,
+      matchedAreas,
+    };
   }
 
   /** Legacy clients that only send a single area name. */

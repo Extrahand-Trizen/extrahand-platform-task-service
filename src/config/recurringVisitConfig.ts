@@ -39,6 +39,9 @@ export const recurringVisitConfig = {
 
   /** Max concurrent escrow lookups during payment reconciliation. */
   paymentSyncConcurrency: Number(process.env.RECURRING_PAYMENT_SYNC_CONCURRENCY || 4),
+
+  /** A visit opened for payment always gets at least this long to pay (capped at visit start). */
+  paymentMinWindowMinutes: Number(process.env.RECURRING_PAYMENT_MIN_WINDOW_MINUTES || 120),
 };
 
 /** Statuses counted toward the materialized upcoming visit buffer. */

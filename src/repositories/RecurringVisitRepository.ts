@@ -8,7 +8,7 @@ export type RecurringVisitLean = Omit<IRecurringVisit, keyof mongoose.Document> 
 };
 
 export type RecurringVisitUpsertInput = Partial<IRecurringVisit> & {
-  parentTaskId: mongoose.Types.ObjectId;
+  parentTaskId?: mongoose.Types.ObjectId;
   visitId: string;
   visitIndex: number;
   date: Date;
@@ -17,7 +17,7 @@ export type RecurringVisitUpsertInput = Partial<IRecurringVisit> & {
 };
 
 const DEFAULT_LIST_SELECT =
-  'parentTaskId visitId visitIndex date scheduledTimeStart scheduledTimeEnd expectedDurationMinutes status paymentStatus escrowId paymentDeadline paidAt amount assigneeId assigneeUid childTaskId skippedAt skippedBy skipReason paymentReminderSentAt cancellationChargeAmount rescheduleRequest cancelRequest createdAt updatedAt';
+  'parentTaskId planId serviceType visitId visitIndex date scheduledAt scheduledTimeStart scheduledTimeEnd expectedDurationMinutes status paymentStatus escrowId paymentDeadline paidAt amount assigneeId assigneeUid childTaskId bookingOrderId priceSnapshot paymentOpenedAt skippedAt skippedBy skipReason paymentReminderSentAt cancellationChargeAmount rescheduleRequest cancelRequest createdAt updatedAt';
 
 function toObjectId(id: string | mongoose.Types.ObjectId): mongoose.Types.ObjectId {
   return typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id;
@@ -168,6 +168,7 @@ export class RecurringVisitRepository {
     const q = RecurringVisit.find({
       status: 'payment_pending',
       paymentDeadline: { $lte: now },
+      serviceType: { $ne: 'book_now' },
     })
       .select(DEFAULT_LIST_SELECT)
       .sort({ paymentDeadline: 1 })
@@ -204,6 +205,85 @@ export class RecurringVisitRepository {
   ): Promise<RecurringVisitLean | null> {
     return RecurringVisit.findOne({ parentTaskId: toObjectId(parentTaskId) })
       .sort({ visitIndex: -1, date: -1 })
+      .select(DEFAULT_LIST_SELECT)
+      .lean() as Promise<RecurringVisitLean | null>;
+  }
+
+  static async listByPlanId(
+    planId: string | mongoose.Types.ObjectId,
+    options?: { select?: string },
+  ): Promise<RecurringVisitLean[]> {
+    return RecurringVisit.find({ planId: toObjectId(planId) })
+      .select(options?.select || DEFAULT_LIST_SELECT)
+      .sort({ visitIndex: 1, date: 1 })
+      .lean() as Promise<RecurringVisitLean[]>;
+  }
+
+  static async findByMongoId(id: string | mongoose.Types.ObjectId): Promise<RecurringVisitLean | null> {
+    if (!mongoose.isValidObjectId(id)) return null;
+    return RecurringVisit.findById(id)
+      .select(DEFAULT_LIST_SELECT)
+      .lean() as Promise<RecurringVisitLean | null>;
+  }
+
+  static async findByPlanAndVisitId(
+    planId: string | mongoose.Types.ObjectId,
+    visitId: string,
+  ): Promise<RecurringVisitLean | null> {
+    return RecurringVisit.findOne({ planId: toObjectId(planId), visitId: visitId.trim() })
+      .select(DEFAULT_LIST_SELECT)
+      .lean() as Promise<RecurringVisitLean | null>;
+  }
+
+  static async findBookNowPaymentOpenOverdue(options?: {
+    limit?: number;
+    now?: Date;
+  }): Promise<RecurringVisitLean[]> {
+    const now = options?.now ?? new Date();
+    return RecurringVisit.find({
+      serviceType: 'book_now',
+      status: 'payment_pending',
+      paymentDeadline: { $lte: now },
+    })
+      .select(DEFAULT_LIST_SELECT)
+      .sort({ paymentDeadline: 1 })
+      .limit(options?.limit ?? 100)
+      .lean() as Promise<RecurringVisitLean[]>;
+  }
+
+  static async findBookNowScheduledForPaymentOpen(options?: {
+    limit?: number;
+    openBefore?: Date;
+  }): Promise<RecurringVisitLean[]> {
+    const openBefore = options?.openBefore ?? new Date();
+    return RecurringVisit.find({
+      serviceType: 'book_now',
+      status: 'scheduled',
+      scheduledAt: { $lte: openBefore },
+      bookingOrderId: { $in: [null, undefined] },
+    })
+      .select(DEFAULT_LIST_SELECT)
+      .sort({ scheduledAt: 1 })
+      .limit(options?.limit ?? 100)
+      .lean() as Promise<RecurringVisitLean[]>;
+  }
+
+  static async claimVisitStatus(params: {
+    planId: mongoose.Types.ObjectId;
+    visitId: string;
+    fromStatus: string;
+    toStatus: string;
+    extraSet?: Record<string, unknown>;
+  }): Promise<RecurringVisitLean | null> {
+    return RecurringVisit.findOneAndUpdate(
+      {
+        planId: params.planId,
+        visitId: params.visitId,
+        status: params.fromStatus,
+      },
+      { $set: { status: params.toStatus, updatedAt: new Date(), ...(params.extraSet || {}) } },
+      { new: true },
+    )
       .select(DEFAULT_LIST_SELECT)
       .lean() as Promise<RecurringVisitLean | null>;
   }

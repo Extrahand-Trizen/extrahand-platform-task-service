@@ -283,6 +283,30 @@ export class RecurringVisitController {
     ApiResponse.success(res, result, 'Recurring visit payment confirmed');
   }
 
+  /** Service-to-service: a recurring visit payment was refunded in payment-service. */
+  static async visitPaymentRefunded(req: Request, res: Response): Promise<void> {
+    const parentTaskId = String(req.body?.parentTaskId || '').trim();
+    const visitId = String(req.body?.visitId || '').trim();
+    const escrowId = String(req.body?.escrowId || '').trim();
+    const eventId = String(req.body?.eventId || '').trim();
+
+    if (!parentTaskId || !visitId || !escrowId) {
+      throw new BadRequestError('parentTaskId, visitId, and escrowId are required');
+    }
+    if (String(req.body?.refundStatus || 'refunded') !== 'refunded') {
+      throw new BadRequestError('Unsupported refund status');
+    }
+
+    const result = await RecurringVisitService.markVisitPaymentRefundedFromPaymentService({
+      parentTaskId,
+      visitId,
+      escrowId,
+      eventId: eventId || undefined,
+    });
+
+    ApiResponse.success(res, result, 'Recurring visit refund applied');
+  }
+
   /** Service-to-service: authoritative amount for a recurring visit payment order. */
   static async visitPaymentQuote(req: Request, res: Response): Promise<void> {
     const parentTaskId = String(req.body?.parentTaskId || '').trim();

@@ -1068,6 +1068,7 @@ export class BookNowAutoAssignService {
       taskId,
       taskTitle: String(task.title || 'your booking'),
       customerUid: String((task as any).requesterUid || '').trim() || undefined,
+      customerProfileId: task.requesterId,
       helperUid: partner.uid,
       helperName: partner.name,
       notifyPartner: false,

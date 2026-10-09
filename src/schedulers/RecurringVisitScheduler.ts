@@ -7,6 +7,7 @@ import { getRedisClient } from '../config/redis';
 import { RecurringVisitService } from '../services/RecurringVisitService';
 import { RecurringVisitRepository } from '../repositories/RecurringVisitRepository';
 import { recurringVisitConfig } from '../config/recurringVisitConfig';
+import { BookNowRecurringService } from '../services/BookNowRecurringService';
 
 const MAINTENANCE_LOCK_KEY = 'recurring:scheduler:maintenance:lock';
 /** Shorter than the 30 min cron interval so a crashed holder never blocks the next run. */
@@ -83,6 +84,7 @@ export class RecurringVisitScheduler {
       await this.markOverdueVisitsUnpaid(now, batchSize);
       await this.refillActivePlanBuffers(batchSize);
       await this.markLegacyOverdueVisitsUnpaid(now, batchSize);
+      await BookNowRecurringService.runMaintenance(now);
     } catch (error) {
       logger.error('[RecurringVisitScheduler] maintenance job failed', { error });
     }
@@ -122,6 +124,7 @@ export class RecurringVisitScheduler {
       const filter: Record<string, unknown> = {
         'recurringPlan.status': 'active',
         'recurring.enabled': true,
+        status: { $ne: 'cancelled' },
         $or: [
           { 'recurringPlan.visitStorage': 'collection' },
           { 'recurringPlan.planVersion': 2 },

@@ -110,6 +110,8 @@ export async function notifyBookNowAssignment(params: {
   taskId: string;
   taskTitle: string;
   customerUid?: string | null;
+  /** Task.requesterId — Book Now tasks do not persist requesterUid, so the uid is resolved from the profile. */
+  customerProfileId?: mongoose.Types.ObjectId | string | null;
   helperUid: string;
   helperName?: string;
   helperRating?: number;
@@ -121,7 +123,7 @@ export async function notifyBookNowAssignment(params: {
     actorUid,
     taskId,
     taskTitle,
-    customerUid,
+    customerProfileId,
     helperUid,
     helperName,
     helperRating,
@@ -194,7 +196,20 @@ export async function notifyBookNowAssignment(params: {
     }
   }
 
-  if (!notifyCustomer || !customerUid) {
+  if (!notifyCustomer) {
+    return;
+  }
+
+  let customerUid = String(params.customerUid || '').trim();
+  if (!customerUid && customerProfileId) {
+    const customerProfile = await ProfileUtils.getByProfileId(customerProfileId, 'uid');
+    customerUid = String(customerProfile?.uid || '').trim();
+  }
+  if (!customerUid) {
+    logger.warn('Skipping customer assignment notification: customer uid not resolved', {
+      taskId,
+      customerProfileId: customerProfileId ? String(customerProfileId) : undefined,
+    });
     return;
   }
 
@@ -510,6 +525,7 @@ export class AssignmentService {
       taskId: String(task._id),
       taskTitle: String(task.title || 'your booking'),
       customerUid: task.requesterUid,
+      customerProfileId: task.requesterId,
       helperUid,
       helperName: resolvedHelperName,
       helperRating: helperSnapshot.rating,
@@ -660,6 +676,7 @@ export class AssignmentService {
       taskId: String(task._id),
       taskTitle: String(task.title || 'your work'),
       customerUid: task.requesterUid,
+      customerProfileId: task.requesterId,
       helperUid,
       helperName: helperSnapshot.name || resolvedHelperName,
       helperRating: helperSnapshot.rating,
@@ -913,6 +930,7 @@ export class AssignmentService {
       taskId: String(task._id),
       taskTitle: String(task.title || 'your booking'),
       customerUid: task.requesterUid,
+      customerProfileId: task.requesterId,
       helperUid: partnerUid,
       helperName: partnerSnapshot.name,
       helperRating: partnerSnapshot.rating,

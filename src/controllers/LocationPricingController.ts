@@ -1,5 +1,7 @@
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { LocationPricingService } from '../services/LocationPricingService';
+import { HourlyHelperLocationAvailabilityService } from '../services/HourlyHelperLocationAvailabilityService';
+import { LocationType } from '../models/HourlyHelperLocationAvailability';
 
 export class LocationPricingController {
   static async ensureCanonicalLocation(req: Request, res: Response): Promise<void> {
@@ -64,11 +66,42 @@ export class LocationPricingController {
     res.json({ success: true, data: await LocationPricingService.updateHourlyPrice(String(req.params.id), req.body || {}) });
   }
 
+  static async updateSkuGlobalPrice(req: Request, res: Response): Promise<void> {
+    res.json({ success: true, data: await LocationPricingService.updateSkuGlobalPrice(String(req.params.id), Number(req.body.offerPrice)) });
+  }
+
   static async resolveHourlyPrice(req: Request, res: Response): Promise<void> {
     res.json({ success: true, data: await LocationPricingService.resolveHourlyPrice(req.body || {}) });
   }
 
   static async resolveAddress(req: Request, res: Response): Promise<void> {
     res.json({ success: true, data: await LocationPricingService.resolveAddress(req.body || {}) });
+  }
+
+  static async listHourlyHelperAvailabilities(req: Request, res: Response): Promise<void> {
+    const isEnabled = req.query.isEnabled === undefined ? undefined : req.query.isEnabled === 'true';
+    const type = req.query.type ? (String(req.query.type) as LocationType) : undefined;
+    const search = req.query.search ? String(req.query.search) : undefined;
+    const data = await HourlyHelperLocationAvailabilityService.listLocationAvailabilities({
+      search,
+      type,
+      isEnabled,
+    });
+    res.json({ success: true, data });
+  }
+
+  static async toggleHourlyHelperAvailability(req: Request, res: Response): Promise<void> {
+    const { type, id } = req.params;
+    const isEnabled = req.body.isEnabled !== undefined ? Boolean(req.body.isEnabled) : true;
+    const updatedBy = req.body.updatedBy
+      ? String(req.body.updatedBy)
+      : (req as any).user?.email || (req as any).user?.uid || 'admin';
+    const data = await HourlyHelperLocationAvailabilityService.setLocationAvailability({
+      locationType: type as LocationType,
+      locationId: id,
+      isEnabled,
+      updatedBy,
+    });
+    res.json({ success: true, data });
   }
 }

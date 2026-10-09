@@ -45,11 +45,13 @@ import { BOOK_NOW_PARTNER_PAYOUT_COPY } from '../constants/bookNowPartnerPayoutC
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
+import { sanitizeRequesterTaskUpdate } from '../utils/taskUpdateAllowlist';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { normalizeQcOrderToTask, findQcOrderById, updateQcOrderById } from '../utils/qcOrderTaskAdapter';
 import { invalidatePartnerLocationSubject } from './PartnerLocationService';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 import { resolveTaskStartForCancellationPolicy } from './cancellation/cancellationContext';
+import { HourlyHelperLocationAvailabilityService } from './HourlyHelperLocationAvailabilityService';
 import {
   MY_TASKS_LIST_SELECT,
   buildApplicationPreviewsForTasks,
@@ -1310,6 +1312,16 @@ export class TaskService {
     const normalizedTaskData = normalizeCreateTaskPayload(taskData);
     taskData = normalizedTaskData;
 
+    if (taskData.budgetType === 'hourly' || taskData.categorySlug === 'hourly-helper' || taskData.categorySlug === 'hourly-based') {
+      const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
+        areaName: taskData.location?.area,
+        cityName: taskData.location?.city,
+      });
+      if (!isEnabled) {
+        throw new BadRequestError('Hourly Helper services are currently unavailable in your location.');
+      }
+    }
+
     // Delivery/pickup tasks have system-generated titles and descriptions â€” skip meaningful-text checks
     const isDeliveryPickup = [taskData.category, taskData.categorySlug].some((c: string) =>
       String(c || '').toLowerCase().includes('delivery') ||
@@ -1731,20 +1743,24 @@ export class TaskService {
     const oldScheduledDate = task.scheduledDate?.getTime();
     const oldAssigneeId = task.assigneeId; // âœ… Updated from assigneeUid
 
-    // Normalize budget field to handle both object and number formats
-    let updateData = { ...updates, updatedAt: new Date() };
-    // Never trust client-sent flags for one-time budget rules.
-    delete (updateData as any).posterBudgetEditedViaFormOnce;
-    if (updateData.budget) {
-      if (typeof updateData.budget !== "object") {
-        // Convert budget number to object
-        updateData.budget = {
-          amount: parseFloat(updateData.budget) || 0,
-          currency: "INR",
-          type: "fixed",
-        };
-      }
+    const { update: allowedUpdates, dropped } = sanitizeRequesterTaskUpdate(
+      {
+        status: task.status,
+        bookingSource: (task as any).bookingSource,
+        budget: task.budget as any,
+        recurringPlanStatus: (task as any).recurringPlan?.status,
+        scheduledDate: task.scheduledDate,
+        scheduledTimeStart: (task as any).scheduledTimeStart,
+        scheduledTimeEnd: (task as any).scheduledTimeEnd,
+        timeSlot: (task as any).timeSlot,
+        dateOption: (task as any).dateOption,
+      },
+      updates,
+    );
+    if (dropped.length > 0) {
+      logger.warn('[TaskService.updateTask] Ignored non-editable fields', { taskId, dropped });
     }
+    let updateData: any = { ...allowedUpdates, updatedAt: new Date() };
 
     // Non-negotiable + Pick & Drop: poster may change listed budget at most once via updateTask.
     if (enforcesOneTimePosterBudgetFormEdit(task) && updateData.budget) {
@@ -2887,13 +2903,7 @@ export class TaskService {
       const isRecurringChildVisit =
         Boolean(task.parentTaskId) && Boolean(task.recurringVisitId);
       if (!isRecurringChildVisit) {
-        let escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
-        if (!escrowForCancel && task.parentTaskId && task.recurringVisitId) {
-          escrowForCancel = await PaymentClient.getEscrowByTaskIdAndVisitId(
-            String(task.parentTaskId),
-            String(task.recurringVisitId),
-          );
-        }
+        const escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
         if (isActiveEscrow(escrowForCancel)) {
           throw new BadRequestError(
             "Cannot cancel after payment is held. Contact support if you need help."
@@ -2907,12 +2917,16 @@ export class TaskService {
       | null = null;
 
     if (status === "cancelled") {
-      let escrow = await PaymentClient.getEscrowByTaskId(taskId);
-      if (!escrow && task.parentTaskId && task.recurringVisitId) {
-        escrow = await PaymentClient.getEscrowByTaskIdAndVisitId(
-          String(task.parentTaskId),
-          String(task.recurringVisitId),
-        );
+      // Recurring visit children: the visit's own payment first; never the Work's newest payment.
+      let escrow =
+        task.parentTaskId && task.recurringVisitId
+          ? await PaymentClient.getEscrowByTaskIdAndVisitId(
+              String(task.parentTaskId),
+              String(task.recurringVisitId),
+            )
+          : null;
+      if (!escrow) {
+        escrow = await PaymentClient.getEscrowByTaskId(taskId);
       }
       if (escrow) {
         const isRequesterCancelled = task.requesterId.equals(profileId);
@@ -2932,11 +2946,7 @@ export class TaskService {
           escrow && typeof escrow === "object"
             ? String((escrow as { escrowId?: unknown }).escrowId ?? "").trim() || undefined
             : undefined;
-        const cancelTaskId = escrowPublicId
-          ? undefined
-          : task.parentTaskId && task.recurringVisitId
-            ? String(task.parentTaskId)
-            : taskId;
+        const cancelTaskId = escrowPublicId ? undefined : taskId;
         logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow started', {
           taskId,
           actorProfileId: profileId.toString(),
@@ -3634,6 +3644,10 @@ export class TaskService {
             amount: payoutAmount,
             taskTitle: updatedTask.title || task.title,
             visitId: updatedTask.recurringVisitId ? String(updatedTask.recurringVisitId) : undefined,
+            parentTaskId:
+              updatedTask.recurringVisitId && updatedTask.parentTaskId
+                ? String(updatedTask.parentTaskId)
+                : undefined,
           });
           logger.info(`[Auto-Payout] Payout result from updateTaskStatus for task ${taskId}:`, payoutResult);
           

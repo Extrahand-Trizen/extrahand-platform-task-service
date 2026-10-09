@@ -57,6 +57,12 @@ router.post(
 );
 
 router.post(
+  '/recurring/internal/visit-payment-refunded',
+  serviceAuthMiddleware,
+  asyncHandler(RecurringVisitController.visitPaymentRefunded)
+);
+
+router.post(
   '/recurring/internal/visit-payment-quote',
   serviceAuthMiddleware,
   asyncHandler(RecurringVisitController.visitPaymentQuote)

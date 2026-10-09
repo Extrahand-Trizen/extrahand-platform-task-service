@@ -50,8 +50,11 @@ router.get('/internal/location-pricing/skus', asyncHandler(LocationPricingContro
 router.get('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.listHourlyPrices));
 router.post('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.createHourlyPrice));
 router.patch('/internal/location-pricing/hourly-prices/:id', asyncHandler(LocationPricingController.updateHourlyPrice));
+router.patch('/internal/location-pricing/skus/:id/global-price', asyncHandler(LocationPricingController.updateSkuGlobalPrice));
 router.post('/internal/location-pricing/hourly-prices/resolve', asyncHandler(LocationPricingController.resolveHourlyPrice));
 router.post('/internal/location-pricing/resolve-address', asyncHandler(LocationPricingController.resolveAddress));
+router.get('/internal/location-pricing/hourly-availability', asyncHandler(LocationPricingController.listHourlyHelperAvailabilities));
+router.post('/internal/location-pricing/hourly-availability/:type/:id/toggle', asyncHandler(LocationPricingController.toggleHourlyHelperAvailability));
 
 router.get('/categories', asyncHandler(CatalogController.listCategories));
 router.get('/book-now/hub', asyncHandler(CatalogController.getBookNowHubCatalog));

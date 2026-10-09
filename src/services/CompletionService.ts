@@ -553,6 +553,10 @@ export class CompletionService {
           amount: payoutAmount,
           taskTitle: updatedTask.title || previousTask.title,
           visitId: updatedTask.recurringVisitId ? String(updatedTask.recurringVisitId) : undefined,
+          parentTaskId:
+            updatedTask.recurringVisitId && updatedTask.parentTaskId
+              ? String(updatedTask.parentTaskId)
+              : undefined,
         });
         logger.info(`[PAYOUT_DEBUG] Payout result for task ${taskId}:`, {
           success: payoutResult.success,

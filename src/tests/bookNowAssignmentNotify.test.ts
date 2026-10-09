@@ -7,6 +7,7 @@ import { NotificationClient } from '../services/NotificationClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import * as dialogUserModule from '../clients/fireDialogWhatsAppForUser';
 import { notifyBookNowAssignment } from '../services/AssignmentService';
+import { ProfileUtils } from '../utils/ProfileUtils';
 
 type Captured = { push: any[]; inApp: any[]; whatsapp: any[] };
 
@@ -84,6 +85,26 @@ async function testMarketplaceAssignmentHasNoCustomerWhatsApp() {
   assert.strictEqual(customerPush[0].eventKey, 'TASK_UPDATED');
 }
 
+async function testCustomerUidResolvedFromProfileId() {
+  const captured = installStubs();
+  (ProfileUtils as any).getByProfileId = async (profileId: unknown) =>
+    String(profileId) === '6a82eec2c84201d9d082341c' ? { uid: 'resolved-customer-uid' } : null;
+
+  await notifyBookNowAssignment({
+    ...BASE,
+    customerUid: undefined,
+    customerProfileId: '6a82eec2c84201d9d082341c',
+    recipientRole: 'partner',
+  });
+
+  const customerPush = captured.push.filter((p) => p.recipients.includes('resolved-customer-uid'));
+  assert.strictEqual(customerPush.length, 1);
+  assert.strictEqual(customerPush[0].eventKey, 'TASK_UPDATED');
+  assert.strictEqual(captured.inApp.filter((n) => n.userId === 'resolved-customer-uid').length, 1);
+  assert.strictEqual(captured.whatsapp.length, 1);
+  assert.strictEqual(captured.whatsapp[0].uid, 'resolved-customer-uid');
+}
+
 async function testNoCustomerNotificationsWhenDisabled() {
   const captured = installStubs();
   await notifyBookNowAssignment({ ...BASE, recipientRole: 'partner', notifyCustomer: false });
@@ -97,6 +118,7 @@ async function testNoCustomerNotificationsWhenDisabled() {
   await testBookNowCustomerChannels();
   await testPartnerNotificationsUnchanged();
   await testMarketplaceAssignmentHasNoCustomerWhatsApp();
+  await testCustomerUidResolvedFromProfileId();
   await testNoCustomerNotificationsWhenDisabled();
   console.log('bookNowAssignmentNotify.test.ts: all tests passed');
   process.exit(0);

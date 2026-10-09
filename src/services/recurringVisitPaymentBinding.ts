@@ -36,16 +36,27 @@ export function readEscrowVisitId(escrow: EscrowRecord | null | undefined): stri
   return String(readEscrowMetadata(escrow).visitId || '').trim();
 }
 
+/**
+ * Money was taken for this escrow and has not been reversed. Refunds keep
+ * `paymentStatus: 'captured'` and set `status: 'refunded'`, so status is checked first.
+ */
 export function isEscrowRecordPaid(escrow: EscrowRecord | null | undefined): boolean {
   if (!escrow) return false;
   const paymentStatus = String(escrow.paymentStatus || '').toLowerCase();
   const status = String(escrow.status || '').toLowerCase();
+  if (['refunded', 'cancelled', 'failed'].includes(status)) return false;
+  if (paymentStatus === 'refunded' || paymentStatus === 'failed') return false;
   return (
     paymentStatus === 'captured' ||
     paymentStatus === 'authorized' ||
     status === 'held' ||
     status === 'released'
   );
+}
+
+/** Paid and not yet released to the helper: the only state a visit payment can be moved in. */
+export function isEscrowRecordHeld(escrow: EscrowRecord | null | undefined): boolean {
+  return isEscrowRecordPaid(escrow) && String(escrow?.status || '').toLowerCase() !== 'released';
 }
 
 /** Base visit amount (excluding fees) the escrow was created for, when recorded. */

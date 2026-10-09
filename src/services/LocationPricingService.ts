@@ -406,28 +406,70 @@ export class LocationPricingService {
     const groupedNames = new Set(groups.map((group) => group.name.trim().toLowerCase()));
     const ungrouped = categories
       .filter((category) => {
-        if (coveredCategoryIds.has(String(category._id)) || (countByCategory.get(String(category._id)) || 0) === 0) return false;
-        const name = (category.slug === 'hourly-helper' ? 'Hourly Helper' : category.name).trim().toLowerCase();
+        if (coveredCategoryIds.has(String(category._id))) return false;
+        if (category.slug !== 'hourly-helper' && (countByCategory.get(String(category._id)) || 0) === 0) return false;
+        const name = (category.slug === 'hourly-helper' ? 'Hourly Based Work' : category.name).trim().toLowerCase();
         // A leftover catalog category can share the hub slug (home-cleaning) and would duplicate the parent.
         return !groupedIds.has(category.slug) && !groupedNames.has(name);
       })
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .map((category) => ({
-        id: category.slug,
-        name: category.slug === 'hourly-helper' ? 'Hourly Helper' : category.name,
-        subcategories: [{
+      .sort((left, right) => {
+        if (left.slug === 'hourly-helper') return -1;
+        if (right.slug === 'hourly-helper') return 1;
+        return left.name.localeCompare(right.name);
+      })
+      .map((category) => {
+        const displayName = category.slug === 'hourly-helper' ? 'Hourly Based Work' : category.name;
+        return {
           id: category.slug,
-          name: category.slug === 'hourly-helper' ? 'Hourly Helper' : category.name,
-          categoryId: String(category._id),
-        }],
-      }));
+          name: displayName,
+          subcategories: [{
+            id: category.slug,
+            name: displayName,
+            categoryId: String(category._id),
+          }],
+        };
+      });
+
+    const hasHourly = groups.some((g) => g.id === 'hourly-helper') || ungrouped.some((u) => u.id === 'hourly-helper');
+    if (!hasHourly) {
+      const hourlyInDb = categories.find((c) => c.slug === 'hourly-helper');
+      if (hourlyInDb) {
+        ungrouped.unshift({
+          id: 'hourly-helper',
+          name: 'Hourly Based Work',
+          subcategories: [{
+            id: 'hourly-helper',
+            name: 'Hourly Based Work',
+            categoryId: String(hourlyInDb._id),
+          }],
+        });
+      }
+    }
 
     return [...groups, ...ungrouped];
   }
 
   static async listPricingSkus(params: { categoryId?: string; sectionId?: string }): Promise<PricingSkuSummary[]> {
     const query: any = {};
-    if (params.categoryId) query.categoryId = objectId(params.categoryId, 'categoryId');
+    if (params.categoryId) {
+      if (mongoose.Types.ObjectId.isValid(params.categoryId)) {
+        query.categoryId = new mongoose.Types.ObjectId(params.categoryId);
+      } else {
+        const category = await ServiceCategory.findOne({ slug: params.categoryId }).lean();
+        if (category) {
+          query.categoryId = category._id;
+        } else {
+          const hubSection = await BookNowHubSection.findOne({ slug: params.categoryId, isActive: true }).lean();
+          if (hubSection) {
+            const categorySlugs = [...new Set(hubSection.services.map((s) => s.categorySlug))];
+            const categories = await ServiceCategory.find({ slug: { $in: categorySlugs } }).select({ _id: 1 }).lean();
+            if (categories.length > 0) {
+              query.categoryId = { $in: categories.map((c) => c._id) };
+            }
+          }
+        }
+      }
+    }
     const skus = await ServiceSku.find(query)
       .select({ _id: 1, slug: 1, name: 1, categoryId: 1, pricingUnit: 1, basePrice: 1, offerPrice: 1, offerDiscountType: 1, offerDiscountValue: 1, isOfferActive: 1, durationMinutes: 1, isActive: 1 })
       .sort({ durationMinutes: 1, name: 1 })
@@ -495,11 +537,11 @@ export class LocationPricingService {
               isActive: sku.isActive,
               categoryId: sku.categoryId,
               categorySlug: category?.slug || '',
-              categoryName: category?.name || '',
+              categoryName: category?.slug === 'hourly-helper' ? 'Hourly Based Work' : category?.name || '',
               parentCategoryId: placement?.parentId || category?.slug || '',
-              parentCategoryName: placement?.parentName || (category?.slug === 'hourly-helper' ? 'Hourly Helper' : category?.name || ''),
+              parentCategoryName: placement?.parentName || (category?.slug === 'hourly-helper' ? 'Hourly Based Work' : category?.name || ''),
               subcategoryId: placement?.subcategoryId || category?.slug || '',
-              subcategoryName: placement?.subcategoryName || category?.name || '',
+              subcategoryName: placement?.subcategoryName || (category?.slug === 'hourly-helper' ? 'Hourly Based Work' : category?.name || ''),
             }
           : null,
       };
@@ -540,6 +582,14 @@ export class LocationPricingService {
     const result = await HourlySkuLocationPrice.findByIdAndUpdate(priceId, update, { new: true }).lean();
     if (!result) throw new NotFoundError('Pricing rule not found');
     return result;
+  }
+
+  static async updateSkuGlobalPrice(skuId: string, offerPrice: number) {
+    const id = objectId(skuId, 'skuId');
+    if (!Number.isFinite(offerPrice) || offerPrice < 0) throw new BadRequestError('offerPrice must be a non-negative number');
+    const sku = await ServiceSku.findByIdAndUpdate(id, { $set: { offerPrice, basePrice: offerPrice } }, { new: true }).lean();
+    if (!sku) throw new NotFoundError('Service SKU not found');
+    return sku;
   }
 
   static async resolveHourlyPrice(body: any) {

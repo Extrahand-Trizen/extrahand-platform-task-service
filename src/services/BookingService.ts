@@ -40,6 +40,7 @@ import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 import { HourlyHelperAvailabilityService } from './HourlyHelperAvailabilityService';
+import { HourlyHelperLocationAvailabilityService } from './HourlyHelperLocationAvailabilityService';
 import { buildHourlyServiceAreaCandidates } from '../utils/hourlyHelperServiceArea';
 import { HOURLY_HELPER_COMING_SOON_CODE } from '../constants/hourlyBooking';
 import {
@@ -95,7 +96,7 @@ import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { resolveRescheduleEndTime } from '../utils/rescheduleSchedule';
 
 
-type BookingAddress = {
+export type BookingAddress = {
   label?: string;
   line1: string;
   line2?: string;
@@ -129,6 +130,23 @@ function resolveHourlyBookingAreaForCapacity(address: BookingAddress): string | 
  * customer's exact named area. Returns the eligible helper uids.
  */
 async function assertHourlyHelperAvailableForAddress(address: BookingAddress): Promise<string[]> {
+  const resolvedArea = resolveHourlyBookingAreaForCapacity(address);
+  const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
+    areaName: resolvedArea || address.area,
+    cityName: address.city,
+    address: address.line1,
+  });
+  if (!isEnabled) {
+    logger.info('Hourly Helper booking rejected: location availability is disabled or unconfigured', {
+      area: resolvedArea || address.area,
+      city: address.city,
+    });
+    throw new BadRequestError(
+      'Hourly Helper is coming soon in your area. Please choose another service location.',
+      HOURLY_HELPER_COMING_SOON_CODE,
+    );
+  }
+
   const candidates = buildHourlyServiceAreaCandidates({
     area: address.area,
     city: address.city,
@@ -696,11 +714,29 @@ export class BookingService {
         quotes.push(clientQuote(line, index));
         return line;
       }
-      if (resolved.pricingSource === 'global') {
-        quotes.push({ ...clientQuote(line, index), pricingSource: 'global' });
-        return line;
-      }
       const quantity = line.quantity && line.quantity > 0 ? line.quantity : 1;
+      if (resolved.pricingSource === 'global') {
+        // Variant prices are defined in the app relative to the package price; without a location
+        // rule the scale factor is 1. A plain package is charged the catalog price, never the app's.
+        const catalogUnit = resolved.effectiveOfferPrice;
+        if (isVariantPricedLine(line) || !(catalogUnit > 0)) {
+          if (!(catalogUnit > 0)) {
+            logger.warn('Book Now catalog SKU has no price; keeping app price', { skuId: sku ? String(sku._id) : undefined });
+          }
+          quotes.push({ ...clientQuote(line, index), pricingSource: 'global' });
+          return line;
+        }
+        const catalogTotal = Math.round(catalogUnit * quantity * 100) / 100;
+        quotes.push({
+          index,
+          unitPrice: catalogUnit,
+          lineTotal: catalogTotal,
+          globalUnitPrice: unit,
+          pricingSource: 'global',
+          locationAdjusted: catalogUnit !== unit,
+        });
+        return { ...line, unitPrice: catalogUnit, lineTotal: catalogTotal };
+      }
       const locationUnit = locationAdjustedUnitPrice({
         clientUnitPrice: unit,
         locationPrice: resolved.effectiveOfferPrice,
@@ -935,6 +971,9 @@ export class BookingService {
     gstExempt?: boolean;
     preferredHelperGender?: 'any' | 'male' | 'female' | string;
     serviceRecipient?: BookingServiceRecipient | unknown;
+    preferredPartnerUid?: string;
+    recurringPlanId?: string;
+    recurringVisitId?: string;
   }) {
     const {
       customerUid,
@@ -953,6 +992,10 @@ export class BookingService {
       couponCode,
       consultationMeta,
     } = params;
+
+    const preferredPartnerUid = String(params.preferredPartnerUid || '').trim() || undefined;
+    const recurringPlanId = String(params.recurringPlanId || '').trim() || undefined;
+    const recurringVisitId = String(params.recurringVisitId || '').trim() || undefined;
 
     const fulfillmentType = parseBookingFulfillmentType(params.fulfillmentType);
     const preferredHelperGender = normalizePreferredHelperGender(
@@ -1287,6 +1330,9 @@ export class BookingService {
       serviceType: normalizedOrderServiceType,
       pricingProfile: normalizedOrderGstExempt ? { gstExempt: true } : undefined,
       consultationMeta: consultationMeta || resolvedLinesWithSchedule[0]?.consultationMeta,
+      ...(preferredPartnerUid ? { preferredPartnerUid } : {}),
+      ...(recurringPlanId ? { recurringPlanId } : {}),
+      ...(recurringVisitId ? { recurringVisitId } : {}),
     });
 
     const createdItems: InstanceType<typeof BookingItem>[] = [];
@@ -1899,7 +1945,10 @@ export class BookingService {
 
           const taskForAssign = BookingService.mergeTaskForAutoAssign(freshTask, line, order);
           const result = await BookNowAutoAssignService.autoAssign(taskForAssign as any, {
-            preferredPartnerUid: options?.preferredPartnerUid,
+            preferredPartnerUid:
+              options?.preferredPartnerUid ||
+              String((order as { preferredPartnerUid?: string }).preferredPartnerUid || '').trim() ||
+              undefined,
           });
 
           const postedArea =
@@ -3243,6 +3292,27 @@ export class BookingService {
       taskId: primaryTaskId,
       taskCount: tasks.length,
     });
+
+    if (order.recurringPlanId && order.recurringVisitId) {
+      setImmediate(() => {
+        void import('./BookNowRecurringService')
+          .then(({ BookNowRecurringService }) =>
+            BookNowRecurringService.onVisitOrderPaid({
+              recurringPlanId: String(order.recurringPlanId),
+              recurringVisitId: String(order.recurringVisitId),
+              bookingOrderId: order.orderId,
+              escrowId: order.paymentEscrowId,
+              paidAt: order.paidAt || new Date(),
+            }),
+          )
+          .catch((error) => {
+            logger.warn('Failed to mark Book Now recurring visit paid', {
+              orderId: order.orderId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      });
+    }
 
     return { success: true, order, tasks };
   }

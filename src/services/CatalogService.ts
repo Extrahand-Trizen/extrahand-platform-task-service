@@ -204,10 +204,20 @@ function comparePackageListItems(a: BookNowPackageListItem, b: BookNowPackageLis
   return a.name.localeCompare(b.name);
 }
 
+function locationPriceRank(source?: string | null): number {
+  if (source === 'area') return 3;
+  if (source === 'pincode') return 2;
+  if (source === 'city') return 1;
+  return 0;
+}
+
 function shouldPreferPackageListItem(
   candidate: BookNowPackageListItem,
   current: BookNowPackageListItem,
 ): boolean {
+  const rankDiff = locationPriceRank(candidate.pricing.pricingSource) - locationPriceRank(current.pricing.pricingSource);
+  if (rankDiff !== 0) return rankDiff > 0;
+
   const candidateHasImage = Boolean(candidate.primaryImageUrl);
   const currentHasImage = Boolean(current.primaryImageUrl);
   if (candidateHasImage !== currentHasImage) return candidateHasImage;
