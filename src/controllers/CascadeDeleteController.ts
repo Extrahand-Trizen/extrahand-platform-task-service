@@ -128,7 +128,7 @@ export class CascadeDeleteController {
 
 
 
-    const result = await CascadeDeleteService.getAccountDeletionPreview(profileId, deletionScope);
+    const result = await CascadeDeleteService.getAccountDeletionPreview(profileId, deletionScope, uid);
 
 
 
@@ -235,11 +235,9 @@ export class CascadeDeleteController {
 
 
     const result = await CascadeDeleteService.getActiveDeletionBlockers(
-
       profileId,
-
       deletionScope,
-
+      uid,
     );
 
 
@@ -289,5 +287,4 @@ export class CascadeDeleteController {
   }
 
 }
-
 

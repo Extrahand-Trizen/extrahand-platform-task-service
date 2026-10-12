@@ -7,6 +7,7 @@ import TaskReport from '../models/TaskReport';
 import TaskQuestion from '../models/TaskQuestion';
 import logger from '../config/logger';
 import { BadRequestError } from '../errors/AppError';
+import { AssignmentService } from './AssignmentService';
 
 /** Task statuses that block account deletion until completed or cancelled. */
 export const ACTIVE_DELETION_BLOCKER_STATUSES = [
@@ -200,7 +201,11 @@ export class CascadeDeleteService {
   /**
    * Preview counts for account deletion warnings (open/completed/cancelled poster tasks + applications).
    */
-  static async getAccountDeletionPreview(profileIdStr: string, deletionScope: string = 'full'): Promise<{
+  static async getAccountDeletionPreview(
+    profileIdStr: string,
+    deletionScope: string = 'full',
+    uid?: string,
+  ): Promise<{
     hasActiveBlockers: boolean;
     openTasksCount: number;
     completedTasksCount: number;
@@ -214,6 +219,9 @@ export class CascadeDeleteService {
     }
 
     const profileId = new mongoose.Types.ObjectId(profileIdStr);
+    const scope = String(deletionScope || 'full').trim().toLowerCase();
+    const includePosterTasks =
+      scope === 'full' || scope === 'poster-scoped' || scope === 'customer-scoped';
 
     const [
       openTasksCount,
@@ -222,11 +230,19 @@ export class CascadeDeleteService {
       applicationsCount,
       blockers,
     ] = await Promise.all([
-      Task.countDocuments({ requesterId: profileId, status: 'open' }),
-      Task.countDocuments({ requesterId: profileId, status: 'completed' }),
-      Task.countDocuments({ requesterId: profileId, status: 'cancelled' }),
-      TaskApplication.countDocuments({ applicantId: profileId }),
-      this.getActiveDeletionBlockers(profileIdStr, deletionScope),
+      includePosterTasks
+        ? Task.countDocuments({ requesterId: profileId, status: 'open' })
+        : Promise.resolve(0),
+      includePosterTasks
+        ? Task.countDocuments({ requesterId: profileId, status: 'completed' })
+        : Promise.resolve(0),
+      includePosterTasks
+        ? Task.countDocuments({ requesterId: profileId, status: 'cancelled' })
+        : Promise.resolve(0),
+      scope === 'partner-account'
+        ? Promise.resolve(0)
+        : TaskApplication.countDocuments({ applicantId: profileId }),
+      this.getActiveDeletionBlockers(profileIdStr, deletionScope, uid),
     ]);
 
     return {
@@ -246,6 +262,7 @@ export class CascadeDeleteService {
    * - full: poster tasks + helper applications + shared reviews/follows/reports/questions
    * - poster-scoped: poster tasks (+ apps on those tasks) only — keep helper applications/reputation
    * - helper-scoped: helper applications only — keep poster tasks
+   * - partner-account: remove Helper data, but only block on active Partner bookings
    */
   static async deleteAccountEligibleData(
     uid: string,
@@ -262,7 +279,9 @@ export class CascadeDeleteService {
   }> {
     const scope = String(deletionScope || 'full').trim().toLowerCase();
     const isPosterScoped = scope === 'poster-scoped' || scope === 'customer-scoped';
-    const isHelperScoped = scope === 'helper-scoped' || scope === 'role-scoped';
+    const isPartnerAccount = scope === 'partner-account';
+    const isHelperScoped =
+      scope === 'helper-scoped' || scope === 'role-scoped' || isPartnerAccount;
     const isFull = !isPosterScoped && !isHelperScoped;
 
     const profileId = profileIdStr && mongoose.Types.ObjectId.isValid(profileIdStr)
@@ -276,7 +295,7 @@ export class CascadeDeleteService {
 
     try {
       if (profileId) {
-        const blockers = await this.getActiveDeletionBlockers(profileIdStr!, scope);
+        const blockers = await this.getActiveDeletionBlockers(profileIdStr!, scope, uid);
         if (blockers.hasBlockers) {
           throw new BadRequestError(
             'Account cannot be deleted while user has ongoing assigned work.',
@@ -314,19 +333,121 @@ export class CascadeDeleteService {
         }
 
         if (isFull || isHelperScoped) {
+          if (isPartnerAccount) {
+            const activePartnerAssignment = {
+              $and: [
+                {
+                  $or: [
+                    { partnerId: { $exists: true, $ne: null } },
+                    { partnerUid: { $exists: true, $nin: [null, ''] } },
+                  ],
+                },
+                { status: { $in: [...ACTIVE_DELETION_BLOCKER_STATUSES] } },
+              ],
+            };
+            const activeHelperTasks = await Task.find({
+              assigneeId: profileId,
+              status: { $in: [...ACTIVE_DELETION_BLOCKER_STATUSES] },
+              $nor: [activePartnerAssignment],
+            })
+              .select('_id')
+              .lean();
+
+            for (const task of activeHelperTasks) {
+              await AssignmentService.unassignHelper({
+                taskId: String(task._id),
+                unassignedByUid: uid,
+              });
+            }
+
+            logger.info('Released active Helper assignments during Partner account deletion', {
+              uid,
+              count: activeHelperTasks.length,
+            });
+          }
+
           applicationsDeleteResult = await TaskApplication.deleteMany({ applicantId: profileId });
           logger.info(`✅ Deleted ${applicationsDeleteResult.deletedCount} task applications (by applicantId)`);
 
           const taskAssignmentClearResult = await Task.updateMany(
-            { assigneeId: profileId },
-            { $unset: { assigneeId: '', assignedAt: '' } },
+            {
+              assigneeId: profileId,
+              ...(isPartnerAccount
+                ? {
+                    $nor: [
+                      {
+                        $and: [
+                          {
+                            $or: [
+                              { partnerId: { $exists: true, $ne: null } },
+                              { partnerUid: { $exists: true, $nin: [null, ''] } },
+                            ],
+                          },
+                          { status: { $in: [...ACTIVE_DELETION_BLOCKER_STATUSES] } },
+                        ],
+                      },
+                    ],
+                  }
+                : {}),
+            },
+            {
+              $unset: {
+                assigneeId: '',
+                assigneeUid: '',
+                assignedAt: '',
+                assignedHelperName: '',
+                assignedToName: '',
+                assigneeName: '',
+                acceptedApplicationId: '',
+                ...(isPartnerAccount
+                  ? {
+                      partnerId: '',
+                      partnerUid: '',
+                      partnerAcceptedAt: '',
+                      confirmed: '',
+                      confirmedAt: '',
+                      confirmed_at: '',
+                    }
+                  : {}),
+              },
+            },
           );
           assigneeLinksCleared = taskAssignmentClearResult.modifiedCount || 0;
           logger.info(`✅ Cleared assignee links from ${assigneeLinksCleared} tasks for helper/partner role`);
+
+          if (isPartnerAccount) {
+            const completedPartnerLinks = await Task.updateMany(
+              {
+                status: { $nin: [...ACTIVE_DELETION_BLOCKER_STATUSES] },
+                $or: [{ partnerId: profileId }, { partnerUid: uid }],
+              },
+              {
+                $unset: {
+                  assigneeId: '',
+                  assigneeUid: '',
+                  assignedAt: '',
+                  assignedHelperName: '',
+                  assignedToName: '',
+                  assigneeName: '',
+                  acceptedApplicationId: '',
+                  partnerId: '',
+                  partnerUid: '',
+                  partnerAcceptedAt: '',
+                  confirmed: '',
+                  confirmedAt: '',
+                  confirmed_at: '',
+                },
+              },
+            );
+            logger.info('✅ Cleared completed Partner booking links during account deletion', {
+              uid,
+              modifiedCount: completedPartnerLinks.modifiedCount || 0,
+            });
+          }
         }
 
         // Shared reputation/audit records: only wipe on full account delete.
-        if (isFull) {
+        if (isFull || isPartnerAccount) {
           reviewsDeleteResult = await Review.deleteMany({
             $or: [{ reviewerId: profileId }, { reviewedId: profileId }],
           });
@@ -392,6 +513,7 @@ export class CascadeDeleteService {
   static async getActiveDeletionBlockers(
     profileIdStr: string,
     deletionScope: string = 'full',
+    uid?: string,
   ): Promise<{
     hasBlockers: boolean;
     asPosterCount: number;
@@ -403,25 +525,29 @@ export class CascadeDeleteService {
     }
 
     const scope = String(deletionScope || 'full').trim().toLowerCase();
+    const checkPartner = scope === 'partner-account';
     const checkPoster =
-      scope === 'full' ||
-      scope === 'poster-scoped' ||
-      scope === 'customer-scoped';
+      !checkPartner &&
+      (scope === 'full' || scope === 'poster-scoped' || scope === 'customer-scoped');
     const checkAssignee =
-      scope === 'full' ||
-      scope === 'helper-scoped' ||
-      scope === 'role-scoped';
+      !checkPartner &&
+      (scope === 'full' || scope === 'helper-scoped' || scope === 'role-scoped');
 
     const profileId = new mongoose.Types.ObjectId(profileIdStr);
     const statuses = [...ACTIVE_DELETION_BLOCKER_STATUSES];
+    const partnerFilter = {
+      status: { $in: statuses },
+      $or: [{ partnerId: profileId }, ...(uid ? [{ partnerUid: uid }] : [])],
+    };
 
-    const [asPosterCount, asAssigneeCount, posterSample, assigneeSample] = await Promise.all([
+    const [asPosterCount, asAssigneeCount, partnerCount, posterSample, assigneeSample, partnerSample] = await Promise.all([
       checkPoster
         ? Task.countDocuments({ requesterId: profileId, status: { $in: statuses } })
         : Promise.resolve(0),
       checkAssignee
         ? Task.countDocuments({ assigneeId: profileId, status: { $in: statuses } })
         : Promise.resolve(0),
+      checkPartner ? Task.countDocuments(partnerFilter) : Promise.resolve(0),
       checkPoster
         ? Task.find({ requesterId: profileId, status: { $in: statuses } })
             .select('_id title status')
@@ -433,6 +559,9 @@ export class CascadeDeleteService {
             .select('_id title status')
             .limit(3)
             .lean()
+        : Promise.resolve([] as any[]),
+      checkPartner
+        ? Task.find(partnerFilter).select('_id title status').limit(3).lean()
         : Promise.resolve([] as any[]),
     ]);
 
@@ -449,12 +578,19 @@ export class CascadeDeleteService {
         status: String(t.status),
         role: 'assignee' as const,
       })),
+      ...partnerSample.map((t) => ({
+        id: String(t._id),
+        title: String(t.title || ''),
+        status: String(t.status),
+        role: 'assignee' as const,
+      })),
     ];
 
+    const blockingAssigneeCount = checkPartner ? partnerCount : asAssigneeCount;
     return {
-      hasBlockers: asPosterCount > 0 || asAssigneeCount > 0,
+      hasBlockers: asPosterCount > 0 || blockingAssigneeCount > 0,
       asPosterCount,
-      asAssigneeCount,
+      asAssigneeCount: blockingAssigneeCount,
       sampleTasks,
     };
   }
@@ -523,4 +659,3 @@ export class CascadeDeleteService {
     }
   }
 }
-
