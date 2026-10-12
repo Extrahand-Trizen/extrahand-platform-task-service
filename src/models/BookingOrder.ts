@@ -84,8 +84,6 @@ export interface IBookingOrder extends Document {
   preferredHelperGender?: 'any' | 'male' | 'female';
   /** Soft preference for recurring Book Now visits — not a guarantee. */
   preferredPartnerUid?: string;
-  recurringPlanId?: string;
-  recurringVisitId?: string;
   serviceRecipient?: BookingServiceRecipient;
   serviceFlowType?: 'standard' | 'consultation_project';
   bookingKind?: 'standard' | 'consultation' | 'project';
@@ -178,8 +176,6 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
       required: false,
     },
     preferredPartnerUid: { type: String, trim: true, index: true },
-    recurringPlanId: { type: String, trim: true, index: true },
-    recurringVisitId: { type: String, trim: true, index: true },
     serviceRecipient: {
       type: {
         type: String,

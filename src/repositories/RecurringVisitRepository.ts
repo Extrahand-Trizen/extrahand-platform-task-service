@@ -235,39 +235,6 @@ export class RecurringVisitRepository {
       .lean() as Promise<RecurringVisitLean | null>;
   }
 
-  static async findBookNowPaymentOpenOverdue(options?: {
-    limit?: number;
-    now?: Date;
-  }): Promise<RecurringVisitLean[]> {
-    const now = options?.now ?? new Date();
-    return RecurringVisit.find({
-      serviceType: 'book_now',
-      status: 'payment_pending',
-      paymentDeadline: { $lte: now },
-    })
-      .select(DEFAULT_LIST_SELECT)
-      .sort({ paymentDeadline: 1 })
-      .limit(options?.limit ?? 100)
-      .lean() as Promise<RecurringVisitLean[]>;
-  }
-
-  static async findBookNowScheduledForPaymentOpen(options?: {
-    limit?: number;
-    openBefore?: Date;
-  }): Promise<RecurringVisitLean[]> {
-    const openBefore = options?.openBefore ?? new Date();
-    return RecurringVisit.find({
-      serviceType: 'book_now',
-      status: 'scheduled',
-      scheduledAt: { $lte: openBefore },
-      bookingOrderId: { $in: [null, undefined] },
-    })
-      .select(DEFAULT_LIST_SELECT)
-      .sort({ scheduledAt: 1 })
-      .limit(options?.limit ?? 100)
-      .lean() as Promise<RecurringVisitLean[]>;
-  }
-
   static async claimVisitStatus(params: {
     planId: mongoose.Types.ObjectId;
     visitId: string;

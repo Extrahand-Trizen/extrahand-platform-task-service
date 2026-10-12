@@ -55,6 +55,8 @@ router.post('/internal/location-pricing/hourly-prices/resolve', asyncHandler(Loc
 router.post('/internal/location-pricing/resolve-address', asyncHandler(LocationPricingController.resolveAddress));
 router.get('/internal/location-pricing/hourly-availability', asyncHandler(LocationPricingController.listHourlyHelperAvailabilities));
 router.post('/internal/location-pricing/hourly-availability/:type/:id/toggle', asyncHandler(LocationPricingController.toggleHourlyHelperAvailability));
+router.get('/internal/location-pricing/post-compare-availability/areas', asyncHandler(LocationPricingController.listPostCompareAreaAvailabilities));
+router.post('/internal/location-pricing/post-compare-availability/areas/:areaId/toggle', asyncHandler(LocationPricingController.togglePostCompareAreaAvailability));
 
 router.get('/categories', asyncHandler(CatalogController.listCategories));
 router.get('/book-now/hub', asyncHandler(CatalogController.getBookNowHubCatalog));

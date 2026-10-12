@@ -67,6 +67,45 @@ export function isEligibleHourlyHelperProfile(
 }
 
 export class HourlyHelperAvailabilityService {
+  static async countEligibleHelpersByArea(
+    areaNames: readonly string[],
+  ): Promise<Map<string, number>> {
+    const uniqueAreaNames = Array.from(new Set(areaNames.map((name) => canonicalServiceAreaName(name)).filter(Boolean)));
+    const counts = new Map(uniqueAreaNames.map((name) => [name, 0]));
+    if (uniqueAreaNames.length === 0) return counts;
+
+    const profiles = await mongoose.connection
+      .collection('profiles')
+      .find(
+        {
+          isActive: true,
+          'partnerProfile.status': 'approved',
+        },
+        {
+          projection: {
+            uid: 1,
+            roles: 1,
+            isActive: 1,
+            isAvailable: 1,
+            partnerProfile: 1,
+            helperWorkAreas: 1,
+          },
+        },
+      )
+      .toArray();
+
+    for (const profile of profiles) {
+      const record = profile as Record<string, unknown>;
+      if (!String(record.uid || '').trim()) continue;
+      for (const areaName of uniqueAreaNames) {
+        if (matchEligibleHourlyHelperArea(record, [areaName])) {
+          counts.set(areaName, (counts.get(areaName) || 0) + 1);
+        }
+      }
+    }
+    return counts;
+  }
+
   static async findEligibleHelpers(
     areaCandidates: readonly string[],
   ): Promise<EligibleHourlyHelper[]> {

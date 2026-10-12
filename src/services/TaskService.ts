@@ -49,9 +49,16 @@ import { sanitizeRequesterTaskUpdate } from '../utils/taskUpdateAllowlist';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { normalizeQcOrderToTask, findQcOrderById, updateQcOrderById } from '../utils/qcOrderTaskAdapter';
 import { invalidatePartnerLocationSubject } from './PartnerLocationService';
-import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
+import {
+  isRecurringVisitPlanTask,
+  RECURRING_META_TAG_PREFIX,
+} from '../utils/recurringVisitMeta';
 import { resolveTaskStartForCancellationPolicy } from './cancellation/cancellationContext';
 import { HourlyHelperLocationAvailabilityService } from './HourlyHelperLocationAvailabilityService';
+import {
+  isHourlyHelperTask,
+  PostCompareLocationAvailabilityService,
+} from './PostCompareLocationAvailabilityService';
 import {
   MY_TASKS_LIST_SELECT,
   buildApplicationPreviewsForTasks,
@@ -1062,6 +1069,22 @@ export class TaskService {
       if (typeof row.description === 'string') {
         row.description = truncateDescription(row.description);
       }
+      if (row.bookingSource === 'book_now' || row.bookingOrderId) {
+        row.recurring = { enabled: false };
+        row.tags = Array.isArray(row.tags)
+          ? row.tags.filter(
+              (tag) => !String(tag).startsWith(RECURRING_META_TAG_PREFIX),
+            )
+          : row.tags;
+        delete row.recurringPlan;
+        delete row.recurringPlanId;
+        delete row.recurringVisitId;
+        delete row.recurringSummary;
+        delete row.activeVisitId;
+        delete row.recurringParentPlan;
+        delete row.isRecurring;
+        delete row.planId;
+      }
       return row;
     });
 
@@ -1312,7 +1335,7 @@ export class TaskService {
     const normalizedTaskData = normalizeCreateTaskPayload(taskData);
     taskData = normalizedTaskData;
 
-    if (taskData.budgetType === 'hourly' || taskData.categorySlug === 'hourly-helper' || taskData.categorySlug === 'hourly-based') {
+    if (isHourlyHelperTask(taskData)) {
       const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
         areaName: taskData.location?.area,
         cityName: taskData.location?.city,
@@ -1320,6 +1343,8 @@ export class TaskService {
       if (!isEnabled) {
         throw new BadRequestError('Hourly Helper services are currently unavailable in your location.');
       }
+    } else {
+      await PostCompareLocationAvailabilityService.assertTaskAreaEnabled(taskData);
     }
 
     // Delivery/pickup tasks have system-generated titles and descriptions â€” skip meaningful-text checks

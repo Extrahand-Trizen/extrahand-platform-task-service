@@ -415,22 +415,25 @@ export class HourlyHelperLocationAvailabilityService {
 
     if (unifiedLocations.length === 0) return [];
 
-    const items: LocationAvailabilityItem[] = [];
-
-    for (const loc of unifiedLocations) {
+    const locationsToCount = unifiedLocations.filter((loc) => {
       const key = `${loc.type}:${loc.idStr}`;
       const keyLower = `${loc.type}:${loc.idStr.toLowerCase()}`;
       const keyCanon = `${loc.type}:${loc.canonicalName}`;
+      const rec = loc.explicitRecord || explicitMap.get(key) || explicitMap.get(keyLower) || explicitMap.get(keyCanon);
+      return params.isEnabled === undefined || (rec ? rec.isEnabled : false) === params.isEnabled;
+    });
+    const helperCounts = await HourlyHelperAvailabilityService.countEligibleHelpersByArea(
+      locationsToCount.map((loc) => loc.canonicalName),
+    );
 
+    const items: LocationAvailabilityItem[] = [];
+
+    for (const loc of locationsToCount) {
+      const key = `${loc.type}:${loc.idStr}`;
+      const keyLower = `${loc.type}:${loc.idStr.toLowerCase()}`;
+      const keyCanon = `${loc.type}:${loc.canonicalName}`;
       const rec = loc.explicitRecord || explicitMap.get(key) || explicitMap.get(keyLower) || explicitMap.get(keyCanon);
       const isEnabled = rec ? rec.isEnabled : false; // Enable-only: default is false
-
-      if (params.isEnabled !== undefined && isEnabled !== params.isEnabled) {
-        continue;
-      }
-
-      // Compute active helper count for this location
-      const helpers = await HourlyHelperAvailabilityService.findEligibleHelpers([loc.canonicalName]);
 
       items.push({
         _id: rec ? String(rec._id) : `default-${key}`,
@@ -441,7 +444,7 @@ export class HourlyHelperLocationAvailabilityService {
         parentDisplayName: loc.parentName || undefined,
         isEnabled,
         isExplicit: Boolean(rec),
-        eligibleHelperCount: helpers.length,
+        eligibleHelperCount: helperCounts.get(canonicalServiceAreaName(loc.canonicalName)) || 0,
         updatedAt: rec?.updatedAt,
         updatedBy: rec?.updatedBy,
       });
@@ -588,4 +591,3 @@ export class HourlyHelperLocationAvailabilityService {
     return false; // Enable-Only Selected Locations: unconfigured locations return false ("Coming Soon")
   }
 }
-

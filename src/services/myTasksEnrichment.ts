@@ -90,6 +90,9 @@ export async function buildApplicationPreviewsForTasks(
 export function buildRecurringSummary(
   task: Record<string, unknown>,
 ): RecurringSummary | null {
+  if (task.bookingSource === 'book_now' || task.bookingOrderId) {
+    return null;
+  }
   if (!isRecurringVisitPlanTask(task)) {
     return null;
   }
