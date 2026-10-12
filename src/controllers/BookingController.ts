@@ -102,6 +102,8 @@ export class BookingController {
       durationMinutes: Number(req.query.durationMinutes),
       availabilityMode: req.query.availabilityMode === 'hourly' ? 'hourly' : 'standard',
       area: String(req.query.area || '').trim() || undefined,
+      serviceArea: String(req.query.serviceArea || '').trim() || undefined,
+      serviceAddress: String(req.query.serviceAddress || '').trim() || undefined,
       lat: Number(req.query.lat),
       lng: Number(req.query.lng),
       preferredHelperGender: ['male', 'female', 'any'].includes(String(req.query.preferredHelperGender || '').trim().toLowerCase())
@@ -113,11 +115,16 @@ export class BookingController {
 
   static async getHourlyHelperAvailability(req: AuthenticatedRequest, res: Response): Promise<void> {
     const area = String(req.query.area || '').trim();
-    if (!area) {
-      throw new BadRequestError('area is required');
+    const address = String(req.query.address || '').trim();
+    const city = String(req.query.city || '').trim();
+    const state = String(req.query.state || '').trim();
+    if (!area && !address) {
+      throw new BadRequestError('area or address is required');
     }
 
-    const data = await HourlyHelperAvailabilityService.getExactAreaAvailability(area);
+    const data = address || city
+      ? await HourlyHelperAvailabilityService.getAvailabilityForAddress({ area, address, city, state })
+      : await HourlyHelperAvailabilityService.getExactAreaAvailability(area);
     res.json({ success: true, data });
   }
 

@@ -672,6 +672,8 @@ export class PaymentClient {
     amount: number;
     taskTitle?: string;
     visitId?: string;
+    /** Recurring Work id holding the visit escrow (with visitId). */
+    parentTaskId?: string;
     source?: string;
     isQuickCommerce?: boolean;
   }): Promise<{ success: boolean; payout?: any; requiresBankAccount?: boolean; error?: string }> {

@@ -8,11 +8,127 @@ import {
   recurringVisitConfig,
   DEFAULT_RECURRING_VISIT_BUFFER_SIZE,
 } from '../config/recurringVisitConfig';
-import { RecurringVisitRepository } from '../repositories/RecurringVisitRepository';
+import {
+  RecurringVisitRepository,
+  type RecurringVisitLean,
+} from '../repositories/RecurringVisitRepository';
+import { ConflictError } from '../errors/AppError';
 import type { ScheduleVisitRow } from '../types/recurringVisitSchedule';
 import type { VisitPaymentStatus } from '../types/recurringVisitSchedule';
 
 export type VisitStorageMode = 'embedded' | 'collection';
+
+export const RECURRING_VISIT_CONFLICT_CODE = 'RECURRING_VISIT_CONFLICT';
+
+export class RecurringVisitConflictError extends ConflictError {
+  constructor(message = 'This visit was just updated. Please refresh and try again.') {
+    super(message, RECURRING_VISIT_CONFLICT_CODE);
+  }
+}
+
+/**
+ * Per-task snapshot of each collection visit as it was read (updatedAt + per-field canonical JSON).
+ * Writes diff against it so only changed visits/fields are sent, conditioned on the read updatedAt.
+ */
+type VisitBaseline = { updatedAt: Date | null; fields: Record<string, string> };
+const visitBaselines = new WeakMap<object, Map<string, VisitBaseline>>();
+const hydratedTasks = new WeakSet<object>();
+
+const BASELINE_EXCLUDED_KEYS = new Set(['parentTaskId', 'createdAt', 'updatedAt']);
+
+function isObjectIdLike(value: unknown): boolean {
+  const t = (value as { _bsontype?: string })?._bsontype;
+  return t === 'ObjectId' || t === 'ObjectID';
+}
+
+function toPlainValue(value: unknown): unknown {
+  if (value && typeof value === 'object' && !isObjectIdLike(value) && !(value instanceof Date)) {
+    const withToObject = value as { toObject?: () => unknown };
+    if (typeof withToObject.toObject === 'function') return withToObject.toObject();
+  }
+  return value;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (value === null || value === undefined) return undefined;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
+  if (isObjectIdLike(value)) return String(value);
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (typeof value === 'object') {
+    // Cleared Mongoose nested paths (e.g. rescheduleRequest = undefined) still return a wrapper whose toObject() is null.
+    const plain = toPlainValue(value);
+    if (plain === null || plain === undefined) return undefined;
+    if (plain !== value) return canonicalize(plain);
+    const record = plain as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      if (key === '_id') continue;
+      const v = canonicalize(record[key]);
+      if (v !== undefined) out[key] = v;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  }
+  return value;
+}
+
+function canonicalVisitFields(
+  parentId: mongoose.Types.ObjectId,
+  row: ScheduleVisitRow,
+): Record<string, string> {
+  const upsert = mapScheduleRowToUpsert(parentId, row) as Record<string, unknown>;
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(upsert)) {
+    if (BASELINE_EXCLUDED_KEYS.has(key)) continue;
+    const c = canonicalize(value);
+    if (c !== undefined) fields[key] = JSON.stringify(c);
+  }
+  return fields;
+}
+
+function recordVisitBaselines(task: ITask, docs: RecurringVisitLean[]): void {
+  if (docs.length === 0) return;
+  let map = visitBaselines.get(task);
+  if (!map) {
+    map = new Map();
+    visitBaselines.set(task, map);
+  }
+  for (const doc of docs) {
+    const row = mapDocToScheduleRow(doc);
+    const raw = (doc as { updatedAt?: Date | string }).updatedAt;
+    map.set(row.visitId, {
+      updatedAt: raw ? new Date(raw) : null,
+      fields: canonicalVisitFields(task._id, row),
+    });
+  }
+}
+
+/**
+ * Re-baseline after a direct repository write on this task doc. With `onlyFields`, only those
+ * fields and updatedAt move forward, so in-memory edits to other fields are still diffed against
+ * what this request originally read (a concurrent writer's other fields are not overwritten).
+ */
+export function refreshVisitBaseline(
+  task: ITask,
+  doc: RecurringVisitLean | null | undefined,
+  onlyFields?: string[],
+): void {
+  const map = visitBaselines.get(task);
+  if (!doc || !map) return;
+  const visitId = String(doc.visitId);
+  const previous = map.get(visitId);
+  if (!onlyFields || !previous) {
+    recordVisitBaselines(task, [doc]);
+    return;
+  }
+  const latest = canonicalVisitFields(task._id, mapDocToScheduleRow(doc));
+  const fields = { ...previous.fields };
+  for (const key of onlyFields) {
+    if (latest[key] === undefined) delete fields[key];
+    else fields[key] = latest[key];
+  }
+  const raw = (doc as { updatedAt?: Date | string }).updatedAt;
+  map.set(visitId, { updatedAt: raw ? new Date(raw) : null, fields });
+}
 
 export function getPlanVisitStorage(task: ITask | Record<string, unknown>): VisitStorageMode {
   const plan = (task as { recurringPlan?: { visitStorage?: string } }).recurringPlan;
@@ -174,6 +290,7 @@ export async function getVisitsForPlan(
   if (storage === 'collection' && recurringVisitConfig.collectionReads) {
     const fromDb = await RecurringVisitRepository.listByParent(parentId);
     if (fromDb.length > 0) {
+      recordVisitBaselines(task, fromDb);
       return fromDb.map(mapDocToScheduleRow);
     }
     if (!recurringVisitConfig.legacyFallback) {
@@ -183,6 +300,7 @@ export async function getVisitsForPlan(
     const hasCollection = await RecurringVisitRepository.hasCollectionVisits(parentId);
     if (hasCollection) {
       const fromDb = await RecurringVisitRepository.listByParent(parentId);
+      recordVisitBaselines(task, fromDb);
       return fromDb.map(mapDocToScheduleRow);
     }
   }
@@ -196,17 +314,36 @@ export async function getVisitsForPlan(
 
   if (options?.forceReload && storage === 'collection') {
     const fromDb = await RecurringVisitRepository.listByParent(parentId);
+    recordVisitBaselines(task, fromDb);
     return fromDb.map(mapDocToScheduleRow);
   }
 
   return [];
 }
 
-/** Hydrate task.schedule in memory from collection for legacy service code paths. */
+/**
+ * Hydrate task.schedule in memory from collection for legacy service code paths.
+ * The in-memory copy is a working set only: for collection plans it is unmarked so a plain
+ * task.save() never writes it back to the deprecated embedded array.
+ */
 export async function hydrateTaskVisitsOntoSchedule(task: ITask): Promise<ScheduleVisitRow[]> {
   const visits: ScheduleVisitRow[] = await getVisitsForPlan(task);
   (task as ITask).schedule = visits as unknown as ITask['schedule'];
+  hydratedTasks.add(task);
+  if (shouldWriteCollection(task) && !recurringVisitConfig.dualWrite) {
+    (task as { unmarkModified?: (path: string) => void }).unmarkModified?.('schedule');
+  }
   return visits;
+}
+
+/** Hydrate once per task document; later calls reuse the in-memory working set. */
+export async function ensureVisitsLoaded(task: ITask): Promise<void> {
+  if (hydratedTasks.has(task)) return;
+  if (getPlanVisitStorage(task) !== 'collection' && Array.isArray(task.schedule) && task.schedule.length > 0) {
+    hydratedTasks.add(task);
+    return;
+  }
+  await hydrateTaskVisitsOntoSchedule(task);
 }
 
 export async function findVisitForPlan(
@@ -215,7 +352,10 @@ export async function findVisitForPlan(
 ): Promise<ScheduleVisitRow | undefined> {
   if (shouldWriteCollection(task) || usesCollectionStorage(task)) {
     const doc = await RecurringVisitRepository.findByParentAndVisitId(task._id, visitId);
-    if (doc) return mapDocToScheduleRow(doc);
+    if (doc) {
+      recordVisitBaselines(task, [doc as RecurringVisitLean]);
+      return mapDocToScheduleRow(doc);
+    }
   }
   const rows = Array.isArray(task.schedule) ? task.schedule : [];
   const hit = rows.find(
@@ -233,22 +373,118 @@ export async function persistVisitsFromTask(
   task: mongoose.Document & ITask,
   rows: ScheduleVisitRow[],
 ): Promise<void> {
-  const parentId = task._id;
   const writeCollection = shouldWriteCollection(task);
 
   if (writeCollection) {
-    const upserts = rows.map((row) => mapScheduleRowToUpsert(parentId, row));
-    await RecurringVisitRepository.upsertVisits(upserts);
+    const written = await writeChangedVisits(task, rows);
+    // Plan updatedAt doubles as the "visits changed" signal for list caches.
+    if (written > 0) (task as { updatedAt?: Date }).updatedAt = new Date();
   }
 
   if (recurringVisitConfig.dualWrite || !writeCollection) {
     (task as { schedule: unknown }).schedule = rows as unknown as ITask['schedule'];
     task.markModified('schedule');
+  } else if (rows.length > 0) {
+    // In-memory working set only; the Task pre-save hook keeps it out of the stored document.
+    (task as { schedule: unknown }).schedule = rows as unknown as ITask['schedule'];
+    hydratedTasks.add(task);
   } else {
     (task as { schedule?: unknown[] }).schedule = [];
+    hydratedTasks.delete(task);
   }
 
-  await updatePlanSummaryFromVisits(task, rows);
+  await updatePlanSummaryFromVisits(task, rows.length > 0 ? rows : undefined);
+}
+
+/**
+ * Collection write path. Visits read on this task doc are diffed against their baseline:
+ * unchanged visits are skipped, changed ones get a field-level update conditioned on the
+ * updatedAt they were read with (lost-update / double-transition guard). Visits created
+ * during this operation are insert-only. Docs never read via the store keep the legacy upsert.
+ */
+async function writeChangedVisits(task: ITask, rows: ScheduleVisitRow[]): Promise<number> {
+  const parentId = task._id;
+  const baselines = visitBaselines.get(task);
+  const conditional: Array<{
+    visitId: string;
+    expectedUpdatedAt: Date | null;
+    set: Record<string, unknown>;
+    unset: string[];
+    fields: Record<string, string>;
+  }> = [];
+  const inserts: ScheduleVisitRow[] = [];
+  const legacy: ScheduleVisitRow[] = [];
+
+  for (const row of rows) {
+    const visitId = String(row.visitId || '').trim();
+    if (!visitId) continue;
+    if (!baselines) {
+      legacy.push(row);
+      continue;
+    }
+    const baseline = baselines.get(visitId);
+    if (!baseline) {
+      inserts.push(row);
+      continue;
+    }
+    const current = canonicalVisitFields(parentId, row);
+    const upsert = mapScheduleRowToUpsert(parentId, row) as Record<string, unknown>;
+    const set: Record<string, unknown> = {};
+    const unset: string[] = [];
+    const keys = new Set([...Object.keys(current), ...Object.keys(baseline.fields)]);
+    for (const key of keys) {
+      if (current[key] === baseline.fields[key]) continue;
+      if (current[key] === undefined) unset.push(key);
+      else set[key] = toPlainValue(upsert[key]);
+    }
+    if (Object.keys(set).length === 0 && unset.length === 0) continue;
+    conditional.push({ visitId, expectedUpdatedAt: baseline.updatedAt, set, unset, fields: current });
+  }
+
+  if (conditional.length > 0) {
+    const updatedAt = new Date();
+    const results = await Promise.all(
+      conditional.map(async (op) => ({
+        op,
+        ok: await RecurringVisitRepository.updateVisitIfUnchanged(
+          parentId,
+          op.visitId,
+          op.expectedUpdatedAt,
+          op.set,
+          op.unset,
+          updatedAt,
+        ),
+      })),
+    );
+    let conflicted = false;
+    for (const { op, ok } of results) {
+      if (ok) baselines?.set(op.visitId, { updatedAt, fields: op.fields });
+      else {
+        baselines?.delete(op.visitId);
+        conflicted = true;
+      }
+    }
+    if (conflicted) throw new RecurringVisitConflictError();
+  }
+
+  if (inserts.length > 0) {
+    await RecurringVisitRepository.insertVisitsIfMissing(
+      inserts.map((row) => mapScheduleRowToUpsert(parentId, row)),
+    );
+    const fresh = await RecurringVisitRepository.listByParentAndVisitIds(
+      parentId,
+      inserts.map((r) => String(r.visitId).trim()),
+    );
+    recordVisitBaselines(task, fresh);
+  }
+
+  if (legacy.length > 0) {
+    await RecurringVisitRepository.upsertVisits(
+      legacy.map((row) => mapScheduleRowToUpsert(parentId, row)),
+    );
+  }
+
+  return conditional.length + inserts.length + legacy.length;
 }
 
 export async function updatePlanSummaryFromVisits(
@@ -304,7 +540,9 @@ export async function persistSingleVisitUpdate(
   visit: ScheduleVisitRow,
 ): Promise<void> {
   if (shouldWriteCollection(task)) {
-    await RecurringVisitRepository.upsertVisits([mapScheduleRowToUpsert(task._id, visit)]);
+    if ((await writeChangedVisits(task, [visit])) > 0) {
+      (task as { updatedAt?: Date }).updatedAt = new Date();
+    }
     if (recurringVisitConfig.dualWrite) {
       const rows = await hydrateTaskVisitsOntoSchedule(task);
       const idx = rows.findIndex((r) => r.visitId === visit.visitId);

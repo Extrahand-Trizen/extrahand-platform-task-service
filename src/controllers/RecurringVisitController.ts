@@ -86,11 +86,13 @@ export class RecurringVisitController {
 
     const { reason } = req.body;
 
-    await RecurringVisitService.endPlan({
-      taskId: req.params.id,
-      requesterProfileId: req.user!.profileId,
-      reason: typeof reason === 'string' ? reason : undefined,
-    });
+    await RecurringVisitService.withPlanLifecycleLock(req.params.id, () =>
+      RecurringVisitService.endPlan({
+        taskId: req.params.id,
+        requesterProfileId: req.user!.profileId!,
+        reason: typeof reason === 'string' ? reason : undefined,
+      }),
+    );
 
     ApiResponse.success(res, { ended: true }, 'Recurring plan ended');
   }
@@ -251,11 +253,13 @@ export class RecurringVisitController {
 
     const { reason } = req.body;
 
-    await RecurringVisitService.leavePlanByTasker({
-      taskId: req.params.id,
-      taskerProfileId: req.user!.profileId,
-      reason: typeof reason === 'string' ? reason : undefined,
-    });
+    await RecurringVisitService.withPlanLifecycleLock(req.params.id, () =>
+      RecurringVisitService.leavePlanByTasker({
+        taskId: req.params.id,
+        taskerProfileId: req.user!.profileId!,
+        reason: typeof reason === 'string' ? reason : undefined,
+      }),
+    );
 
     ApiResponse.success(res, { left: true }, 'Left recurring plan');
   }
@@ -277,5 +281,50 @@ export class RecurringVisitController {
     });
 
     ApiResponse.success(res, result, 'Recurring visit payment confirmed');
+  }
+
+  /** Service-to-service: a recurring visit payment was refunded in payment-service. */
+  static async visitPaymentRefunded(req: Request, res: Response): Promise<void> {
+    const parentTaskId = String(req.body?.parentTaskId || '').trim();
+    const visitId = String(req.body?.visitId || '').trim();
+    const escrowId = String(req.body?.escrowId || '').trim();
+    const eventId = String(req.body?.eventId || '').trim();
+
+    if (!parentTaskId || !visitId || !escrowId) {
+      throw new BadRequestError('parentTaskId, visitId, and escrowId are required');
+    }
+    if (String(req.body?.refundStatus || 'refunded') !== 'refunded') {
+      throw new BadRequestError('Unsupported refund status');
+    }
+
+    const result = await RecurringVisitService.markVisitPaymentRefundedFromPaymentService({
+      parentTaskId,
+      visitId,
+      escrowId,
+      eventId: eventId || undefined,
+    });
+
+    ApiResponse.success(res, result, 'Recurring visit refund applied');
+  }
+
+  /** Service-to-service: authoritative amount for a recurring visit payment order. */
+  static async visitPaymentQuote(req: Request, res: Response): Promise<void> {
+    const parentTaskId = String(req.body?.parentTaskId || '').trim();
+    const visitId = String(req.body?.visitId || '').trim();
+    const posterUid = String(req.body?.posterUid || '').trim();
+    const applicationId = String(req.body?.applicationId || '').trim();
+
+    if (!parentTaskId || !visitId || !posterUid) {
+      throw new BadRequestError('parentTaskId, visitId, and posterUid are required');
+    }
+
+    const quote = await RecurringVisitService.quoteVisitPayment({
+      parentTaskId,
+      visitId,
+      posterUid,
+      applicationId: applicationId || undefined,
+    });
+
+    ApiResponse.success(res, quote, 'Recurring visit payment quote');
   }
 }

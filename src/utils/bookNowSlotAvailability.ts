@@ -6,8 +6,8 @@ import {
   BOOK_NOW_WORK_AREA_PROXIMITY_KM,
   HYDERABAD_WORK_AREA_COORDS,
 } from '../constants/locations/hyderabadWorkAreaCoords';
-import { HOURLY_HELPER_CATEGORY_SLUG, HOURLY_SCHEDULED_END_HOUR, HOURLY_SCHEDULED_START_HOUR } from '../constants/hourlyBooking';
-import { partnerCategoryMatchesBookNowTask } from '../services/partnerVisibility';
+import { HOURLY_SCHEDULED_END_HOUR, HOURLY_SCHEDULED_START_HOUR } from '../constants/hourlyBooking';
+import { partnerHasHourlyHelperCategory } from './hourlyHelperServiceArea';
 
 /** Only confirmed (paid) bookings block slots — not unpaid checkouts. */
 const BLOCKING_STATUSES: BookingOrderStatus[] = ['paid', 'assigning', 'assigned'];
@@ -520,6 +520,8 @@ export type PartnerCapacityLocation = {
   requiredPartnerUid?: string;
   excludeOrderId?: string;
   excludeTaskIds?: string[];
+  /** Exact-area eligible partners; when set, replaces work-area key matching. */
+  allowedPartnerUids?: string[];
 };
 
 type EligibleCapacityPartner = {
@@ -537,11 +539,7 @@ function normalizePartnerGender(value: unknown): string | null {
 }
 
 export function partnerMatchesHourlyHelperCategory(categories: unknown[]): boolean {
-  return partnerCategoryMatchesBookNowTask(categories, {
-    category: 'other',
-    categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
-    categoryLabel: 'Hourly Helper',
-  });
+  return partnerHasHourlyHelperCategory(categories);
 }
 
 export function countPartnersAvailableForInterval(
@@ -601,13 +599,18 @@ export async function getPartnerCapacityForSlots(
       ? Math.round(requestedDurationMinutes)
       : BOOK_NOW_SLOT_STEP_MINUTES;
 
-  const locationKeys = locationKeysForPartnerCapacity({
-    city,
-    area: location?.area,
-    lat: location?.lat,
-    lng: location?.lng,
-  });
-  if (!locationKeys.length) return capacity;
+  const allowedPartnerUids = Array.isArray(location?.allowedPartnerUids)
+    ? new Set(location.allowedPartnerUids)
+    : null;
+  const locationKeys = allowedPartnerUids
+    ? []
+    : locationKeysForPartnerCapacity({
+        city,
+        area: location?.area,
+        lat: location?.lat,
+        lng: location?.lng,
+      });
+  if (!allowedPartnerUids && !locationKeys.length) return capacity;
 
   const Profile = mongoose.connection.collection('profiles');
   const profiles = await Profile.find(
@@ -647,16 +650,19 @@ export async function getPartnerCapacityForSlots(
       }
     }
 
-    const workAreas: string[] = Array.isArray(pp.workAreas)
-      ? (pp.workAreas as string[])
-      : Array.isArray(record.helperWorkAreas)
-        ? (record.helperWorkAreas as string[])
-        : [];
-    if (!workAreas.length) continue;
-    if (!partnerWorkAreasMatchLocationKeys(workAreas, locationKeys)) continue;
-
     const uid = String(record.uid || '').trim();
     if (!uid) continue;
+    if (allowedPartnerUids) {
+      if (!allowedPartnerUids.has(uid)) continue;
+    } else {
+      const workAreas: string[] = Array.isArray(pp.workAreas)
+        ? (pp.workAreas as string[])
+        : Array.isArray(record.helperWorkAreas)
+          ? (record.helperWorkAreas as string[])
+          : [];
+      if (!workAreas.length) continue;
+      if (!partnerWorkAreasMatchLocationKeys(workAreas, locationKeys)) continue;
+    }
     if (location?.requiredPartnerUid && uid !== location.requiredPartnerUid) continue;
     eligiblePartners.push({
       uid,
@@ -762,6 +768,7 @@ export async function assertBookNowSlotAvailable(params: {
   excludeOrderId?: string;
   excludeTaskIds?: string[];
   preferredHelperGender?: 'any' | 'male' | 'female';
+  allowedPartnerUids?: string[];
 }): Promise<void> {
   const date = String(params.date || '').trim();
   const city = normalizeCity(params.city);
@@ -825,6 +832,7 @@ export async function assertBookNowSlotAvailable(params: {
     preferredHelperGender: params.preferredHelperGender,
     excludeOrderId: params.excludeOrderId,
     excludeTaskIds: params.excludeTaskIds,
+    allowedPartnerUids: params.allowedPartnerUids,
   });
 
   if (!hasPartnerCapacityForSlot(capacity, slotToCheck)) {

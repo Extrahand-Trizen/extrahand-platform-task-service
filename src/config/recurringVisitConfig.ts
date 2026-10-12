@@ -31,11 +31,17 @@ export const recurringVisitConfig = {
   /** Payment sync cooldown on listVisits (sync=false). */
   paymentSyncCooldownMs: Number(process.env.RECURRING_PAYMENT_SYNC_COOLDOWN_MS || 60_000),
 
+  /** Minimum seconds between background reconciles triggered by GET /tasks/:id for one plan. */
+  readReconcileCooldownSeconds: Number(process.env.RECURRING_READ_RECONCILE_COOLDOWN_SECONDS || 60),
+
   /** Scheduler batch size for overdue payment visits. */
   schedulerBatchSize: Number(process.env.RECURRING_SCHEDULER_BATCH_SIZE || 100),
 
   /** Max concurrent escrow lookups during payment reconciliation. */
   paymentSyncConcurrency: Number(process.env.RECURRING_PAYMENT_SYNC_CONCURRENCY || 4),
+
+  /** A visit opened for payment always gets at least this long to pay (capped at visit start). */
+  paymentMinWindowMinutes: Number(process.env.RECURRING_PAYMENT_MIN_WINDOW_MINUTES || 120),
 };
 
 /** Statuses counted toward the materialized upcoming visit buffer. */

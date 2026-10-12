@@ -1,5 +1,7 @@
 import mongoose, { Schema, Model, Document } from "mongoose";
 import type { BookingServiceRecipient } from './BookingOrder';
+import { RescheduleHistoryEntrySchema, type IRescheduleHistoryEntry } from './rescheduleHistory';
+import { recurringVisitConfig } from '../config/recurringVisitConfig';
 
 export type ProjectExecutionStatus =
   | 'not_started'
@@ -173,6 +175,10 @@ export interface ITask extends Document {
   scheduledTimeEnd?: string;
   rescheduleCount?: number;
   lastRescheduledAt?: Date;
+  originalScheduledDate?: Date;
+  originalScheduledTimeStart?: string;
+  originalScheduledTimeEnd?: string;
+  rescheduleHistory?: IRescheduleHistoryEntry[];
   dateOption?: "flexible" | "on-date" | "before-date";
   timeSlot?: "morning" | "midday" | "afternoon" | "evening";
   flexibility: "strict" | "flexible" | "anytime";
@@ -638,6 +644,10 @@ const TaskSchema = new Schema<ITask>(
     scheduledTimeEnd: String,
     rescheduleCount: { type: Number, default: 0, min: 0 },
     lastRescheduledAt: Date,
+    originalScheduledDate: Date,
+    originalScheduledTimeStart: String,
+    originalScheduledTimeEnd: String,
+    rescheduleHistory: { type: [RescheduleHistoryEntrySchema], default: undefined },
     dateOption: {
       type: String,
       enum: ["flexible", "on-date", "before-date"],
@@ -687,6 +697,8 @@ const TaskSchema = new Schema<ITask>(
       budgetPerVisit: Number,
       lastMaterializedDate: Date,
       materializedBufferSize: { type: Number, default: 2 },
+      /** Total visits for end_on_date plans; unset for until_cancelled. */
+      totalPlanned: Number,
       nextVisitIndex: Number,
       completedVisitCount: { type: Number, default: 0 },
       consecutiveUnpaidCount: { type: Number, default: 0 },
@@ -1018,6 +1030,7 @@ const TaskSchema = new Schema<ITask>(
         type: String,
         enum: ['self', 'someone_else'],
         required: true,
+        default: 'self',
       },
       name: { type: String, trim: true },
       mobile: { type: String, trim: true },
@@ -1117,6 +1130,50 @@ TaskSchema.index(
   { parentTaskId: 1, status: 1, recurringVisitId: 1 },
   { name: 'recurring_child_visit_lookup' },
 );
+// Legacy embedded plans only: deleted-child recovery on GET /tasks/:id misses.
+TaskSchema.index(
+  { 'schedule.childTaskId': 1 },
+  {
+    name: 'legacy_schedule_child_lookup',
+    partialFilterExpression: { 'schedule.childTaskId': { $type: 'objectId' } },
+  },
+);
+// Recurring scheduler: active plan scan with deterministic _id paging.
+TaskSchema.index(
+  { 'recurringPlan.status': 1, 'recurring.enabled': 1, _id: 1 },
+  { name: 'recurring_active_plan_scan' },
+);
+
+/**
+ * Collection-backed recurring plans keep visits in RecurringVisit; task.schedule is only an
+ * in-memory working set there. Never persist it back to the deprecated embedded array.
+ */
+TaskSchema.pre('save', function (next) {
+  const doc = this as unknown as Document & {
+    recurringPlan?: { visitStorage?: string };
+    schedule?: unknown[];
+  };
+  if (
+    doc.recurringPlan?.visitStorage !== 'collection' ||
+    recurringVisitConfig.dualWrite ||
+    !Array.isArray(doc.schedule) ||
+    doc.schedule.length === 0 ||
+    !doc.isModified('schedule')
+  ) {
+    return next();
+  }
+  doc.$locals.recurringVisitWorkingSet = [...doc.schedule];
+  doc.schedule = [];
+  next();
+});
+
+TaskSchema.post('save', function (doc: Document & { schedule?: unknown[] }) {
+  const working = doc.$locals?.recurringVisitWorkingSet as unknown[] | undefined;
+  if (!working) return;
+  delete doc.$locals.recurringVisitWorkingSet;
+  doc.schedule = working;
+  doc.unmarkModified('schedule');
+});
 
 const Task: Model<ITask> =
   mongoose.models.Task || mongoose.model<ITask>("Task", TaskSchema);

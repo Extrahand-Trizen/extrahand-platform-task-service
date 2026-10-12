@@ -1,10 +1,55 @@
 import { Router } from 'express';
 import { PartnerBookNowController } from '../controllers/PartnerBookNowController';
+import { BookNowRecurringController } from '../controllers/BookNowRecurringController';
 import { authMiddleware } from '../middleware/auth';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
 import { asyncHandler } from '../middleware/errorHandler';
 
 const router = Router();
+
+router.post(
+  '/recurring-plans',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BookNowRecurringController.createPlan),
+);
+router.get(
+  '/recurring-plans',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BookNowRecurringController.listPlans),
+);
+router.get(
+  '/recurring-plans/:id',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BookNowRecurringController.getPlan),
+);
+router.get(
+  '/recurring-plans/:id/visits',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BookNowRecurringController.listVisits),
+);
+router.post(
+  '/recurring-plans/:id/cancel',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BookNowRecurringController.cancelPlan),
+);
+router.post(
+  '/recurring-visits/:id/cancel',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BookNowRecurringController.cancelVisit),
+);
+router.post(
+  '/recurring-visits/:id/reschedule',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(BookNowRecurringController.rescheduleVisit),
+);
+
 
 // GET /api/v1/book-now/available-leads
 // Returns unassigned Book Now tasks matching partner's work areas.

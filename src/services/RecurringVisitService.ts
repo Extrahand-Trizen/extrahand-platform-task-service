@@ -2,7 +2,8 @@ import crypto from 'crypto';
 import mongoose from 'mongoose';
 import Task, { ITask } from '../models/Task';
 import TaskApplication from '../models/TaskApplication';
-import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
+import RecurringVisit from '../models/RecurringVisit';
+import { BadRequestError, ConflictError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
 import {
   decodeRecurringMetaFromTask,
@@ -21,6 +22,11 @@ import {
 } from '../utils/recurringVisitScheduleBuilder';
 import { selectWorkDetailsPreviewVisits } from '../utils/recurringWorkDetailsPreview';
 import {
+  compareRecurringVisitsBySchedule,
+  resolveRecurringVisitPaymentOwner,
+  visitRowHasHeldPayment,
+} from '../utils/recurringVisitPaymentOwner';
+import {
   canTaskerStartVisit,
   DEFAULT_CONSECUTIVE_UNPAID_PAUSE_THRESHOLD,
   DEFAULT_MATERIALIZED_BUFFER_SIZE,
@@ -33,12 +39,20 @@ import {
 } from '../types/recurringVisitSchedule';
 import { DEFAULT_RECURRING_VISIT_BUFFER_SIZE, recurringVisitConfig } from '../config/recurringVisitConfig';
 import {
+  computeSafePaymentDeadline,
+  resolveVisitStartInstant,
+  type PaymentDeadlinePolicy,
+} from '../recurring-core/time';
+import {
+  ensureVisitsLoaded,
   getVisitsForPlan,
   hydrateTaskVisitsOntoSchedule,
   markPlanCollectionStorage,
   mapDocToScheduleRow,
   mapScheduleRowToUpsert,
   persistVisitsFromTask,
+  RecurringVisitConflictError,
+  refreshVisitBaseline,
   shouldWriteCollection,
   updatePlanSummaryFromVisits,
 } from './RecurringVisitPlanStore';
@@ -50,6 +64,14 @@ import { fireDialogWhatsAppForUser } from '../clients/fireDialogWhatsAppForUser'
 import { taskOpenAppButton } from '../utils/whatsappTaskButtons';
 import { NotificationClient } from './NotificationClient';
 import { PaymentClient } from './PaymentClient';
+import {
+  evaluateVisitEscrowBinding,
+  isEscrowRecordHeld,
+  isEscrowRecordPaid,
+  resolveExpectedVisitAmount,
+  resolveRecurringAcceptedOfferAmount,
+  type VisitEscrowBindingResult,
+} from './recurringVisitPaymentBinding';
 
 function invalidateTaskDetailCache(taskId: string): void {
   const cacheKey = `task:detail:${taskId}`;
@@ -63,12 +85,46 @@ function invalidateTaskDetailCache(taskId: string): void {
 
 function isOptimisticConcurrencyError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
+  if (error instanceof RecurringVisitConflictError) return true;
   const name = String((error as { name?: string }).name || '');
   if (name === 'VersionError') return true;
   const message = String((error as { message?: string }).message || '');
   return (
     message.includes('No matching document found for id') && message.includes('version')
   );
+}
+
+/** E11000 from a single write or a bulkWrite where every failed op is a duplicate key. */
+export function isDuplicateKeyError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const e = error as { code?: number; writeErrors?: Array<{ code?: number; err?: { code?: number } }> };
+  if (Array.isArray(e.writeErrors) && e.writeErrors.length > 0) {
+    return e.writeErrors.every((w) => (w.code ?? w.err?.code) === 11000);
+  }
+  return e.code === 11000;
+}
+
+function planSummarySignature(plan: Record<string, unknown>): string {
+  const toKey = (v: unknown) => (v instanceof Date ? v.toISOString() : v ?? null);
+  return JSON.stringify([
+    toKey(plan.completedVisitCount),
+    toKey(plan.nextVisitIndex),
+    toKey(plan.lastMaterializedDate),
+    toKey(plan.nextVisitDate),
+    toKey(plan.pendingPaymentVisitId),
+    toKey(plan.materializedBufferSize),
+  ]);
+}
+
+/** Notifications never block the API response; failures are logged, not surfaced. */
+function runInBackground(label: string, task: () => Promise<unknown>): void {
+  setImmediate(() => {
+    task().catch((error: unknown) => {
+      logger.warn(`[RecurringVisitService] background ${label} failed`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  });
 }
 
 function delay(ms: number): Promise<void> {
@@ -96,7 +152,9 @@ async function saveRecurringPlanDocument(
   invalidateTaskDetailCache(taskId);
 }
 
+const RECURRING_VISIT_RESCHEDULE_MAX_DAYS_AHEAD = 90;
 const reconcilePlanStateInFlight = new Map<string, Promise<void>>();
+const reconcileLastRunAt = new Map<string, number>();
 const openNextVisitForPaymentInFlight = new Set<string>();
 
 type OpenNextVisitForPaymentOptions = {
@@ -110,7 +168,7 @@ function resolvePendingPaymentPayload(
   return {
     visitId: visit.visitId,
     amount: Number(visit.amount ?? plan.budgetPerVisit ?? 0),
-    paymentDeadline: visit.paymentDeadline ?? getPaymentDeadline(new Date(visit.date)),
+    paymentDeadline: visit.paymentDeadline ?? getPaymentDeadline(visit),
   };
 }
 
@@ -136,13 +194,11 @@ async function safeGetTaskEscrowRecord(
   visitId?: string,
 ): Promise<Record<string, unknown> | null> {
   try {
-    if (visitId) {
-      const byVisit = (await PaymentClient.getEscrowByTaskIdAndVisitId(taskId, visitId)) as
-        | Record<string, unknown>
-        | null;
-      if (byVisit) return byVisit;
-    }
-    return (await PaymentClient.getEscrowByTaskId(taskId)) as Record<string, unknown> | null;
+    // Visit-scoped only: the newest task-level escrow may belong to another visit.
+    if (!visitId) return null;
+    return (await PaymentClient.getEscrowByTaskIdAndVisitId(taskId, visitId)) as
+      | Record<string, unknown>
+      | null;
   } catch (error) {
     logger.warn('[RecurringVisitService] Escrow lookup failed during visit reschedule', {
       taskId,
@@ -190,10 +246,80 @@ function createVisitRow(
   };
 }
 
-function getPaymentDeadline(visitDate: Date): Date {
-  const deadline = new Date(visitDate);
-  deadline.setHours(deadline.getHours() - DEFAULT_PAYMENT_CUTOFF_HOURS_BEFORE_VISIT);
-  return deadline;
+export const VISIT_EXPIRED_BEFORE_PAYMENT_REASON = 'expired_before_payment_opened';
+
+function postWorkPaymentDeadlinePolicy(): PaymentDeadlinePolicy {
+  const minWindow = Number(recurringVisitConfig.paymentMinWindowMinutes);
+  return {
+    cutoffMinutes: DEFAULT_PAYMENT_CUTOFF_HOURS_BEFORE_VISIT * 60,
+    minWindowMinutes: Number.isFinite(minWindow) && minWindow > 0 ? minWindow : 120,
+  };
+}
+
+function resolveVisitStartForPayment(
+  visit: Pick<ScheduleVisitRow, 'date' | 'scheduledTimeStart'>,
+  planTask?: ITask | null,
+): Date | null {
+  const label =
+    visit.scheduledTimeStart ||
+    (planTask as unknown as { recurringPlan?: { visitTime?: string } } | null)?.recurringPlan?.visitTime ||
+    planTask?.scheduledTimeStart;
+  return resolveVisitStartInstant(visit.date, label);
+}
+
+/**
+ * Payment due 24h before the visit's IST start, but never sooner than the minimum window from now
+ * and never after the start. A visit that already started (repair paths only) gets the minimum
+ * window so a deadline is never in the past.
+ */
+export function getPaymentDeadline(
+  visit: Pick<ScheduleVisitRow, 'date' | 'scheduledTimeStart'>,
+  planTask?: ITask | null,
+  now: Date = new Date(),
+): Date {
+  const policy = postWorkPaymentDeadlinePolicy();
+  const start = resolveVisitStartForPayment(visit, planTask);
+  const safe = start ? computeSafePaymentDeadline(start, now, policy) : null;
+  return safe ?? new Date(now.getTime() + policy.minWindowMinutes * 60 * 1000);
+}
+
+/** Keep a still-future deadline; replace a missing or passed one. */
+function keepOrRefreshPaymentDeadline(
+  visit: ScheduleVisitRow,
+  planTask?: ITask | null,
+  now: Date = new Date(),
+): Date {
+  const existing = visit.paymentDeadline ? new Date(visit.paymentDeadline) : null;
+  if (existing && !Number.isNaN(existing.getTime()) && existing.getTime() > now.getTime()) {
+    return existing;
+  }
+  return getPaymentDeadline(visit, planTask, now);
+}
+
+/**
+ * Unopened, unpaid visits whose start has passed can no longer be paid for. They are skipped by
+ * the system (not counted as unpaid) so they are never opened with a deadline in the past.
+ */
+export function expireStartedUnopenedVisits(
+  rows: ScheduleVisitRow[],
+  planTask?: ITask | null,
+  now: Date = new Date(),
+): number {
+  let expired = 0;
+  for (const visit of rows) {
+    if (String(visit.status) !== 'scheduled') continue;
+    if (visitRowHasHeldPayment(visit) || visit.paymentStatus === 'held' || visit.paidAt) continue;
+    const start = resolveVisitStartForPayment(visit, planTask);
+    if (!start || start.getTime() > now.getTime()) continue;
+    visit.status = 'skipped';
+    visit.skippedAt = now;
+    visit.skippedBy = 'system';
+    visit.skipReason = VISIT_EXPIRED_BEFORE_PAYMENT_REASON;
+    visit.paymentDeadline = undefined;
+    visit.updatedAt = now;
+    expired += 1;
+  }
+  return expired;
 }
 
 function getScheduleRows(task: ITask): ScheduleVisitRow[] {
@@ -245,18 +371,42 @@ function sortScheduleRows(rows: ScheduleVisitRow[]): ScheduleVisitRow[] {
 }
 
 function sortScheduleRowsByDate(rows: ScheduleVisitRow[]): ScheduleVisitRow[] {
-  return [...rows].sort(
-    (a, b) =>
-      normalizeDateOnly(new Date(a.date)).getTime() -
-        normalizeDateOnly(new Date(b.date)).getTime() ||
-      (a.visitIndex ?? 0) - (b.visitIndex ?? 0),
-  );
+  return [...rows].sort(compareRecurringVisitsBySchedule);
 }
 
 function stripRecurringPlanTitleSuffix(title: string): string {
   return String(title || '')
     .replace(/\s*[·•]\s*Visit\s+\d+\s*$/i, '')
     .trim();
+}
+
+/** Fixed-range visit count; derived from the schedule for plans created before it was persisted. */
+function resolvePlanTotalPlanned(task: ITask): number {
+  const plan = (task as unknown as { recurringPlan?: Record<string, unknown> }).recurringPlan;
+  if (!plan || plan.endType !== 'end_on_date') return 0;
+  const stored = Number(plan.totalPlanned) || 0;
+  if (stored > 0) return stored;
+  const startRaw =
+    (task as unknown as { recurring?: { startDate?: Date } }).recurring?.startDate ??
+    task.scheduledDate;
+  if (!startRaw || !plan.endDate) return 0;
+  try {
+    return countPlannedRecurringOccurrences(
+      buildScheduleConfigFromMeta(
+        {
+          pattern: plan.pattern as RecurringMetaPayload['pattern'],
+          selectedWeekdays: (plan.selectedWeekdays as number[]) || [],
+          endType: 'end_on_date',
+          expectedDurationMinutes: Number(plan.expectedDurationMinutes) || 60,
+          visitTime: String(plan.visitTime || ''),
+        },
+        new Date(String(startRaw)),
+        new Date(String(plan.endDate)),
+      ),
+    );
+  } catch {
+    return 0;
+  }
 }
 
 function isVisitPassed(visit: ScheduleVisitRow): boolean {
@@ -392,15 +542,7 @@ function readEscrowMetadataVisitId(
 }
 
 function isEscrowPaid(escrow: Record<string, unknown> | null | undefined): boolean {
-  if (!escrow) return false;
-  const paymentStatus = String(escrow.paymentStatus || '').toLowerCase();
-  const status = String(escrow.status || '').toLowerCase();
-  return (
-    paymentStatus === 'captured' ||
-    paymentStatus === 'authorized' ||
-    status === 'held' ||
-    status === 'released'
-  );
+  return isEscrowRecordPaid(escrow);
 }
 
 async function alignEscrowVisitMetadataIfNeeded(params: {
@@ -409,8 +551,20 @@ async function alignEscrowVisitMetadataIfNeeded(params: {
   escrowId: string;
   escrow?: Record<string, unknown> | null;
 }): Promise<void> {
-  const metaVisitId = readEscrowMetadataVisitId(params.escrow);
+  const escrow =
+    params.escrow ??
+    ((await PaymentClient.getEscrowByEscrowId(params.escrowId)) as Record<string, unknown> | null);
+  const metaVisitId = readEscrowMetadataVisitId(escrow);
   if (metaVisitId === params.visitId) return;
+  if (metaVisitId) {
+    logger.warn('[RecurringVisitService] Refusing to move escrow paid for another visit', {
+      taskId: params.taskId,
+      escrowVisitId: metaVisitId,
+      targetVisitId: params.visitId,
+      escrowId: params.escrowId,
+    });
+    return;
+  }
 
   const reassign = await PaymentClient.reassignRecurringVisitEscrow({
     escrowId: params.escrowId,
@@ -426,6 +580,21 @@ async function alignEscrowVisitMetadataIfNeeded(params: {
       error: reassign.error,
     });
   }
+}
+
+/** An escrow without visit metadata must not be attributed to a second visit. */
+async function isEscrowHeldByAnotherVisit(
+  taskId: string,
+  visitId: string,
+  escrowId: string,
+): Promise<boolean> {
+  if (!mongoose.Types.ObjectId.isValid(taskId)) return false;
+  const holder = await RecurringVisit.exists({
+    parentTaskId: new mongoose.Types.ObjectId(taskId),
+    escrowId,
+    visitId: { $ne: visitId },
+  });
+  return Boolean(holder);
 }
 
 async function resolvePaidEscrowForVisit(
@@ -453,7 +622,10 @@ async function resolvePaidEscrowForVisit(
         const metaVisitId = readEscrowMetadataVisitId(escrowRecord);
         if (!metaVisitId || metaVisitId === visitId) {
           const escrowId = resolveEscrowRecordId(escrowRecord);
-          if (escrowId) {
+          if (
+            escrowId &&
+            (metaVisitId || !(await isEscrowHeldByAnotherVisit(taskId, visitId, escrowId)))
+          ) {
             if (!metaVisitId && options?.alignMissingVisitMetadata) {
               await alignEscrowVisitMetadataIfNeeded({
                 taskId,
@@ -469,30 +641,14 @@ async function resolvePaidEscrowForVisit(
     }
   }
 
-  // Assignment payment may be stored against taskId before visit metadata is indexed.
-  const byTask = (await PaymentClient.getEscrowByTaskId(taskId)) as
-    | Record<string, unknown>
-    | null;
-  if (!isEscrowPaid(byTask)) return null;
-
-  const metaVisitId = readEscrowMetadataVisitId(byTask);
-  if (metaVisitId && metaVisitId !== visitId) return null;
-
-  const escrowId = resolveEscrowRecordId(byTask);
-  if (!escrowId) return null;
-
-  if (rowEscrowId && rowEscrowId !== escrowId) return null;
-
-  if (!metaVisitId && options?.alignMissingVisitMetadata) {
-    await alignEscrowVisitMetadataIfNeeded({
-      taskId,
-      visitId,
-      escrowId,
-      escrow: byTask as Record<string, unknown>,
-    });
-  }
-
-  return { escrowId, escrow: byTask as Record<string, unknown> };
+  // No task-level "newest payment" fallback: an untagged payment on the Work cannot be
+  // attributed to this visit without the visit's own escrow id.
+  logger.debug('[RecurringVisitService] No visit-scoped paid escrow', {
+    taskId,
+    visitId,
+    rowEscrowId: rowEscrowId || undefined,
+  });
+  return null;
 }
 
 /** Resolve held escrow for a visit before reschedule payment transfer (row + payment service). */
@@ -502,6 +658,30 @@ async function resolveVisitHeldEscrowForRescheduleTransfer(
 ): Promise<{ escrowId: string; paidAt: Date; amount?: number } | null> {
   const escrowFromRow = String(visit.escrowId || '').trim();
   if (visitRowHasHeldPayment(visit) && escrowFromRow) {
+    // The row can be stale (refunded or released after it was written); only a held escrow moves.
+    // When the payment service is unreachable the reassign API re-validates before moving.
+    const record = (await PaymentClient.getEscrowByEscrowId(escrowFromRow)) as
+      | Record<string, unknown>
+      | null;
+    if (record) {
+      const recordTaskId = String(record.taskId || '').trim();
+      const recordVisitId = readEscrowMetadataVisitId(record);
+      if (
+        !isEscrowRecordHeld(record) ||
+        (recordTaskId && recordTaskId !== taskId) ||
+        (recordVisitId && recordVisitId !== visit.visitId)
+      ) {
+        logger.warn('[RecurringVisitService] Visit row payment is not an active held escrow; not moving it', {
+          taskId,
+          visitId: visit.visitId,
+          escrowId: escrowFromRow,
+          status: record.status,
+          paymentStatus: record.paymentStatus,
+          escrowVisitId: recordVisitId || undefined,
+        });
+        return null;
+      }
+    }
     return {
       escrowId: escrowFromRow,
       paidAt: visit.paidAt ? new Date(visit.paidAt) : new Date(),
@@ -513,7 +693,7 @@ async function resolveVisitHeldEscrowForRescheduleTransfer(
     rowEscrowId: String(visit.escrowId || ''),
     alignMissingVisitMetadata: true,
   });
-  if (paidEscrow) {
+  if (paidEscrow && isEscrowRecordHeld(paidEscrow.escrow)) {
     return {
       escrowId: paidEscrow.escrowId,
       paidAt: visit.paidAt ? new Date(visit.paidAt) : new Date(),
@@ -521,36 +701,7 @@ async function resolveVisitHeldEscrowForRescheduleTransfer(
     };
   }
 
-  const status = String(visit.status || '');
-  const hasAssignmentPaymentIntent =
-    ['confirmed', 'in_progress', 'payment_pending'].includes(status) &&
-    Boolean(visit.childTaskId || visit.assigneeId);
-  if (!hasAssignmentPaymentIntent) return null;
-
-  const byTask = await safeGetTaskEscrowRecord(taskId);
-  if (!byTask || !isEscrowPaid(byTask)) return null;
-
-  const metaVisitId = readEscrowMetadataVisitId(byTask);
-  if (metaVisitId && metaVisitId !== visit.visitId) return null;
-
-  const escrowId = resolveEscrowRecordId(byTask);
-  if (!escrowId) return null;
-
-  return {
-    escrowId,
-    paidAt: visit.paidAt ? new Date(visit.paidAt) : new Date(),
-    amount: visit.amount,
-  };
-}
-
-function visitRowHasHeldPayment(visit: ScheduleVisitRow): boolean {
-  const paymentStatus = String(visit.paymentStatus || '');
-  const hasPaidAt = Boolean(visit.paidAt);
-  const hasEscrow = Boolean(String(visit.escrowId || '').trim());
-  if (paymentStatus === 'held' || paymentStatus === 'released') {
-    return hasPaidAt && hasEscrow;
-  }
-  return hasPaidAt && hasEscrow;
+  return null;
 }
 
 /** Visits that have not started work and can reopen when the tasker leaves the plan. */
@@ -591,6 +742,42 @@ function mapTaskProgressToVisitStatus(taskStatus: string): VisitStatus | null {
 }
 
 export class RecurringVisitService {
+  /**
+   * Serialize plan-ending flows (end / leave) that issue refunds. A concurrent duplicate gets a 409
+   * instead of running a parallel refund loop. Without Redis, per-visit refund locks and the
+   * persisted refunded state still guard against double refunds.
+   */
+  static async withPlanLifecycleLock<T>(taskId: string, fn: () => Promise<T>): Promise<T> {
+    const redis = getRedisClient();
+    const lockKey = `recurring:plan:lifecycle:${taskId}`;
+    const token = crypto.randomUUID();
+    let held = false;
+    if (redis) {
+      try {
+        held = (await redis.set(lockKey, token, 'EX', 120, 'NX')) === 'OK';
+        if (!held) {
+          throw new ConflictError('This recurring plan is already being updated. Please wait a moment.');
+        }
+      } catch (error) {
+        if (error instanceof ConflictError) throw error;
+      }
+    }
+    try {
+      return await fn();
+    } finally {
+      if (held && redis) {
+        await redis
+          .eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+            1,
+            lockKey,
+            token,
+          )
+          .catch(() => undefined);
+      }
+    }
+  }
+
   /** 1-based visit number for notifications (position in plan schedule, not stale visitIndex). */
   static resolveVisitDisplayNumber(parent: ITask, visit: ScheduleVisitRow): number {
     const rows = sortScheduleRows(getScheduleRows(parent));
@@ -618,6 +805,7 @@ export class RecurringVisitService {
       return { workTitle: fallback };
     }
 
+    await ensureVisitsLoaded(parent);
     const visit = findVisit(parent, String(task.recurringVisitId));
     if (!visit) {
       return { workTitle: fallback };
@@ -763,11 +951,28 @@ export class RecurringVisitService {
       null;
 
     const assignmentEscrowIdTrimmed = String(assignmentEscrowId || '').trim();
+    let paidVisitId = String(preferredVisitId || '').trim();
     if (assignmentEscrowIdTrimmed) {
       const byAssignmentEscrow = (await PaymentClient.getEscrowByEscrowId(
         assignmentEscrowIdTrimmed,
       )) as Record<string, unknown> | null;
       if (isEscrowPaid(byAssignmentEscrow)) {
+        const escrowTaskId = String(byAssignmentEscrow?.taskId || '').trim();
+        if (escrowTaskId && escrowTaskId !== taskId) {
+          throw new BadRequestError('This payment belongs to a different work');
+        }
+        const escrowVisitId = readEscrowMetadataVisitId(byAssignmentEscrow);
+        if (escrowVisitId && paidVisitId && escrowVisitId !== paidVisitId) {
+          throw new BadRequestError('This payment belongs to a different visit');
+        }
+        paidVisitId = escrowVisitId || paidVisitId;
+        if (!paidVisitId) {
+          throw new BadRequestError('This payment is not linked to a visit');
+        }
+        const paidVisit = rows.find((visit) => visit.visitId === paidVisitId);
+        if (!paidVisit || VISIT_TERMINAL_STATUSES.has(paidVisit.status as VisitStatus)) {
+          throw new BadRequestError('The visit this payment was made for is no longer available');
+        }
         paidEscrowForVisit = {
           escrowId: assignmentEscrowIdTrimmed,
           escrow: byAssignmentEscrow as Record<string, unknown>,
@@ -775,32 +980,15 @@ export class RecurringVisitService {
       }
     }
 
-    const preferredVisit = preferredVisitId
-      ? rows.find((visit) => visit.visitId === preferredVisitId)
+    const preferredVisit = paidVisitId
+      ? rows.find((visit) => visit.visitId === paidVisitId)
       : undefined;
     if (
       preferredVisit &&
       !VISIT_TERMINAL_STATUSES.has(preferredVisit.status as VisitStatus)
     ) {
       firstVisit = preferredVisit;
-      if (paidEscrowForVisit) {
-        const metaVisitId = readEscrowMetadataVisitId(paidEscrowForVisit.escrow);
-        if (metaVisitId && metaVisitId !== preferredVisit.visitId) {
-          await alignEscrowVisitMetadataIfNeeded({
-            taskId,
-            visitId: preferredVisit.visitId,
-            escrowId: paidEscrowForVisit.escrowId,
-            escrow: paidEscrowForVisit.escrow,
-          });
-        } else if (!metaVisitId) {
-          await alignEscrowVisitMetadataIfNeeded({
-            taskId,
-            visitId: preferredVisit.visitId,
-            escrowId: paidEscrowForVisit.escrowId,
-            escrow: paidEscrowForVisit.escrow,
-          });
-        }
-      } else {
+      if (!paidEscrowForVisit) {
         const paidEscrow = await resolvePaidEscrowForVisit(taskId, preferredVisit.visitId, {
           alignMissingVisitMetadata: true,
         });
@@ -842,6 +1030,7 @@ export class RecurringVisitService {
     }
 
     if (!firstVisit) {
+      expireStartedUnopenedVisits(rows, task, now);
       firstVisit = findNextChronologicalPayableVisit(rows);
     }
     if (!firstVisit) {
@@ -864,6 +1053,31 @@ export class RecurringVisitService {
       });
     }
 
+    if (paidEscrowForVisit) {
+      const binding = evaluateVisitEscrowBinding({
+        escrow: paidEscrowForVisit.escrow,
+        parentTaskId: taskId,
+        visitId: firstVisit.visitId,
+        rows,
+        expectedAmount:
+          paidEscrowForVisit.escrowId === assignmentEscrowIdTrimmed ? acceptedAmount : undefined,
+        requesterUid: await RecurringVisitService.resolveTaskRequesterUid(task),
+        allowUnscoped: true,
+      });
+      if (!binding.ok) {
+        if (paidEscrowForVisit.escrowId === assignmentEscrowIdTrimmed) {
+          throw new BadRequestError(binding.message);
+        }
+        logger.warn('[RecurringVisitService] Ignoring escrow that does not belong to the assigned visit', {
+          taskId,
+          visitId: firstVisit.visitId,
+          escrowId: paidEscrowForVisit.escrowId,
+          reason: binding.reason,
+        });
+        paidEscrowForVisit = null;
+      }
+    }
+
     firstVisit.amount = acceptedAmount;
     firstVisit.assigneeId = applicantProfileId;
     firstVisit.assigneeUid = applicantUid;
@@ -875,29 +1089,18 @@ export class RecurringVisitService {
       firstVisit.escrowId = paidEscrowForVisit.escrowId;
       firstVisit.paidAt = firstVisit.paidAt ?? now;
 
-      const metaVisitId = readEscrowMetadataVisitId(paidEscrowForVisit.escrow);
-      if (!metaVisitId || metaVisitId !== firstVisit.visitId) {
-        const reassign = await PaymentClient.reassignRecurringVisitEscrow({
-          escrowId: paidEscrowForVisit.escrowId,
-          taskId,
-          fromVisitId: metaVisitId || firstVisit.visitId,
-          toVisitId: firstVisit.visitId,
-        });
-        if (!reassign.success) {
-          logger.warn('Failed to align assignment escrow to first visit', {
-            taskId,
-            fromVisitId: metaVisitId,
-            toVisitId: firstVisit.visitId,
-            error: reassign.error,
-          });
-        }
-      }
+      await alignEscrowVisitMetadataIfNeeded({
+        taskId,
+        visitId: firstVisit.visitId,
+        escrowId: paidEscrowForVisit.escrowId,
+        escrow: paidEscrowForVisit.escrow,
+      });
     } else {
       firstVisit.status = 'payment_pending';
       firstVisit.paymentStatus = 'pending';
       firstVisit.escrowId = undefined;
       firstVisit.paidAt = undefined;
-      firstVisit.paymentDeadline = getPaymentDeadline(new Date(firstVisit.date));
+      firstVisit.paymentDeadline = getPaymentDeadline(firstVisit, task, now);
     }
 
     plan.status = 'active';
@@ -951,7 +1154,103 @@ export class RecurringVisitService {
     visitId: string;
     escrowId: string;
     requesterProfileId: mongoose.Types.ObjectId;
-  }): Promise<{ childTaskId: string }> {
+    /** Background sync only applies escrows created for this exact visit. */
+    requireVisitScopedEscrow?: boolean;
+  }): Promise<{ childTaskId: string; alreadyConfirmed?: boolean }> {
+    const maxAttempts = 3;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await RecurringVisitService.confirmVisitPaymentOnce(params);
+      } catch (error) {
+        if (!isOptimisticConcurrencyError(error) || attempt >= maxAttempts) throw error;
+        await delay(50 * attempt);
+      }
+    }
+  }
+
+  /**
+   * Service-to-service: authoritative base amount (excluding fees) for paying one visit.
+   * Payment-service calls this before creating a Razorpay order for a recurring visit.
+   */
+  static async quoteVisitPayment(params: {
+    parentTaskId: string;
+    visitId: string;
+    posterUid: string;
+    applicationId?: string;
+  }): Promise<{
+    parentTaskId: string;
+    visitId: string;
+    amount: number;
+    assignment: boolean;
+    category?: string;
+    categorySlug?: string;
+  }> {
+    if (!mongoose.Types.ObjectId.isValid(params.parentTaskId)) {
+      throw new NotFoundError('Task not found');
+    }
+    const task = await Task.findById(params.parentTaskId);
+    if (!task) throw new NotFoundError('Task not found');
+    if (!isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
+      throw new BadRequestError('Not a recurring visit plan task');
+    }
+
+    const requesterUid = await RecurringVisitService.resolveTaskRequesterUid(task);
+    if (!requesterUid || requesterUid !== String(params.posterUid || '').trim()) {
+      throw new ForbiddenError('Not authorized to pay for this visit');
+    }
+
+    const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
+    if (String(plan?.status || '').toLowerCase() === 'paused') {
+      throw new BadRequestError('Recurring plan is paused');
+    }
+
+    await hydrateTaskVisitsOntoSchedule(task);
+    const visit = findVisit(task, params.visitId);
+    if (!visit) throw new NotFoundError('Visit not found');
+    if (visit.status === 'completed' || VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) {
+      throw new BadRequestError('Visit is not awaiting payment');
+    }
+    if (visitRowHasHeldPayment(visit) && ['confirmed', 'in_progress'].includes(String(visit.status))) {
+      throw new ConflictError('This visit has already been paid');
+    }
+
+    const hasAssignee = Boolean(task.assigneeId || plan?.taskerProfileId || plan?.taskerUid);
+    let amount: number;
+    if (!hasAssignee) {
+      const applicationId = String(params.applicationId || '').trim();
+      if (!applicationId || !mongoose.Types.ObjectId.isValid(applicationId)) {
+        throw new BadRequestError('applicationId is required to pay for the first visit');
+      }
+      const application = await TaskApplication.findOne({ _id: applicationId, taskId: task._id });
+      if (!application) throw new NotFoundError('Application not found for this work');
+      if (String(application.status || '') !== 'pending') {
+        throw new ConflictError('This offer is no longer available');
+      }
+      amount = resolveRecurringAcceptedOfferAmount(application);
+    } else {
+      amount = resolveExpectedVisitAmount(visit, plan);
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestError('Visit amount is not available');
+    }
+
+    return {
+      parentTaskId: params.parentTaskId,
+      visitId: visit.visitId,
+      amount,
+      assignment: !hasAssignee,
+      ...(task.category ? { category: String(task.category) } : {}),
+      ...(task.categorySlug ? { categorySlug: String(task.categorySlug) } : {}),
+    };
+  }
+
+  private static async confirmVisitPaymentOnce(params: {
+    parentTaskId: string;
+    visitId: string;
+    escrowId: string;
+    requesterProfileId: mongoose.Types.ObjectId;
+    requireVisitScopedEscrow?: boolean;
+  }): Promise<{ childTaskId: string; alreadyConfirmed?: boolean }> {
     const task = await Task.findById(params.parentTaskId);
     if (!task) throw new NotFoundError('Task not found');
 
@@ -976,72 +1275,95 @@ export class RecurringVisitService {
     if (visit.status === 'completed') {
       throw new BadRequestError('Visit already completed');
     }
+    if (VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) {
+      throw new BadRequestError('Visit is not awaiting payment');
+    }
 
-    let paidEscrow = await resolvePaidEscrowForVisit(params.parentTaskId, params.visitId, {
-      rowEscrowId: String(visit.escrowId || params.escrowId || ''),
-      alignMissingVisitMetadata: true,
-    });
-    let resolvedEscrowId = String(
-      paidEscrow?.escrowId || params.escrowId || '',
-    ).trim();
+    const rows = getScheduleRows(task);
+    const requestedEscrowId = String(params.escrowId || '').trim();
+    const boundEscrowId = String(visit.escrowId || '').trim();
+    const visitStatus = String(visit.status || '');
+    const isConfirmedStatus = ['confirmed', 'in_progress'].includes(visitStatus);
 
-    if (!paidEscrow && resolvedEscrowId) {
-      const byEscrowId = (await PaymentClient.getEscrowByEscrowId(resolvedEscrowId)) as
+    if (
+      visitRowHasHeldPayment(visit) &&
+      isConfirmedStatus &&
+      (!requestedEscrowId || boundEscrowId === requestedEscrowId)
+    ) {
+      invalidateTaskDetailCache(params.parentTaskId);
+      return { childTaskId: visit.childTaskId?.toString() || '', alreadyConfirmed: true };
+    }
+
+    const requesterUid = await RecurringVisitService.resolveTaskRequesterUid(task);
+    const evaluate = (escrow: Record<string, unknown> | null, allowUnscoped: boolean) =>
+      evaluateVisitEscrowBinding({
+        escrow,
+        parentTaskId: params.parentTaskId,
+        visitId: params.visitId,
+        rows,
+        expectedAmount: resolveExpectedVisitAmount(visit, plan),
+        requesterUid,
+        allowUnscoped,
+      });
+
+    let binding: VisitEscrowBindingResult | null = null;
+    let bindingEscrow: Record<string, unknown> | null = null;
+    if (requestedEscrowId) {
+      bindingEscrow = (await PaymentClient.getEscrowByEscrowId(requestedEscrowId)) as
         | Record<string, unknown>
         | null;
-      if (isEscrowPaid(byEscrowId)) {
-        const metaVisitId = readEscrowMetadataVisitId(byEscrowId);
-        if (!metaVisitId || metaVisitId === params.visitId) {
-          if (!metaVisitId) {
-            await alignEscrowVisitMetadataIfNeeded({
-              taskId: params.parentTaskId,
-              visitId: params.visitId,
-              escrowId: resolvedEscrowId,
-              escrow: byEscrowId,
-            });
-          }
-          paidEscrow = {
-            escrowId: resolvedEscrowId,
-            escrow: byEscrowId as Record<string, unknown>,
-          };
+      binding = evaluate(bindingEscrow, !params.requireVisitScopedEscrow);
+    }
+    // Capture can lag the client callback; fall back to the payment scoped to this visit.
+    if (!binding || (!binding.ok && ['missing', 'not_paid'].includes(binding.reason))) {
+      const scoped = (await PaymentClient.getEscrowByTaskIdAndVisitId(
+        params.parentTaskId,
+        params.visitId,
+      )) as Record<string, unknown> | null;
+      const scopedBinding = evaluate(scoped, false);
+      if (scopedBinding.ok || !binding) {
+        binding = scopedBinding;
+        bindingEscrow = scoped;
+      }
+    }
+
+    if (!binding || !binding.ok) {
+      const failure = binding && !binding.ok ? binding : null;
+      logger.warn('[RecurringVisitService] Rejected visit payment confirmation', {
+        parentTaskId: params.parentTaskId,
+        visitId: params.visitId,
+        escrowId: requestedEscrowId,
+        reason: failure?.reason,
+      });
+      const message = failure?.message || 'Valid escrow payment is required for this visit';
+      if (failure?.reason === 'not_paid') throw new ConflictError(message);
+      throw new BadRequestError(message);
+    }
+    const resolvedEscrowId = binding.escrowId;
+
+    if (visitRowHasHeldPayment(visit) && boundEscrowId) {
+      if (boundEscrowId === resolvedEscrowId) {
+        if (isConfirmedStatus) {
+          invalidateTaskDetailCache(params.parentTaskId);
+          return { childTaskId: visit.childTaskId?.toString() || '', alreadyConfirmed: true };
+        }
+      } else {
+        const boundEscrow = (await PaymentClient.getEscrowByEscrowId(boundEscrowId)) as
+          | Record<string, unknown>
+          | null;
+        if (isEscrowPaid(boundEscrow)) {
+          throw new ConflictError('This visit has already been paid');
         }
       }
     }
 
-    if (!resolvedEscrowId) {
-      throw new BadRequestError('Valid escrow payment is required for this visit');
-    }
-
-    const hasMatchingPaidEscrow = Boolean(
-      paidEscrow && paidEscrow.escrowId === resolvedEscrowId,
-    );
-
-    const alreadyConfirmed =
-      (visitRowHasHeldPayment(visit) || hasMatchingPaidEscrow) &&
-      ['confirmed', 'in_progress'].includes(String(visit.status)) &&
-      (!resolvedEscrowId ||
-        !String(visit.escrowId || '').trim() ||
-        String(visit.escrowId || '') === resolvedEscrowId ||
-        hasMatchingPaidEscrow);
-    if (alreadyConfirmed) {
-      invalidateTaskDetailCache(params.parentTaskId);
-      return { childTaskId: visit.childTaskId?.toString() || '' };
-    }
-
-    const staleHeldDifferentEscrow =
-      visitRowHasHeldPayment(visit) &&
-      String(visit.escrowId || '').trim() !== resolvedEscrowId;
-    const visitStatus = String(visit.status || '');
-
-    const canConfirm =
-      visitStatus === 'payment_pending' ||
-      (hasMatchingPaidEscrow &&
-        (staleHeldDifferentEscrow ||
-          !visitRowHasHeldPayment(visit) ||
-          ['scheduled', 'payment_pending'].includes(visitStatus)));
-
-    if (!canConfirm) {
-      throw new BadRequestError('Visit is not awaiting payment');
+    if (binding.needsVisitMetadata) {
+      await alignEscrowVisitMetadataIfNeeded({
+        taskId: params.parentTaskId,
+        visitId: params.visitId,
+        escrowId: resolvedEscrowId,
+        escrow: bindingEscrow,
+      });
     }
 
     const now = new Date();
@@ -1055,15 +1377,21 @@ export class RecurringVisitService {
 
     visit.childTaskId = child._id;
     (task as unknown as { activeVisitId?: string }).activeVisitId = visit.visitId;
-    const rows = getScheduleRows(task);
+    const paidPlan = (task as unknown as { recurringPlan?: Record<string, unknown> }).recurringPlan;
+    if (paidPlan && Number(paidPlan.consecutiveUnpaidCount || 0) !== 0) {
+      paidPlan.consecutiveUnpaidCount = 0;
+      task.markModified('recurringPlan');
+    }
     const rowIdx = rows.findIndex((r) => r.visitId === visit.visitId);
     if (rowIdx >= 0) rows[rowIdx] = visit;
     await saveRecurringPlanDocument(task, params.parentTaskId, rows);
 
-    await RecurringVisitService.notifyTaskerRecurringVisitPaymentConfirmed(
-      task,
-      visit,
-      child._id.toString(),
+    runInBackground('notifyTaskerRecurringVisitPaymentConfirmed', () =>
+      RecurringVisitService.notifyTaskerRecurringVisitPaymentConfirmed(
+        task,
+        visit,
+        child._id.toString(),
+      ),
     );
 
     return { childTaskId: child._id.toString() };
@@ -1725,55 +2053,185 @@ export class RecurringVisitService {
     visitId: string;
     escrowId: string;
   }): Promise<{ childTaskId: string; alreadyConfirmed: boolean; awaitingAssignment?: boolean }> {
+    const maxAttempts = 3;
+    for (let attempt = 1; ; attempt += 1) {
+      const task = await Task.findById(params.parentTaskId);
+      if (!task) throw new NotFoundError('Task not found');
+      if (!isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
+        throw new BadRequestError('Not a recurring visit plan task');
+      }
+
+      const plan = (task as unknown as { recurringPlan?: Record<string, unknown> }).recurringPlan;
+      const hasAssignee = Boolean(
+        task.assigneeId ||
+          plan?.taskerProfileId ||
+          plan?.taskerUid,
+      );
+      if (!hasAssignee) {
+        logger.info('Recurring visit payment captured before helper assignment; deferring confirm', {
+          parentTaskId: params.parentTaskId,
+          visitId: params.visitId,
+          escrowId: params.escrowId,
+        });
+        return { childTaskId: '', alreadyConfirmed: false, awaitingAssignment: true };
+      }
+
+      await ensureVisitsLoaded(task);
+      const visit = findVisit(task, params.visitId);
+      if (!visit) throw new NotFoundError('Visit not found');
+
+      if (
+        ['confirmed', 'in_progress'].includes(String(visit.status)) &&
+        visitRowHasHeldPayment(visit)
+      ) {
+        return {
+          childTaskId: visit.childTaskId?.toString() || '',
+          alreadyConfirmed: true,
+        };
+      }
+
+      try {
+        const result = await RecurringVisitService.confirmVisitPayment({
+          parentTaskId: params.parentTaskId,
+          visitId: params.visitId,
+          escrowId: params.escrowId,
+          requesterProfileId: task.requesterId,
+          requireVisitScopedEscrow: true,
+        });
+        return { childTaskId: result.childTaskId, alreadyConfirmed: result.alreadyConfirmed === true };
+      } catch (error) {
+        if (!isOptimisticConcurrencyError(error) || attempt >= maxAttempts) throw error;
+        await delay(50 * attempt);
+      }
+    }
+  }
+
+  /**
+   * Idempotent: payment-service callback after a recurring visit payment was refunded. Only the
+   * visit whose bound payment is this escrow stops counting as paid; a still-active payment for the
+   * same visit (e.g. a replacement) is then bound with the normal confirmation rules.
+   */
+  static async markVisitPaymentRefundedFromPaymentService(params: {
+    parentTaskId: string;
+    visitId: string;
+    escrowId: string;
+    eventId?: string;
+  }): Promise<{ updated: boolean; reason?: string; replacementEscrowId?: string }> {
+    const maxAttempts = 3;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await RecurringVisitService.markVisitPaymentRefundedOnce(params);
+      } catch (error) {
+        if (!isOptimisticConcurrencyError(error) || attempt >= maxAttempts) throw error;
+        await delay(50 * attempt);
+      }
+    }
+  }
+
+  private static async markVisitPaymentRefundedOnce(params: {
+    parentTaskId: string;
+    visitId: string;
+    escrowId: string;
+    eventId?: string;
+  }): Promise<{ updated: boolean; reason?: string; replacementEscrowId?: string }> {
+    if (!mongoose.Types.ObjectId.isValid(params.parentTaskId)) throw new NotFoundError('Task not found');
     const task = await Task.findById(params.parentTaskId);
     if (!task) throw new NotFoundError('Task not found');
     if (!isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
       throw new BadRequestError('Not a recurring visit plan task');
     }
-
-    const plan = (task as unknown as { recurringPlan?: Record<string, unknown> }).recurringPlan;
-    const hasAssignee = Boolean(
-      task.assigneeId ||
-        plan?.taskerProfileId ||
-        plan?.taskerUid,
-    );
-    if (!hasAssignee) {
-      logger.info('Recurring visit payment captured before helper assignment; deferring confirm', {
-        parentTaskId: params.parentTaskId,
-        visitId: params.visitId,
-        escrowId: params.escrowId,
-      });
-      return { childTaskId: '', alreadyConfirmed: false, awaitingAssignment: true };
-    }
-
+    await hydrateTaskVisitsOntoSchedule(task);
     const visit = findVisit(task, params.visitId);
     if (!visit) throw new NotFoundError('Visit not found');
 
+    const escrow = (await PaymentClient.getEscrowByEscrowId(params.escrowId)) as Record<string, unknown> | null;
+    if (!escrow) {
+      // Lookup failures are transient here: payment-service just reported this escrow.
+      throw new ConflictError('Refunded payment could not be verified');
+    }
     if (
-      ['confirmed', 'in_progress'].includes(String(visit.status)) &&
-      visitRowHasHeldPayment(visit)
+      String(escrow.taskId || '').trim() !== params.parentTaskId ||
+      readEscrowMetadataVisitId(escrow) !== params.visitId ||
+      resolveEscrowRecordId(escrow) !== params.escrowId
     ) {
-      return {
-        childTaskId: visit.childTaskId?.toString() || '',
-        alreadyConfirmed: true,
-      };
+      throw new BadRequestError('Payment does not belong to this visit');
+    }
+    if (String(escrow.status || '').toLowerCase() !== 'refunded') {
+      throw new ConflictError('Payment is not refunded');
     }
 
-    const result = await RecurringVisitService.confirmVisitPayment({
+    const logContext = {
       parentTaskId: params.parentTaskId,
       visitId: params.visitId,
       escrowId: params.escrowId,
-      requesterProfileId: task.requesterId,
-    });
+      eventId: params.eventId,
+    };
+    if (String(visit.escrowId || '').trim() !== params.escrowId) {
+      logger.info('[RecurringVisitService] Refunded payment is not bound to the visit; nothing to update', {
+        ...logContext,
+        boundEscrowId: visit.escrowId,
+      });
+      return { updated: false, reason: 'payment_not_bound_to_visit' };
+    }
 
-    return { childTaskId: result.childTaskId, alreadyConfirmed: false };
+    const paymentStatus = String(visit.paymentStatus || '').toLowerCase();
+    if (paymentStatus === 'released' || visit.status === 'completed') {
+      logger.error('[RecurringVisitService] Refund reported for a paid-out visit; needs reconciliation', {
+        ...logContext,
+        paymentStatus,
+        visitStatus: visit.status,
+      });
+      return { updated: false, reason: 'visit_already_paid_out' };
+    }
+
+    let updated = false;
+    if (paymentStatus !== 'refunded') {
+      visit.paymentStatus = 'refunded';
+      visit.updatedAt = new Date();
+      const rows = getScheduleRows(task);
+      const rowIdx = rows.findIndex((r) => r.visitId === visit.visitId);
+      if (rowIdx >= 0) rows[rowIdx] = visit;
+      await saveRecurringPlanDocument(task, params.parentTaskId, rows);
+      updated = true;
+      logger.info('[RecurringVisitService] Visit payment marked refunded', logContext);
+    }
+
+    if (VISIT_TERMINAL_STATUSES.has(visit.status as VisitStatus)) {
+      return { updated, ...(updated ? {} : { reason: 'already_refunded' }) };
+    }
+    const replacement = await resolvePaidEscrowForVisit(params.parentTaskId, params.visitId);
+    if (!replacement || replacement.escrowId === params.escrowId) {
+      return { updated, ...(updated ? {} : { reason: 'already_refunded' }) };
+    }
+    try {
+      await RecurringVisitService.confirmVisitPayment({
+        parentTaskId: params.parentTaskId,
+        visitId: params.visitId,
+        escrowId: replacement.escrowId,
+        requesterProfileId: task.requesterId,
+        requireVisitScopedEscrow: true,
+      });
+      return { updated, replacementEscrowId: replacement.escrowId };
+    } catch (error) {
+      logger.warn('[RecurringVisitService] Replacement visit payment could not be bound after refund', {
+        ...logContext,
+        replacementEscrowId: replacement.escrowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { updated };
+    }
   }
 
-  static async createChildTaskForVisit(parent: ITask, visit: ScheduleVisitRow): Promise<ITask> {
+  static async createChildTaskForVisit(
+    parent: ITask,
+    visit: ScheduleVisitRow,
+    childId?: mongoose.Types.ObjectId,
+  ): Promise<ITask> {
     const plan = (parent as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
     const visitDate = normalizeDateOnly(new Date(visit.date));
 
     const childPayload: Record<string, unknown> = {
+      ...(childId ? { _id: childId } : {}),
       title: RecurringVisitService.resolveVisitWorkTitle(parent, visit),
       description: parent.description,
       category: parent.category,
@@ -1787,6 +2245,7 @@ export class RecurringVisitService {
       },
       isNegotiable: false,
       location: parent.location,
+      ...(parent.serviceRecipient?.type ? { serviceRecipient: parent.serviceRecipient } : {}),
       urgency: parent.urgency,
       priority: parent.priority,
       status: 'assigned',
@@ -1822,13 +2281,69 @@ export class RecurringVisitService {
       visit.childTaskId = undefined;
     }
 
+    if (shouldWriteCollection(parent)) {
+      const claimed = await RecurringVisitService.claimAndCreateChildTask(parent, visit);
+      if (claimed) return claimed;
+    }
+
     const child = await RecurringVisitService.createChildTaskForVisit(parent, visit);
     visit.childTaskId = child._id;
     visit.updatedAt = new Date();
-    if (shouldWriteCollection(parent)) {
-      await RecurringVisitRepository.linkChildTask(parent._id, visit.visitId, child._id);
-    }
     return child;
+  }
+
+  /**
+   * Atomic child creation for collection visits: the visit's childTaskId slot is claimed with a
+   * conditional update before the Task is inserted, so concurrent openers (payment capture,
+   * reconcile, open-next) never create two children for one visit. Returns null when the visit
+   * row is not persisted yet (caller creates the child and the row is inserted with it).
+   */
+  private static async claimAndCreateChildTask(
+    parent: ITask,
+    visit: ScheduleVisitRow,
+  ): Promise<ITask | null> {
+    let expectedPrev: mongoose.Types.ObjectId | null = visit.childTaskId ?? null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const childId = new mongoose.Types.ObjectId();
+      const linked = await RecurringVisit.findOneAndUpdate(
+        { parentTaskId: parent._id, visitId: visit.visitId, childTaskId: expectedPrev },
+        { $set: { childTaskId: childId } },
+        { new: true },
+      ).lean();
+
+      if (linked) {
+        try {
+          const child = await RecurringVisitService.createChildTaskForVisit(parent, visit, childId);
+          visit.childTaskId = child._id;
+          refreshVisitBaseline(parent, linked as never, ['childTaskId']);
+          return child;
+        } catch (error) {
+          await RecurringVisit.updateOne(
+            { parentTaskId: parent._id, visitId: visit.visitId, childTaskId: childId },
+            { $set: { childTaskId: expectedPrev } },
+          ).catch(() => undefined);
+          throw error;
+        }
+      }
+
+      const fresh = await RecurringVisitRepository.findByParentAndVisitId(parent._id, visit.visitId);
+      if (!fresh) return null;
+      const freshChildId = fresh.childTaskId ?? null;
+      if (freshChildId) {
+        let existing: ITask | null = null;
+        for (let wait = 0; wait < 5 && !existing; wait += 1) {
+          existing = await Task.findById(freshChildId);
+          if (!existing) await delay(100);
+        }
+        if (existing && String(existing.status || '') !== 'cancelled') {
+          visit.childTaskId = existing._id;
+          refreshVisitBaseline(parent, fresh, ['childTaskId']);
+          return existing;
+        }
+      }
+      expectedPrev = freshChildId;
+    }
+    throw new ConflictError('Could not open this visit right now. Please try again.');
   }
 
   /** Repair visit payment + progress when escrow is paid or work has already started. */
@@ -1858,20 +2373,32 @@ export class RecurringVisitService {
    * Debounced reconcile for read paths — avoids blocking GET /tasks/:id and serializes
    * concurrent reconciles for the same plan.
    */
-  static scheduleReconcilePlanState(taskId: string): Promise<void> {
+  static scheduleReconcilePlanState(
+    taskId: string,
+    options?: { cooldownSeconds?: number },
+  ): Promise<void> {
     const inFlight = reconcilePlanStateInFlight.get(taskId);
     if (inFlight) return inFlight;
+
+    const cooldownSeconds = Math.max(1, options?.cooldownSeconds ?? 12);
+    const lastLocal = reconcileLastRunAt.get(taskId) ?? 0;
+    if (Date.now() - lastLocal < cooldownSeconds * 1000) return Promise.resolve();
 
     const run = (async () => {
       const lockKey = `recurring:reconcile:lock:${taskId}`;
       const redis = getRedisClient();
       if (redis) {
         try {
-          const acquired = await redis.set(lockKey, '1', 'EX', 12, 'NX');
+          const acquired = await redis.set(lockKey, '1', 'EX', cooldownSeconds, 'NX');
           if (acquired !== 'OK') return;
         } catch {
           // Proceed without distributed lock when Redis is unavailable.
         }
+      }
+      reconcileLastRunAt.set(taskId, Date.now());
+      if (reconcileLastRunAt.size > 5000) {
+        const cutoff = Date.now() - 10 * 60 * 1000;
+        for (const [id, at] of reconcileLastRunAt) if (at < cutoff) reconcileLastRunAt.delete(id);
       }
 
       try {
@@ -1926,6 +2453,7 @@ export class RecurringVisitService {
             visitId: visit.visitId,
             escrowId: paidEscrow.escrowId,
             requesterProfileId: task.requesterId,
+            requireVisitScopedEscrow: true,
           });
           changed = true;
         } catch (error) {
@@ -1945,6 +2473,35 @@ export class RecurringVisitService {
     return changed;
   }
 
+  /** Ended/cancelled plans: record visits whose work was completed; never revive visits or open payments. */
+  private static async recordCompletedChildVisitsOnTerminalPlan(
+    task: mongoose.Document & ITask,
+    taskId: string,
+    rows: ScheduleVisitRow[],
+    alreadyChanged: boolean,
+  ): Promise<void> {
+    let changed = alreadyChanged;
+    const completedChildren = await Task.find({
+      parentTaskId: task._id,
+      status: 'completed',
+      recurringVisitId: { $exists: true, $nin: [null, ''] },
+    })
+      .select('recurringVisitId')
+      .lean();
+    for (const child of completedChildren) {
+      const visit = rows.find((row) => row.visitId === String(child.recurringVisitId || '').trim());
+      if (visit && visit.status !== 'completed') {
+        visit.status = 'completed';
+        visit.updatedAt = new Date();
+        changed = true;
+      }
+    }
+    if (changed) {
+      task.schedule = rows as unknown as ITask['schedule'];
+      await saveRecurringPlanDocument(task, taskId, rows);
+    }
+  }
+
   private static async reconcilePlanStateOnce(taskId: string): Promise<void> {
     const task = await Task.findById(taskId);
     if (!task || !isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
@@ -1958,9 +2515,18 @@ export class RecurringVisitService {
     const planForRepair = (task as unknown as { recurringPlan?: Record<string, unknown> })
       .recurringPlan;
 
+    const taskCancelled = String(task.status || '').toLowerCase() === 'cancelled';
     if (planForRepair && String(planForRepair.status || '').toLowerCase() === 'ended') {
       const rowsForEndedCheck = rows.length > 0 ? rows : await loadPlanScheduleRows(task);
-      if (!RecurringVisitService.recurringPlanVisitsExhausted(task, rowsForEndedCheck)) {
+      // Only a plan the system closed automatically may reopen; a plan the customer or helper
+      // ended, or whose work was cancelled, stays ended.
+      const autoClosed =
+        String(planForRepair.pausedReason || '').toLowerCase() === 'all_visits_closed';
+      if (
+        autoClosed &&
+        !taskCancelled &&
+        !RecurringVisitService.recurringPlanVisitsExhausted(task, rowsForEndedCheck)
+      ) {
         planForRepair.status = 'active';
         planForRepair.endedAt = undefined;
         planForRepair.pausedReason = undefined;
@@ -1974,6 +2540,14 @@ export class RecurringVisitService {
           taskId,
         });
       }
+    }
+
+    if (
+      taskCancelled ||
+      String(planForRepair?.status || '').toLowerCase() === 'ended'
+    ) {
+      await RecurringVisitService.recordCompletedChildVisitsOnTerminalPlan(task, taskId, rows, changed);
+      return;
     }
 
     if (await RecurringVisitService.sanitizeOrphanedScheduleChildReferences(task, { persist: false })) {
@@ -2013,8 +2587,7 @@ export class RecurringVisitService {
         visit.amount = Number(
           visit.amount ?? planForRepair?.budgetPerVisit ?? task.budget?.amount ?? 0,
         );
-        visit.paymentDeadline =
-          visit.paymentDeadline ?? getPaymentDeadline(new Date(visit.date));
+        visit.paymentDeadline = keepOrRefreshPaymentDeadline(visit, task);
         visit.updatedAt = new Date();
         changed = true;
         continue;
@@ -2029,8 +2602,7 @@ export class RecurringVisitService {
       visit.amount = Number(
         visit.amount ?? planForRepair?.budgetPerVisit ?? task.budget?.amount ?? 0,
       );
-      visit.paymentDeadline =
-        visit.paymentDeadline ?? getPaymentDeadline(new Date(visit.date));
+      visit.paymentDeadline = keepOrRefreshPaymentDeadline(visit, task);
       visit.updatedAt = new Date();
 
       if (visit.childTaskId) {
@@ -2136,6 +2708,10 @@ export class RecurringVisitService {
       changed = false;
     }
 
+    if (expireStartedUnopenedVisits(rows, task) > 0) {
+      changed = true;
+    }
+
     const planForVerify = (task as unknown as { recurringPlan?: { completedVisitCount?: number; budgetPerVisit?: number } })
       .recurringPlan;
     const sortedForVerify = [...rows].sort(
@@ -2230,8 +2806,7 @@ export class RecurringVisitService {
           visit.amount = Number(
             visit.amount ?? planForVerify?.budgetPerVisit ?? task.budget?.amount ?? 0,
           );
-          visit.paymentDeadline =
-            visit.paymentDeadline ?? getPaymentDeadline(new Date(visit.date));
+          visit.paymentDeadline = getPaymentDeadline(visit, task);
           visit.assigneeId =
             visit.assigneeId ??
             (planForVerify as { taskerProfileId?: mongoose.Types.ObjectId })?.taskerProfileId ??
@@ -2319,6 +2894,7 @@ export class RecurringVisitService {
             visitId: pending.visitId,
             escrowId: paidEscrow.escrowId,
             requesterProfileId: task.requesterId,
+            requireVisitScopedEscrow: true,
           });
           changed = true;
         } catch (error) {
@@ -2342,6 +2918,7 @@ export class RecurringVisitService {
 
     const taskAfterMisplacedRepair = misplacedRepaired ? await Task.findById(taskId) : freshTask;
     if (!taskAfterMisplacedRepair) return;
+    await ensureVisitsLoaded(taskAfterMisplacedRepair);
 
     const plan = (taskAfterMisplacedRepair as unknown as { recurringPlan?: { status?: string } })
       .recurringPlan;
@@ -2394,6 +2971,7 @@ export class RecurringVisitService {
 
     const taskAfterPayment = await Task.findById(taskId);
     if (!taskAfterPayment) return;
+    await ensureVisitsLoaded(taskAfterPayment);
 
     const progressSynced = await RecurringVisitService.syncActiveVisitProgress(taskAfterPayment);
     if (progressSynced) {
@@ -2414,6 +2992,7 @@ export class RecurringVisitService {
     }
 
     const parentTaskId = String(parent._id);
+    await ensureVisitsLoaded(parent);
     const rows = sortScheduleRows(getScheduleRows(parent));
 
     const loadChild = async (visit: ScheduleVisitRow | undefined): Promise<ITask | null> => {
@@ -2431,7 +3010,9 @@ export class RecurringVisitService {
       if (['confirmed', 'in_progress'].includes(status)) {
         let paid = visitRowHasHeldPayment(visit);
         if (!paid) {
-          const paidEscrow = await resolvePaidEscrowForVisit(parentTaskId, visit.visitId);
+          const paidEscrow = await resolvePaidEscrowForVisit(parentTaskId, visit.visitId, {
+            rowEscrowId: String(visit.escrowId || ''),
+          });
           paid = Boolean(paidEscrow);
         }
         if (!paid) return null;
@@ -2465,6 +3046,38 @@ export class RecurringVisitService {
   }
 
   /**
+   * Work-start variant of resolvePerformingWorkTaskOrSelf for callers that only know the plan id
+   * (partner app Start Journey / start OTP). If no paid visit resolves from the stored rows, a
+   * captured escrow may not have been synced onto its visit yet, so sync and resolve once more.
+   */
+  static async resolveWorkStartTaskOrSelf(task: ITask): Promise<ITask> {
+    const resolved = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    if (resolved.parentTaskId || !isRecurringVisitPlanTask(task as unknown as Record<string, unknown>)) {
+      return resolved;
+    }
+    const planTaskId = String(task._id);
+    try {
+      await RecurringVisitService.syncPendingVisitPaymentsFromEscrow(planTaskId);
+    } catch (error) {
+      logger.warn('[RecurringVisitService] Payment sync before work start failed', {
+        planTaskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const refreshed = await Task.findById(planTaskId);
+    if (!refreshed) return resolved;
+    const child = await RecurringVisitService.resolveActiveWorkChildTask(refreshed);
+    if (child) {
+      logger.info('[RecurringVisitService] Resolved work-start visit task after payment sync', {
+        planTaskId,
+        childTaskId: String(child._id),
+        visitId: child.recurringVisitId,
+      });
+    }
+    return child ?? resolved;
+  }
+
+  /**
    * Remove schedule rows pointing at child tasks that no longer exist (e.g. after reschedule).
    */
   static async sanitizeOrphanedScheduleChildReferences(
@@ -2477,14 +3090,23 @@ export class RecurringVisitService {
 
     const planTaskId = String(plan._id);
     let changed = false;
+    await ensureVisitsLoaded(plan);
     const rows = getScheduleRows(plan);
+
+    const linkedChildIds = rows
+      .map((visit) => (visit.childTaskId ? String(visit.childTaskId) : ''))
+      .filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (linkedChildIds.length === 0) return false;
+    const existingChildIds = new Set(
+      (await Task.find({ _id: { $in: linkedChildIds } }).select('_id').lean()).map((c) =>
+        String(c._id),
+      ),
+    );
 
     for (const visit of rows) {
       const childId = visit.childTaskId ? String(visit.childTaskId) : '';
       if (!childId) continue;
-
-      const child = await Task.findById(childId).select('_id status').lean();
-      if (child) continue;
+      if (existingChildIds.has(childId)) continue;
 
       logger.info('[RecurringVisitService] Clearing orphaned childTaskId from visit schedule', {
         planTaskId,
@@ -2503,10 +3125,7 @@ export class RecurringVisitService {
     }
 
     if (changed && options?.persist !== false) {
-      plan.schedule = rows as unknown as ITask['schedule'];
-      plan.markModified('schedule');
-      await plan.save();
-      invalidateTaskDetailCache(planTaskId);
+      await saveRecurringPlanDocument(plan as mongoose.Document & ITask, planTaskId, rows);
     }
 
     return changed;
@@ -2525,11 +3144,12 @@ export class RecurringVisitService {
     if (existingChild) return existingChild;
 
     const childOid = new mongoose.Types.ObjectId(missingChildId);
-    let parent = await Task.findOne({
-      schedule: { $elemMatch: { childTaskId: childOid } },
-    });
-    if (!parent) {
-      parent = await Task.findOne({ 'schedule.childTaskId': missingChildId });
+    const linkedVisit = await RecurringVisit.findOne({ childTaskId: childOid })
+      .select('parentTaskId')
+      .lean();
+    let parent = linkedVisit?.parentTaskId ? await Task.findById(linkedVisit.parentTaskId) : null;
+    if (!parent && recurringVisitConfig.legacyFallback) {
+      parent = await Task.findOne({ 'schedule.childTaskId': childOid });
     }
     if (!parent || !isRecurringVisitPlanTask(parent as unknown as Record<string, unknown>)) {
       return null;
@@ -2563,7 +3183,7 @@ export class RecurringVisitService {
 
     if (!workTask.parentTaskId) {
       throw new BadRequestError(
-        'Recurring visit work must be started on the paid visit task, not the plan',
+        'Visit payment must be completed before the helper can start work',
       );
     }
 
@@ -2619,18 +3239,7 @@ export class RecurringVisitService {
       visit.escrowId = paidEscrow.escrowId;
       visit.paidAt = visit.paidAt ?? new Date();
       visit.updatedAt = new Date();
-      refreshed.schedule = getScheduleRows(refreshed) as unknown as ITask['schedule'];
-      const visitRow = findVisit(refreshed, String(visitId));
-      if (visitRow) {
-        visitRow.status = visit.status;
-        visitRow.paymentStatus = visit.paymentStatus;
-        visitRow.escrowId = visit.escrowId;
-        visitRow.paidAt = visit.paidAt;
-        visitRow.updatedAt = visit.updatedAt;
-      }
-      refreshed.markModified('schedule');
-      await refreshed.save();
-      invalidateTaskDetailCache(parentTaskId);
+      await saveRecurringPlanDocument(refreshed, parentTaskId);
       visit = findVisit(refreshed, String(visitId)) || visit;
     }
 
@@ -2642,6 +3251,7 @@ export class RecurringVisitService {
           escrowId: paidEscrow.escrowId,
         });
         refreshed = await Task.findById(parentTaskId);
+        if (refreshed) await ensureVisitsLoaded(refreshed);
         visit = refreshed ? findVisit(refreshed, String(visitId)) : undefined;
         paidEscrow = await resolvePaidEscrowForVisit(parentTaskId, String(visitId), {
           rowEscrowId: String(visit?.escrowId || ''),
@@ -2716,10 +3326,7 @@ export class RecurringVisitService {
     visit.status = mapped;
     visit.updatedAt = new Date();
     (parent as unknown as { activeVisitId?: string }).activeVisitId = visit.visitId;
-    parent.schedule = getScheduleRows(parent) as unknown as ITask['schedule'];
-    parent.markModified('schedule');
-    await parent.save();
-    invalidateTaskDetailCache(parent._id.toString());
+    await saveRecurringPlanDocument(parent, parent._id.toString());
   }
 
   private static async syncActiveVisitProgress(task: ITask): Promise<boolean> {
@@ -2778,9 +3385,11 @@ export class RecurringVisitService {
           targetVisit.status = 'in_progress';
           targetVisit.updatedAt = new Date();
           (task as unknown as { activeVisitId?: string }).activeVisitId = targetVisit.visitId;
-          task.schedule = rows as unknown as ITask['schedule'];
-          task.markModified('schedule');
-          await task.save();
+          await saveRecurringPlanDocument(
+            task as mongoose.Document & ITask,
+            String(task._id),
+            rows,
+          );
           return true;
         }
       }
@@ -2826,9 +3435,7 @@ export class RecurringVisitService {
       }
     }
 
-    task.schedule = rows as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
+    await saveRecurringPlanDocument(task as mongoose.Document & ITask, String(task._id), rows);
     return true;
   }
 
@@ -2847,8 +3454,12 @@ export class RecurringVisitService {
       throw new BadRequestError('Not a recurring visit plan');
     }
 
+    await ensureVisitsLoaded(task);
     const visit = findVisit(task, params.visitId);
     if (!visit) throw new NotFoundError('Visit not found');
+
+    // Repeat taps / retries of an already-applied skip are a no-op success.
+    if (visit.status === 'skipped' && visit.skippedBy === 'customer') return;
 
     const hoursUntil = (new Date(visit.date).getTime() - Date.now()) / (60 * 60 * 1000);
     if (hoursUntil < DEFAULT_SKIP_FREE_HOURS_BEFORE_VISIT) {
@@ -2867,10 +3478,14 @@ export class RecurringVisitService {
     visit.skipReason = params.reason || 'Skipped by customer';
     visit.updatedAt = new Date();
 
-    task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
-    task.markModified('schedule');
-    await task.save();
-    invalidateTaskDetailCache(task._id.toString());
+    try {
+      await saveRecurringPlanDocument(task, task._id.toString());
+    } catch (error) {
+      if (!(error instanceof RecurringVisitConflictError)) throw error;
+      const latest = await RecurringVisitRepository.findByParentAndVisitId(task._id, params.visitId);
+      if (latest?.status === 'skipped' && latest.skippedBy === 'customer') return;
+      throw error;
+    }
 
     await RecurringVisitService.ensureMaterializedBuffer(task._id.toString());
     await RecurringVisitService.openNextVisitForPayment(task._id.toString());
@@ -2880,6 +3495,7 @@ export class RecurringVisitService {
     const task = await Task.findById(taskId);
     if (!task) return;
 
+    await ensureVisitsLoaded(task);
     const visit = findVisit(task, visitId);
     if (!visit || visit.status !== 'payment_pending') return;
 
@@ -2891,12 +3507,16 @@ export class RecurringVisitService {
     visit.updatedAt = new Date();
 
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
-    const unpaidCount = Number(plan.consecutiveUnpaidCount || 0) + 1;
-    plan.consecutiveUnpaidCount = unpaidCount;
-    if (unpaidCount >= DEFAULT_CONSECUTIVE_UNPAID_PAUSE_THRESHOLD) {
-      plan.status = 'paused';
-      plan.pausedAt = new Date();
-      plan.pausedReason = 'consecutive_unpaid';
+    // Only an active plan counts unpaid visits; an ended or cancelled plan must never become paused
+    // (resuming a paused plan would reactivate it).
+    if (String(plan.status || '').toLowerCase() === 'active' && String(task.status || '').toLowerCase() !== 'cancelled') {
+      const unpaidCount = Number(plan.consecutiveUnpaidCount || 0) + 1;
+      plan.consecutiveUnpaidCount = unpaidCount;
+      if (unpaidCount >= DEFAULT_CONSECUTIVE_UNPAID_PAUSE_THRESHOLD) {
+        plan.status = 'paused';
+        plan.pausedAt = new Date();
+        plan.pausedReason = 'consecutive_unpaid';
+      }
     }
 
     task.schedule = getScheduleRows(task) as unknown as ITask['schedule'];
@@ -2970,9 +3590,13 @@ export class RecurringVisitService {
       });
 
       if (missingCount <= 0) {
+        const before = planSummarySignature(plan);
         await updatePlanSummaryFromVisits(task);
-        task.markModified('recurringPlan');
-        await task.save();
+        if (planSummarySignature(plan) !== before) {
+          task.markModified('recurringPlan');
+          await task.save();
+          invalidateTaskDetailCache(taskId);
+        }
         return;
       }
 
@@ -3013,6 +3637,7 @@ export class RecurringVisitService {
         try {
           await RecurringVisitRepository.upsertVisits(toUpsert);
         } catch (error) {
+          if (!isDuplicateKeyError(error)) throw error;
           logger.warn('[ensureMaterializedBuffer] bulk upsert race — re-querying', {
             taskId,
             error: error instanceof Error ? error.message : String(error),
@@ -3159,11 +3784,30 @@ export class RecurringVisitService {
         ? new Date(String(plan.lastPaymentSyncAt)).getTime()
         : 0;
       const cooldown = recurringVisitConfig.paymentSyncCooldownMs;
-      const pendingExists = shouldWriteCollection(task)
-        ? (await RecurringVisitRepository.listPaymentPending(task._id)).length > 0
-        : false;
-      if (pendingExists && Date.now() - lastSync > cooldown) {
-        RecurringVisitService.schedulePaymentSyncAndRebalance(taskId);
+      if (Date.now() - lastSync > cooldown && shouldWriteCollection(task)) {
+        const pendingExists = await RecurringVisit.exists({
+          parentTaskId: task._id,
+          status: 'payment_pending',
+        });
+        if (pendingExists) {
+          // Claim the cooldown window atomically so concurrent reads/instances sync once.
+          const now = new Date();
+          const claim = await Task.updateOne(
+            {
+              _id: task._id,
+              $or: [
+                { 'recurringPlan.lastPaymentSyncAt': { $exists: false } },
+                { 'recurringPlan.lastPaymentSyncAt': null },
+                { 'recurringPlan.lastPaymentSyncAt': { $lt: new Date(now.getTime() - cooldown) } },
+              ],
+            },
+            { $set: { 'recurringPlan.lastPaymentSyncAt': now } },
+            { timestamps: false },
+          );
+          if (claim.modifiedCount > 0) {
+            RecurringVisitService.schedulePaymentSyncAndRebalance(taskId);
+          }
+        }
       }
     }
 
@@ -3316,6 +3960,9 @@ export class RecurringVisitService {
       }
 
       visit.status = 'cancelled';
+      visit.skippedAt = visit.skippedAt ?? new Date();
+      visit.skippedBy = 'customer';
+      visit.skipReason = visit.skipReason || 'plan_ended';
       visit.updatedAt = new Date();
     }
 
@@ -3332,9 +3979,11 @@ export class RecurringVisitService {
     await saveRecurringPlanDocument(refreshed, params.taskId, rows);
     invalidateTaskDetailCache(params.taskId);
 
-    await RecurringVisitService.notifyTaskerRecurringPlanEndedByCustomer(refreshed, {
-      reason: params.reason,
-    });
+    runInBackground('notifyTaskerRecurringPlanEndedByCustomer', () =>
+      RecurringVisitService.notifyTaskerRecurringPlanEndedByCustomer(refreshed, {
+        reason: params.reason,
+      }),
+    );
 
     if (refreshed.assigneeId) {
       await Task.updateOne(
@@ -3387,6 +4036,7 @@ export class RecurringVisitService {
     }
 
     let changed = false;
+    await ensureVisitsLoaded(task);
     let rows = getScheduleRows(task);
 
     const completedChildren = await Task.find({
@@ -3534,10 +4184,9 @@ export class RecurringVisitService {
 
     const plan = (task as unknown as { recurringPlan: Record<string, unknown> }).recurringPlan;
     await RecurringVisitService.rebalancePaymentPendingVisits(params.taskId);
-    const taskAfterRebalance = await Task.findById(params.taskId);
-    const rowsAfterRebalance = taskAfterRebalance
-      ? getScheduleRows(taskAfterRebalance)
-      : getScheduleRows(task);
+    const taskAfterRebalance = (await Task.findById(params.taskId)) ?? task;
+    await ensureVisitsLoaded(taskAfterRebalance);
+    const rowsAfterRebalance = getScheduleRows(taskAfterRebalance);
     const existingPending = resolvePendingPaymentVisitRow(rowsAfterRebalance);
     if (existingPending) {
       return resolvePendingPaymentPayload(existingPending, plan);
@@ -3546,6 +4195,7 @@ export class RecurringVisitService {
     if (openNextVisitForPaymentInFlight.has(params.taskId)) {
       const taskAfterWait = await Task.findById(params.taskId);
       if (!taskAfterWait) throw new NotFoundError('Task not found');
+      await ensureVisitsLoaded(taskAfterWait);
       const pendingAfterWait = resolvePendingPaymentVisitRow(getScheduleRows(taskAfterWait));
       if (pendingAfterWait) {
         const planAfterWait = (taskAfterWait as unknown as {
@@ -3584,8 +4234,11 @@ export class RecurringVisitService {
 
     if (sorted.length === 0) return false;
 
+    // Ongoing plans end only via end/leave; an all-closed buffer just means more visits are due.
+    if (plan.endType === 'until_cancelled') return false;
+
     if (plan.endType === 'end_on_date') {
-      const totalPlanned = Number(plan.totalPlanned) || 0;
+      const totalPlanned = resolvePlanTotalPlanned(task);
       if (totalPlanned <= 0) return false;
       if (sorted.length < totalPlanned) return false;
       const closedCount = sorted.filter((visit) => isVisitPassed(visit)).length;
@@ -3769,7 +4422,9 @@ export class RecurringVisitService {
       options?.cancelledByProfileId &&
       parent.requesterId.equals(options.cancelledByProfileId)
     ) {
-      await RecurringVisitService.notifyTaskerRecurringVisitCancelled(parent, visit);
+      runInBackground('notifyTaskerRecurringVisitCancelled', () =>
+        RecurringVisitService.notifyTaskerRecurringVisitCancelled(parent, visit),
+      );
     }
 
     await RecurringVisitService.ensureMaterializedBuffer(parentId);
@@ -3857,7 +4512,9 @@ export class RecurringVisitService {
     task.schedule = rows as unknown as ITask['schedule'];
     await saveRecurringPlanDocument(task, params.taskId, rows);
 
-    await RecurringVisitService.notifyTaskerRecurringVisitCancelled(task, visit);
+    runInBackground('notifyTaskerRecurringVisitCancelled', () =>
+      RecurringVisitService.notifyTaskerRecurringVisitCancelled(task, visit),
+    );
 
     await RecurringVisitService.ensureMaterializedBuffer(params.taskId);
     const opened = await RecurringVisitService.openNextVisitForPayment(params.taskId, {
@@ -3991,6 +4648,19 @@ export class RecurringVisitService {
       }
     }
 
+    if (expireStartedUnopenedVisits(rows, task) > 0) {
+      try {
+        await saveRecurringPlanDocument(task, taskId, rows);
+      } catch (error) {
+        if (!(error instanceof RecurringVisitConflictError)) throw error;
+        return null;
+      }
+      await RecurringVisitService.ensureMaterializedBuffer(taskId);
+      task = await Task.findById(taskId);
+      if (!task) return null;
+      rows = await loadPlanScheduleRows(task);
+    }
+
     const sorted = sortScheduleRows(rows);
 
     let hasActiveIncompleteVisit = false;
@@ -4024,27 +4694,38 @@ export class RecurringVisitService {
     nextVisit.amount = Number(plan.budgetPerVisit ?? task.budget?.amount ?? 0);
     nextVisit.assigneeId = plan.taskerProfileId as mongoose.Types.ObjectId;
     nextVisit.assigneeUid = String(plan.taskerUid || '');
-    nextVisit.paymentDeadline = getPaymentDeadline(new Date(nextVisit.date));
+    nextVisit.paymentDeadline = getPaymentDeadline(nextVisit, task, now);
     nextVisit.updatedAt = now;
 
-    await RecurringVisitService.ensureChildTaskForVisit(task, nextVisit);
-    if (nextVisit.childTaskId) {
-      const child = await Task.findById(nextVisit.childTaskId);
-      if (
-        child &&
-        child.status !== 'assigned' &&
-        child.status !== 'completed' &&
-        child.status !== 'cancelled'
-      ) {
-        child.status = 'assigned';
-        child.startedAt = undefined;
-        child.startOtp = undefined;
-        await child.save();
+    try {
+      await RecurringVisitService.ensureChildTaskForVisit(task, nextVisit);
+      if (nextVisit.childTaskId) {
+        const child = await Task.findById(nextVisit.childTaskId);
+        if (
+          child &&
+          child.status !== 'assigned' &&
+          child.status !== 'completed' &&
+          child.status !== 'cancelled'
+        ) {
+          child.status = 'assigned';
+          child.startedAt = undefined;
+          child.startOtp = undefined;
+          await child.save();
+        }
       }
-    }
-    (task as unknown as { activeVisitId?: string }).activeVisitId = nextVisit.visitId;
+      (task as unknown as { activeVisitId?: string }).activeVisitId = nextVisit.visitId;
 
-    await saveRecurringPlanDocument(task, taskId, rows);
+      await saveRecurringPlanDocument(task, taskId, rows);
+    } catch (error) {
+      if (!(error instanceof RecurringVisitConflictError)) throw error;
+      // A concurrent opener won; return the visit it opened instead of failing the caller.
+      const latest = await Task.findById(taskId);
+      const pendingNow = latest
+        ? resolvePendingPaymentVisitRow(await loadPlanScheduleRows(latest))
+        : undefined;
+      if (pendingNow) return resolvePendingPaymentPayload(pendingNow, plan);
+      throw error;
+    }
 
     return {
       visitId: nextVisit.visitId,
@@ -4070,6 +4751,7 @@ export class RecurringVisitService {
   }
 
   static async findBlockingPaidVisitNotStarted(task: ITask): Promise<ScheduleVisitRow | null> {
+    await ensureVisitsLoaded(task);
     const rows = getScheduleRows(task);
     for (const visit of rows) {
       const status = String(visit.status || '');
@@ -4148,13 +4830,67 @@ export class RecurringVisitService {
     requesterUid?: string;
     reason?: string;
   }): Promise<{ refunded: boolean; skipped?: boolean; error?: string }> {
-    const { planTask, visit, cancelledBy, requesterUid, reason } = params;
+    const { planTask, visit } = params;
     const paymentStatus = String(visit.paymentStatus || '').toLowerCase();
 
     if (paymentStatus === 'refunded') {
       return { refunded: false, skipped: true };
     }
 
+    const planId = String(planTask._id);
+
+    // One refund attempt per visit at a time (double taps, end+leave races, retries across instances).
+    const lockKey = `recurring:refund:${planId}:${visit.visitId}`;
+    const lockToken = crypto.randomUUID();
+    const redis = getRedisClient();
+    let lockHeld = false;
+    if (redis) {
+      try {
+        lockHeld = (await redis.set(lockKey, lockToken, 'EX', 120, 'NX')) === 'OK';
+        if (!lockHeld) {
+          return {
+            refunded: false,
+            error: 'A refund for this visit is already in progress. Please try again shortly.',
+          };
+        }
+      } catch {
+        // Redis unavailable: fall through to the DB state check below.
+      }
+    }
+
+    try {
+      if (shouldWriteCollection(planTask)) {
+        const latest = await RecurringVisitRepository.findByParentAndVisitId(planTask._id, visit.visitId);
+        if (String(latest?.paymentStatus || '').toLowerCase() === 'refunded') {
+          visit.paymentStatus = 'refunded';
+          refreshVisitBaseline(planTask, latest, ['paymentStatus']);
+          return { refunded: false, skipped: true };
+        }
+      }
+      return await RecurringVisitService.refundVisitPaymentOnCancelLocked(params);
+    } finally {
+      if (lockHeld && redis) {
+        await redis
+          .eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+            1,
+            lockKey,
+            lockToken,
+          )
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  private static async refundVisitPaymentOnCancelLocked(params: {
+    planTask: ITask;
+    visit: ScheduleVisitRow;
+    cancelledBy: 'poster' | 'performer';
+    requesterUid?: string;
+    reason?: string;
+  }): Promise<{ refunded: boolean; skipped?: boolean; error?: string }> {
+    const { planTask, visit, cancelledBy, requesterUid, reason } = params;
+    const paymentStatus = String(visit.paymentStatus || '').toLowerCase();
     const planId = String(planTask._id);
     const paidEscrow = await resolvePaidEscrowForVisit(planId, visit.visitId);
     const hasHeldOnRow =
@@ -4168,6 +4904,18 @@ export class RecurringVisitService {
 
     const escrowRecordId =
       paidEscrow?.escrowId || String(visit.escrowId || '').trim() || undefined;
+    if (!escrowRecordId) {
+      // Cancelling by Work id would refund the Work's newest payment, which may be another visit's.
+      logger.error('[RecurringVisitService.refundVisitPaymentOnCancel] Visit payment record not found', {
+        planTaskId: planId,
+        visitId: visit.visitId,
+        paymentStatus,
+      });
+      return {
+        refunded: false,
+        error: 'Payment record for this visit was not found. Please contact support.',
+      };
+    }
     const visitStart = RecurringVisitService.getVisitStartDateForCancellationPolicy(
       planTask,
       visit,
@@ -4185,7 +4933,6 @@ export class RecurringVisitService {
 
     try {
       const payResult = await PaymentClient.cancelPaymentForTask({
-        taskId: escrowRecordId ? undefined : planId,
         escrowId: escrowRecordId,
         reason: reason || 'Recurring visit cancelled',
         userId: requesterUid,
@@ -4214,6 +4961,13 @@ export class RecurringVisitService {
 
       visit.paymentStatus = 'refunded';
       visit.updatedAt = new Date();
+      // Persist immediately: a later failure in the caller must not cause this visit to be refunded again.
+      if (shouldWriteCollection(planTask)) {
+        const saved = await RecurringVisitRepository.updateVisit(planTask._id, visit.visitId, {
+          $set: { paymentStatus: 'refunded' },
+        });
+        refreshVisitBaseline(planTask, saved, ['paymentStatus']);
+      }
       return { refunded: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4258,6 +5012,7 @@ export class RecurringVisitService {
     const plan = (task as unknown as { recurringPlan?: { status?: string } }).recurringPlan;
     if (String(plan?.status || '').toLowerCase() !== 'active') return false;
 
+    await ensureVisitsLoaded(task);
     const rows = getScheduleRows(task);
     const sorted = sortScheduleRows(rows);
     const parentTaskId = String(task._id);
@@ -4296,23 +5051,11 @@ export class RecurringVisitService {
         const escrowId = String(visit.escrowId || '').trim();
         if (!escrowId) continue;
 
-        const fromVisitId = visit.visitId;
-
-        const reassign = await PaymentClient.reassignRecurringVisitEscrow({
-          escrowId,
-          taskId: parentTaskId,
-          fromVisitId,
-          toVisitId: candidate.visitId,
-        });
-        if (!reassign.success) {
-          logger.warn('[RecurringVisitService] Failed to repair misplaced visit payment', {
-            parentTaskId,
-            fromVisitId: visit.visitId,
-            toVisitId: candidate.visitId,
-            error: reassign.error,
-          });
-          continue;
-        }
+        // Only the payment record can prove a payment is misplaced; row order never moves it.
+        const escrowRecord = (await PaymentClient.getEscrowByEscrowId(escrowId)) as
+          | Record<string, unknown>
+          | null;
+        if (readEscrowMetadataVisitId(escrowRecord) !== candidate.visitId) continue;
 
         candidate.escrowId = escrowId;
         candidate.paidAt = visit.paidAt ? new Date(visit.paidAt) : new Date();
@@ -4338,10 +5081,7 @@ export class RecurringVisitService {
         await RecurringVisitService.deleteRecurringVisitChildTask(clearedChildTaskId);
         await RecurringVisitService.ensureChildTaskForVisit(task, candidate);
 
-        task.schedule = rows as unknown as ITask['schedule'];
-        task.markModified('schedule');
-        await task.save();
-        invalidateTaskDetailCache(parentTaskId);
+        await saveRecurringPlanDocument(task as mongoose.Document & ITask, parentTaskId, rows);
 
         logger.info('[RecurringVisitService] Repaired misplaced visit payment after reschedule', {
           parentTaskId,
@@ -4354,56 +5094,6 @@ export class RecurringVisitService {
     }
 
     return false;
-  }
-
-  /** Next unpaid visit in series order after the last completed visit (payment queue). */
-  private static resolveNextVisitForPaymentTransfer(
-    rows: ScheduleVisitRow[],
-    sourceVisit: ScheduleVisitRow,
-  ): ScheduleVisitRow | undefined {
-    const sorted = sortScheduleRows(rows);
-    const sourceIdx = sorted.findIndex((row) => row.visitId === sourceVisit.visitId);
-
-    const isEligibleTarget = (candidate: ScheduleVisitRow): boolean => {
-      if (candidate.visitId === sourceVisit.visitId) return false;
-      if (candidate.status === 'completed') return false;
-      if (VISIT_TERMINAL_STATUSES.has(candidate.status as VisitStatus)) return false;
-      if (visitRowHasHeldPayment(candidate)) return false;
-      const status = String(candidate.status || '');
-      return ['scheduled', 'payment_pending', 'confirmed', 'open', 'assigned'].includes(
-        status,
-      );
-    };
-
-    const lastCompletedIdx = sorted.reduce(
-      (max, visit, index) => (visit.status === 'completed' ? index : max),
-      -1,
-    );
-
-    const searchStart = Math.max(0, lastCompletedIdx + 1);
-    for (let i = searchStart; i < sorted.length; i += 1) {
-      const candidate = sorted[i];
-      if (isEligibleTarget(candidate)) {
-        return candidate;
-      }
-    }
-
-    if (sourceIdx >= 0) {
-      for (let i = searchStart; i < sourceIdx; i += 1) {
-        const candidate = sorted[i];
-        if (isEligibleTarget(candidate)) {
-          return candidate;
-        }
-      }
-    }
-
-    for (const candidate of sorted) {
-      if (isEligibleTarget(candidate)) {
-        return candidate;
-      }
-    }
-
-    return undefined;
   }
 
   /** Clear held payment on a visit after reschedule transfer or refund. */
@@ -4434,16 +5124,20 @@ export class RecurringVisitService {
   }
 
   /**
-   * When a paid visit is rescheduled, move its held payment to the next unpaid visit
-   * (calendar-first, same queue as "Pay now") and require payment again for the rescheduled slot.
+   * A held payment belongs to the first eligible visit in the resulting chronological schedule.
+   * Evaluated against the proposed date/time before it is applied: the rescheduled visit keeps
+   * its payment when it stays first, otherwise the payment moves to the visit that becomes first.
    */
   private static async transferHeldPaymentOnVisitReschedule(
     task: ITask,
     visit: ScheduleVisitRow,
+    proposed: { date: Date; scheduledTimeStart?: string },
   ): Promise<{
     transferred: boolean;
+    keptPayment?: boolean;
     toVisitId?: string;
     clearedChildTaskId?: mongoose.Types.ObjectId | null;
+    remoteReassign?: { escrowId: string; fromVisitId: string; toVisitId: string };
   }> {
     const parentTaskId = String(task._id);
     const visitRow = findVisit(task, visit.visitId) || visit;
@@ -4466,104 +5160,156 @@ export class RecurringVisitService {
     const escrowId = heldEscrow.escrowId;
     const paidAt = heldEscrow.paidAt;
     const amount = visitRow.amount;
-    let nextVisit = RecurringVisitService.resolveNextVisitForPaymentTransfer(rows, visitRow);
+    const owner = resolveRecurringVisitPaymentOwner(rows, {
+      visitId: visitRow.visitId,
+      date: proposed.date,
+      scheduledTimeStart: proposed.scheduledTimeStart,
+    });
 
-    if (nextVisit) {
-      if (visitRowHasHeldPayment(nextVisit)) {
-        throw new BadRequestError(
-          'Cannot reschedule this visit: the next visit already has payment applied.',
-        );
+    if (!owner || owner.visitId === visitRow.visitId) {
+      if (['scheduled', 'payment_pending'].includes(String(visitRow.status))) {
+        visitRow.status = 'confirmed';
       }
-
-      const toVisitId = String(nextVisit.visitId || '').trim();
-      const escrowRecord =
-        (await safeGetTaskEscrowRecord(parentTaskId, String(visitRow.visitId || ''))) ??
-        (await PaymentClient.getEscrowByEscrowId(escrowId));
-      const metaVisitId = readEscrowMetadataVisitId(escrowRecord);
-      const fromVisitId = metaVisitId || String(visitRow.visitId || '').trim();
-      let skipReassign = !fromVisitId || !toVisitId || fromVisitId === toVisitId;
-
-      if (!skipReassign && metaVisitId && metaVisitId === toVisitId) {
-        skipReassign = true;
-        logger.info(
-          '[RecurringVisitService] Escrow already bound to target visit — skipping reassign API',
-          { parentTaskId, fromVisitId, toVisitId, escrowId },
-        );
-      }
-
-      if (!skipReassign) {
-        if (!metaVisitId || metaVisitId !== fromVisitId) {
-          await alignEscrowVisitMetadataIfNeeded({
-            taskId: parentTaskId,
-            visitId: fromVisitId,
-            escrowId,
-            escrow: escrowRecord,
-          });
-        }
-
-        const reassign = await PaymentClient.reassignRecurringVisitEscrow({
-          escrowId,
-          taskId: parentTaskId,
-          fromVisitId,
-          toVisitId,
-        });
-        if (!reassign.success) {
-          throw new BadRequestError(
-            reassign.error || 'Failed to transfer visit payment to the next visit',
-          );
-        }
-      }
-
-      nextVisit.escrowId = escrowId;
-      nextVisit.paidAt = paidAt;
-      nextVisit.paymentStatus = 'held';
-      if (typeof amount === 'number') {
-        nextVisit.amount = amount;
-      }
-      if (visit.assigneeId && !nextVisit.assigneeId) {
-        nextVisit.assigneeId = visit.assigneeId;
-      }
-      if (visit.assigneeUid && !nextVisit.assigneeUid) {
-        nextVisit.assigneeUid = visit.assigneeUid;
-      }
-
-      const nextStatus = String(nextVisit.status);
-      if (['scheduled', 'payment_pending', 'confirmed'].includes(nextStatus)) {
-        nextVisit.status = 'confirmed';
-      }
-      nextVisit.updatedAt = new Date();
-
-      logger.info('[RecurringVisitService] Transferred visit payment on reschedule', {
-        parentTaskId,
-        fromVisitId: visitRow.visitId,
-        toVisitId: nextVisit.visitId,
-        escrowId,
-      });
-    } else {
-      const requesterUid =
-        (await RecurringVisitService.resolveProfileUid(task.requesterId)) || undefined;
-      await RecurringVisitService.refundVisitPaymentOnCancel({
-        planTask: task,
-        visit: visitRow,
-        cancelledBy: 'poster',
-        requesterUid,
-        reason: 'Visit rescheduled — payment cleared for re-booking',
-      });
-
-      logger.info('[RecurringVisitService] Refunded visit payment on last-visit reschedule', {
+      logger.info('[RecurringVisitService] Rescheduled visit keeps its payment', {
         parentTaskId,
         visitId: visitRow.visitId,
         escrowId,
       });
+      return { transferred: false, keptPayment: true };
     }
 
-    const clearedChildTaskId = RecurringVisitService.clearVisitHeldPaymentState(visitRow, {
-      paymentStatus: nextVisit ? 'not_required' : 'pending',
+    const nextVisit = owner;
+    if (visitRowHasHeldPayment(nextVisit)) {
+      throw new BadRequestError(
+        'Cannot reschedule this visit: the next visit already has payment applied.',
+      );
+    }
+
+    const toVisitId = String(nextVisit.visitId || '').trim();
+    const escrowRecord =
+      (await safeGetTaskEscrowRecord(parentTaskId, String(visitRow.visitId || ''))) ??
+      (await PaymentClient.getEscrowByEscrowId(escrowId));
+    const metaVisitId = readEscrowMetadataVisitId(escrowRecord);
+    const fromVisitId = metaVisitId || String(visitRow.visitId || '').trim();
+    let skipReassign = !fromVisitId || !toVisitId || fromVisitId === toVisitId;
+    let remoteReassign: { escrowId: string; fromVisitId: string; toVisitId: string } | undefined;
+
+    if (!skipReassign && metaVisitId && metaVisitId === toVisitId) {
+      skipReassign = true;
+      logger.info(
+        '[RecurringVisitService] Escrow already bound to target visit — skipping reassign API',
+        { parentTaskId, fromVisitId, toVisitId, escrowId },
+      );
+    }
+
+    if (!skipReassign) {
+      if (!metaVisitId || metaVisitId !== fromVisitId) {
+        await alignEscrowVisitMetadataIfNeeded({
+          taskId: parentTaskId,
+          visitId: fromVisitId,
+          escrowId,
+          escrow: escrowRecord,
+        });
+      }
+
+      const reassign = await PaymentClient.reassignRecurringVisitEscrow({
+        escrowId,
+        taskId: parentTaskId,
+        fromVisitId,
+        toVisitId,
+      });
+      if (!reassign.success) {
+        throw new BadRequestError(
+          reassign.error || 'Failed to transfer visit payment to the next visit',
+        );
+      }
+      remoteReassign = { escrowId, fromVisitId, toVisitId };
+    }
+
+    nextVisit.escrowId = escrowId;
+    nextVisit.paidAt = paidAt;
+    nextVisit.paymentStatus = 'held';
+    if (typeof amount === 'number') {
+      nextVisit.amount = amount;
+    }
+    if (visit.assigneeId && !nextVisit.assigneeId) {
+      nextVisit.assigneeId = visit.assigneeId;
+    }
+    if (visit.assigneeUid && !nextVisit.assigneeUid) {
+      nextVisit.assigneeUid = visit.assigneeUid;
+    }
+
+    const nextStatus = String(nextVisit.status);
+    if (['scheduled', 'payment_pending', 'confirmed'].includes(nextStatus)) {
+      nextVisit.status = 'confirmed';
+    }
+    nextVisit.updatedAt = new Date();
+
+    logger.info('[RecurringVisitService] Transferred visit payment on reschedule', {
+      parentTaskId,
+      fromVisitId: visitRow.visitId,
+      toVisitId: nextVisit.visitId,
+      escrowId,
     });
 
-    return nextVisit
-      ? { transferred: true, toVisitId: nextVisit.visitId, clearedChildTaskId }
-      : { transferred: false, clearedChildTaskId };
+    const clearedChildTaskId = RecurringVisitService.clearVisitHeldPaymentState(visitRow, {
+      paymentStatus: 'not_required',
+    });
+
+    return { transferred: true, toVisitId: nextVisit.visitId, clearedChildTaskId, remoteReassign };
+  }
+
+  /**
+   * Best-effort undo of the escrow re-tag when the reschedule save failed before the new owner
+   * row was written, so the payment record keeps pointing at the visit that still holds it.
+   */
+  private static async revertUnsavedRescheduleEscrowReassign(
+    parentTaskId: string,
+    reassign: { escrowId: string; fromVisitId: string; toVisitId: string },
+  ): Promise<boolean> {
+    try {
+      const latest = await Task.findById(parentTaskId);
+      if (!latest) return false;
+      await hydrateTaskVisitsOntoSchedule(latest);
+      const target = findVisit(latest, reassign.toVisitId);
+      const source = findVisit(latest, reassign.fromVisitId);
+      const targetHolds = String(target?.escrowId || '').trim() === reassign.escrowId;
+      const sourceHolds = String(source?.escrowId || '').trim() === reassign.escrowId;
+
+      if (targetHolds && !sourceHolds) return false;
+      if (targetHolds === sourceHolds) {
+        logger.error('[RecurringVisitService] Reschedule payment transfer partially saved', {
+          parentTaskId,
+          ...reassign,
+          targetHolds,
+          sourceHolds,
+        });
+        return false;
+      }
+
+      const result = await PaymentClient.reassignRecurringVisitEscrow({
+        escrowId: reassign.escrowId,
+        taskId: parentTaskId,
+        fromVisitId: reassign.toVisitId,
+        toVisitId: reassign.fromVisitId,
+      });
+      if (!result.success) {
+        logger.error('[RecurringVisitService] Failed to revert reschedule escrow reassign', {
+          parentTaskId,
+          ...reassign,
+          error: result.error,
+        });
+        return false;
+      }
+      return true;
+    } catch (error) {
+      logger.error('[RecurringVisitService] Failed to revert reschedule escrow reassign', {
+        parentTaskId,
+        ...reassign,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
   }
 
   private static assertPlanAllowsVisitReschedule(plan: Record<string, unknown>): void {
@@ -4608,6 +5354,21 @@ export class RecurringVisitService {
       throw new BadRequestError('New date must be different from the current visit date');
     }
 
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const today = normalizeDateOnly(new Date());
+    // One day of slack each side absorbs client/server timezone differences.
+    if (normalizedDate.getTime() < today.getTime() - DAY_MS) {
+      throw new BadRequestError('New date cannot be in the past');
+    }
+    if (
+      normalizedDate.getTime() >
+      today.getTime() + (RECURRING_VISIT_RESCHEDULE_MAX_DAYS_AHEAD + 1) * DAY_MS
+    ) {
+      throw new BadRequestError(
+        `New date must be within ${RECURRING_VISIT_RESCHEDULE_MAX_DAYS_AHEAD} days from today`,
+      );
+    }
+
     const rows = getScheduleRows(task);
     const conflict = rows.find(
       (row) =>
@@ -4630,46 +5391,22 @@ export class RecurringVisitService {
     const parentTaskId = String(params.task._id);
     await RecurringVisitService.ensureMaterializedBuffer(parentTaskId);
 
-    const task = await Task.findById(parentTaskId);
-    if (!task) throw new NotFoundError('Task not found');
-
-    const visit = await requireHydratedVisit(task, params.visit.visitId);
-
-    RecurringVisitService.assertVisitRescheduleDateAvailable(task, visit, params.newDate);
-
-    const transferResult = await RecurringVisitService.transferHeldPaymentOnVisitReschedule(
-      task,
-      visit,
-    );
-
-    const visitRow = findVisit(task, visit.visitId) || visit;
-    const normalizedDate = normalizeDateOnly(params.newDate);
-    visitRow.date = normalizedDate;
-    if (params.scheduledTimeStart) {
-      visitRow.scheduledTimeStart = params.scheduledTimeStart;
-    }
-    if (params.scheduledTimeEnd) {
-      visitRow.scheduledTimeEnd = params.scheduledTimeEnd;
-    }
-    visitRow.rescheduleRequest = undefined;
-    visitRow.updatedAt = new Date();
-
-    const rows = getScheduleRows(task);
-    if (
-      transferResult.transferred &&
-      isVisitDeferredByEarlierChronologicalVisit(visitRow, rows)
-    ) {
-      visitRow.paymentStatus = 'not_required';
-      visitRow.status = 'scheduled';
+    const maxAttempts = 3;
+    let saved: Awaited<ReturnType<typeof RecurringVisitService.persistVisitRescheduleOnce>>;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        saved = await RecurringVisitService.persistVisitRescheduleOnce(parentTaskId, params);
+        break;
+      } catch (error) {
+        const retryable =
+          isOptimisticConcurrencyError(error) &&
+          !(error as { rescheduleTransferUnresolved?: boolean }).rescheduleTransferUnresolved;
+        if (!retryable || attempt >= maxAttempts) throw error;
+        await delay(50 * attempt);
+      }
     }
 
-    if (transferResult.transferred && transferResult.toVisitId) {
-      (task as unknown as { activeVisitId?: string }).activeVisitId = transferResult.toVisitId;
-      task.markModified('activeVisitId');
-    }
-
-    task.schedule = rows as unknown as ITask['schedule'];
-    await saveRecurringPlanDocument(task, parentTaskId, rows);
+    const { transferResult, visit, visitRow, normalizedDate } = saved;
 
     if (transferResult.clearedChildTaskId) {
       await RecurringVisitService.deleteRecurringVisitChildTask(transferResult.clearedChildTaskId);
@@ -4699,6 +5436,18 @@ export class RecurringVisitService {
         }
         child.updatedAt = new Date();
         await child.save();
+      }
+    } else if (transferResult.keptPayment) {
+      const reloaded = await Task.findById(parentTaskId);
+      if (reloaded) {
+        await hydrateTaskVisitsOntoSchedule(reloaded);
+        const keptVisit = findVisit(reloaded, visit.visitId);
+        if (keptVisit && !keptVisit.childTaskId) {
+          await RecurringVisitService.ensureChildTaskForVisit(reloaded, keptVisit);
+          const reloadedRows = getScheduleRows(reloaded);
+          reloaded.schedule = reloadedRows as unknown as ITask['schedule'];
+          await saveRecurringPlanDocument(reloaded, parentTaskId, reloadedRows);
+        }
       }
     }
 
@@ -4738,6 +5487,83 @@ export class RecurringVisitService {
         }
       }
     }
+  }
+
+  /**
+   * One attempt at the reschedule write: decide payment ownership on the proposed schedule,
+   * move the payment only when the owner changes, then persist visits and plan together.
+   */
+  private static async persistVisitRescheduleOnce(
+    parentTaskId: string,
+    params: {
+      visit: ScheduleVisitRow;
+      newDate: Date;
+      scheduledTimeStart?: string;
+      scheduledTimeEnd?: string;
+    },
+  ) {
+    const task = await Task.findById(parentTaskId);
+    if (!task) throw new NotFoundError('Task not found');
+
+    const visit = await requireHydratedVisit(task, params.visit.visitId);
+
+    RecurringVisitService.assertVisitRescheduleDateAvailable(task, visit, params.newDate);
+
+    const normalizedDate = normalizeDateOnly(params.newDate);
+    const transferResult = await RecurringVisitService.transferHeldPaymentOnVisitReschedule(
+      task,
+      visit,
+      {
+        date: normalizedDate,
+        scheduledTimeStart: params.scheduledTimeStart || visit.scheduledTimeStart,
+      },
+    );
+
+    const visitRow = findVisit(task, visit.visitId) || visit;
+    visitRow.date = normalizedDate;
+    if (params.scheduledTimeStart) {
+      visitRow.scheduledTimeStart = params.scheduledTimeStart;
+    }
+    if (params.scheduledTimeEnd) {
+      visitRow.scheduledTimeEnd = params.scheduledTimeEnd;
+    }
+    visitRow.rescheduleRequest = undefined;
+    visitRow.updatedAt = new Date();
+    if (String(visitRow.status) === 'payment_pending') {
+      visitRow.paymentDeadline = getPaymentDeadline(visitRow, task);
+    }
+
+    const rows = getScheduleRows(task);
+    if (
+      transferResult.transferred &&
+      isVisitDeferredByEarlierChronologicalVisit(visitRow, rows)
+    ) {
+      visitRow.paymentStatus = 'not_required';
+      visitRow.status = 'scheduled';
+    }
+
+    if (transferResult.transferred && transferResult.toVisitId) {
+      (task as unknown as { activeVisitId?: string }).activeVisitId = transferResult.toVisitId;
+      task.markModified('activeVisitId');
+    }
+
+    task.schedule = rows as unknown as ITask['schedule'];
+    try {
+      await saveRecurringPlanDocument(task, parentTaskId, rows);
+    } catch (error) {
+      if (transferResult.remoteReassign) {
+        const reverted = await RecurringVisitService.revertUnsavedRescheduleEscrowReassign(
+          parentTaskId,
+          transferResult.remoteReassign,
+        );
+        if (!reverted && error && typeof error === 'object') {
+          (error as { rescheduleTransferUnresolved?: boolean }).rescheduleTransferUnresolved = true;
+        }
+      }
+      throw error;
+    }
+
+    return { transferResult, visit, visitRow, normalizedDate };
   }
 
   /** Point activeVisitId at the earliest actionable visit by calendar date. */
@@ -4838,14 +5664,16 @@ export class RecurringVisitService {
       ? findVisit(refreshedTask, params.visitId)
       : undefined;
     if (refreshedTask && refreshedVisit) {
-      await RecurringVisitService.notifyTaskerRecurringVisitRescheduled(
-        refreshedTask,
-        refreshedVisit,
-        {
-          newDate: params.newDate,
-          scheduledTimeStart: params.scheduledTimeStart,
-          approvedRequest: false,
-        },
+      runInBackground('notifyTaskerRecurringVisitRescheduled', () =>
+        RecurringVisitService.notifyTaskerRecurringVisitRescheduled(
+          refreshedTask,
+          refreshedVisit,
+          {
+            newDate: params.newDate,
+            scheduledTimeStart: params.scheduledTimeStart,
+            approvedRequest: false,
+          },
+        ),
       );
     }
   }
@@ -4925,10 +5753,12 @@ export class RecurringVisitService {
     const rows = replaceVisitRowInSchedule(task, visit);
     await saveRecurringPlanDocument(task, params.taskId, rows);
 
-    await RecurringVisitService.notifyCustomerRecurringVisitRescheduleRequested(task, visit, {
-      newDate: params.newDate,
-      scheduledTimeStart: params.scheduledTimeStart,
-    });
+    runInBackground('notifyCustomerRecurringVisitRescheduleRequested', () =>
+      RecurringVisitService.notifyCustomerRecurringVisitRescheduleRequested(task, visit, {
+        newDate: params.newDate,
+        scheduledTimeStart: params.scheduledTimeStart,
+      }),
+    );
   }
 
   /** Tasker: request visit cancellation on until-cancelled plans; customer decides. */
@@ -5010,9 +5840,11 @@ export class RecurringVisitService {
     task.schedule = rows as unknown as ITask['schedule'];
     await saveRecurringPlanDocument(task, params.taskId, rows);
 
-    await RecurringVisitService.notifyCustomerRecurringVisitCancelRequested(task, visit, {
-      reason: trimmedReason,
-    });
+    runInBackground('notifyCustomerRecurringVisitCancelRequested', () =>
+      RecurringVisitService.notifyCustomerRecurringVisitCancelRequested(task, visit, {
+        reason: trimmedReason,
+      }),
+    );
   }
 
   /** Customer: dismiss a tasker cancel request without cancelling the visit. */
@@ -5104,11 +5936,13 @@ export class RecurringVisitService {
       const savedRows = replaceVisitRowInSchedule(savedTask, savedVisit);
       await saveRecurringPlanDocument(savedTask, params.taskId, savedRows);
 
-      await RecurringVisitService.notifyTaskerRecurringVisitRescheduled(savedTask, savedVisit, {
-        newDate: approvedDate,
-        scheduledTimeStart: request.scheduledTimeStart,
-        approvedRequest: true,
-      });
+      runInBackground('notifyTaskerRecurringVisitRescheduled', () =>
+        RecurringVisitService.notifyTaskerRecurringVisitRescheduled(savedTask, savedVisit, {
+          newDate: approvedDate,
+          scheduledTimeStart: request.scheduledTimeStart,
+          approvedRequest: true,
+        }),
+      );
       return;
     }
 
@@ -5117,7 +5951,9 @@ export class RecurringVisitService {
     const rows = replaceVisitRowInSchedule(task, visit);
     await saveRecurringPlanDocument(task, params.taskId, rows);
 
-    await RecurringVisitService.notifyTaskerRecurringVisitRescheduleRejected(task, visit);
+    runInBackground('notifyTaskerRecurringVisitRescheduleRejected', () =>
+      RecurringVisitService.notifyTaskerRecurringVisitRescheduleRejected(task, visit),
+    );
   }
 
   /** Customer: manually pause an active recurring plan. */
@@ -5436,9 +6272,11 @@ export class RecurringVisitService {
     task.updatedAt = now;
     await saveRecurringPlanDocument(task, params.taskId, rows);
 
-    await RecurringVisitService.notifyCustomerRecurringPlanTaskerLeft(task, {
-      reason: cancelReason,
-    });
+    runInBackground('notifyCustomerRecurringPlanTaskerLeft', () =>
+      RecurringVisitService.notifyCustomerRecurringPlanTaskerLeft(task, {
+        reason: cancelReason,
+      }),
+    );
   }
 
   private static async withdrawTaskerAcceptedApplication(params: {

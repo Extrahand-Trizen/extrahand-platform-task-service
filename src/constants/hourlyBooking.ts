@@ -5,6 +5,11 @@
 
 export const HOURLY_HELPER_CATEGORY_SLUG = 'hourly-helper' as const;
 
+/** partnerProfile.categories values that qualify a partner as an Hourly Helper. */
+export const HOURLY_HELPER_PARTNER_CATEGORIES: readonly string[] = ['cleaning'];
+
+export const HOURLY_HELPER_COMING_SOON_CODE = 'HOURLY_HELPER_COMING_SOON' as const;
+
 /** Catalog SKU slug ↔ duration. Client duration key = slug. */
 export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   slug: string;

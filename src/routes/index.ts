@@ -56,6 +56,18 @@ router.post(
   asyncHandler(RecurringVisitController.visitPaymentCaptured)
 );
 
+router.post(
+  '/recurring/internal/visit-payment-refunded',
+  serviceAuthMiddleware,
+  asyncHandler(RecurringVisitController.visitPaymentRefunded)
+);
+
+router.post(
+  '/recurring/internal/visit-payment-quote',
+  serviceAuthMiddleware,
+  asyncHandler(RecurringVisitController.visitPaymentQuote)
+);
+
 // Quick Commerce: auto-assign partner to order after payment (service-to-service)
 // Quick Commerce: notify nearby partners of new available order (service-to-service)
 router.post(

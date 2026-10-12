@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Task, { ITask } from "../models/Task";
+import { buildOriginalScheduleFields, buildRescheduleHistoryEntry } from "../models/rescheduleHistory";
 import {
   BadRequestError,
   NotFoundError,
@@ -33,6 +34,7 @@ import { getMeaningfulTextError } from '../utils/textValidation';
 import { isActiveEscrow } from '../utils/taskCommitment';
 import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
+import { recurringVisitConfig } from '../config/recurringVisitConfig';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { BookNowAutoAssignService, isHourlyTask } from './BookNowAutoAssignService';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
@@ -43,11 +45,13 @@ import { BOOK_NOW_PARTNER_PAYOUT_COPY } from '../constants/bookNowPartnerPayoutC
 import { buildCreateTaskApiResponse } from '../utils/buildCreateTaskApiResponse';
 import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
+import { sanitizeRequesterTaskUpdate } from '../utils/taskUpdateAllowlist';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
 import { normalizeQcOrderToTask, findQcOrderById, updateQcOrderById } from '../utils/qcOrderTaskAdapter';
 import { invalidatePartnerLocationSubject } from './PartnerLocationService';
 import { isRecurringVisitPlanTask } from '../utils/recurringVisitMeta';
 import { resolveTaskStartForCancellationPolicy } from './cancellation/cancellationContext';
+import { HourlyHelperLocationAvailabilityService } from './HourlyHelperLocationAvailabilityService';
 import {
   MY_TASKS_LIST_SELECT,
   buildApplicationPreviewsForTasks,
@@ -411,7 +415,7 @@ const MAX_PAGE = 100;
 
 // Minimal fields for task list responses (omit long description and heavy arrays)
 const TASK_LIST_SELECT =
-  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce rescheduleCount isDeletedByCustomer isDeletedBySupport';
+  'title category categorySlug categoryLabel subcategory budget isNegotiable location status urgency priority requesterId assigneeId assignedAt views isFeatured expiresAt scheduledDate scheduledTimeStart scheduledTimeEnd dateOption timeSlot flexibility createdAt updatedAt packersMoversDetails groceryPickupDetails medicinePickupDetails pickDropDetails images bookingSource bookingOrderId parentTaskId recurringVisitId recurring recurringPlan activeVisitId tags posterBudgetEditedViaFormOnce rescheduleCount lastRescheduledAt originalScheduledDate originalScheduledTimeStart originalScheduledTimeEnd isDeletedByCustomer isDeletedBySupport';
 
 async function enrichBookNowTaskScheduleFromBooking(task: ITask): Promise<ITask> {
   if (!isBookNowTaskForCompletion(task)) return task;
@@ -1070,7 +1074,7 @@ export class TaskService {
     );
     if (bookingOrderIds.length > 0) {
       const bookingOrders = await BookingOrder.find({ orderId: { $in: bookingOrderIds } })
-        .select('orderId total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount')
+        .select('orderId total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount originalScheduledDate originalScheduledTimeStart originalScheduledTimeEnd')
         .lean();
       const bookingById = new Map(bookingOrders.map((order) => [order.orderId, order]));
       enrichedTasks = enrichedTasks.map((task) => {
@@ -1086,6 +1090,9 @@ export class TaskService {
           Number(row.rescheduleCount || 0),
           Number(order.rescheduleCount || 0),
         );
+        row.originalScheduledDate ??= order.originalScheduledDate;
+        row.originalScheduledTimeStart ??= order.originalScheduledTimeStart;
+        row.originalScheduledTimeEnd ??= order.originalScheduledTimeEnd;
         return row;
       });
     }
@@ -1181,7 +1188,7 @@ export class TaskService {
     const bookingOrderIdForDetail = String(taskDetails.bookingOrderId || '').trim();
     if (bookingOrderIdForDetail) {
       const bookingOrder = await BookingOrder.findOne({ orderId: bookingOrderIdForDetail })
-        .select('orderId subtotal total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount')
+        .select('orderId subtotal total scheduledDate scheduledTimeStart scheduledTimeEnd timeSlot rescheduleCount originalScheduledDate originalScheduledTimeStart originalScheduledTimeEnd rescheduleHistory')
         .lean();
       if (bookingOrder) {
         taskDetails.bookingOrderTotal = Number(
@@ -1194,6 +1201,10 @@ export class TaskService {
         taskDetails.scheduledTimeStart ??= bookingOrder.scheduledTimeStart;
         taskDetails.scheduledTimeEnd ??= bookingOrder.scheduledTimeEnd;
         taskDetails.timeSlot ??= bookingOrder.timeSlot;
+        taskDetails.originalScheduledDate ??= bookingOrder.originalScheduledDate;
+        taskDetails.originalScheduledTimeStart ??= bookingOrder.originalScheduledTimeStart;
+        taskDetails.originalScheduledTimeEnd ??= bookingOrder.originalScheduledTimeEnd;
+        taskDetails.rescheduleHistory ??= bookingOrder.rescheduleHistory;
       }
     }
 
@@ -1230,11 +1241,11 @@ export class TaskService {
     }
 
     if (RecurringVisitService.isVisitPlanTask(task as unknown as Record<string, unknown>)) {
-      const planDoc = await Task.findById(taskId);
-      if (planDoc) {
-        void RecurringVisitService.sanitizeOrphanedScheduleChildReferences(planDoc);
-      }
-      void RecurringVisitService.scheduleReconcilePlanState(taskId);
+      // Background repair only (reconcile also clears orphaned child links); throttled per plan
+      // so detail polling never turns into repeated whole-plan reconciles.
+      void RecurringVisitService.scheduleReconcilePlanState(taskId, {
+        cooldownSeconds: recurringVisitConfig.readReconcileCooldownSeconds,
+      });
 
       const taskRecord = task as unknown as Record<string, unknown>;
       const embeddedSchedule = Array.isArray(task.schedule) ? task.schedule : [];
@@ -1300,6 +1311,16 @@ export class TaskService {
   ): Promise<ITask> {
     const normalizedTaskData = normalizeCreateTaskPayload(taskData);
     taskData = normalizedTaskData;
+
+    if (taskData.budgetType === 'hourly' || taskData.categorySlug === 'hourly-helper' || taskData.categorySlug === 'hourly-based') {
+      const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
+        areaName: taskData.location?.area,
+        cityName: taskData.location?.city,
+      });
+      if (!isEnabled) {
+        throw new BadRequestError('Hourly Helper services are currently unavailable in your location.');
+      }
+    }
 
     // Delivery/pickup tasks have system-generated titles and descriptions â€” skip meaningful-text checks
     const isDeliveryPickup = [taskData.category, taskData.categorySlug].some((c: string) =>
@@ -1722,20 +1743,24 @@ export class TaskService {
     const oldScheduledDate = task.scheduledDate?.getTime();
     const oldAssigneeId = task.assigneeId; // âœ… Updated from assigneeUid
 
-    // Normalize budget field to handle both object and number formats
-    let updateData = { ...updates, updatedAt: new Date() };
-    // Never trust client-sent flags for one-time budget rules.
-    delete (updateData as any).posterBudgetEditedViaFormOnce;
-    if (updateData.budget) {
-      if (typeof updateData.budget !== "object") {
-        // Convert budget number to object
-        updateData.budget = {
-          amount: parseFloat(updateData.budget) || 0,
-          currency: "INR",
-          type: "fixed",
-        };
-      }
+    const { update: allowedUpdates, dropped } = sanitizeRequesterTaskUpdate(
+      {
+        status: task.status,
+        bookingSource: (task as any).bookingSource,
+        budget: task.budget as any,
+        recurringPlanStatus: (task as any).recurringPlan?.status,
+        scheduledDate: task.scheduledDate,
+        scheduledTimeStart: (task as any).scheduledTimeStart,
+        scheduledTimeEnd: (task as any).scheduledTimeEnd,
+        timeSlot: (task as any).timeSlot,
+        dateOption: (task as any).dateOption,
+      },
+      updates,
+    );
+    if (dropped.length > 0) {
+      logger.warn('[TaskService.updateTask] Ignored non-editable fields', { taskId, dropped });
     }
+    let updateData: any = { ...allowedUpdates, updatedAt: new Date() };
 
     // Non-negotiable + Pick & Drop: poster may change listed budget at most once via updateTask.
     if (enforcesOneTimePosterBudgetFormEdit(task) && updateData.budget) {
@@ -2151,6 +2176,7 @@ export class TaskService {
       scheduledTimeStart?: string;
       scheduledTimeEnd?: string;
       reason?: string;
+      actorUid?: string;
     },
   ): Promise<ITask> {
     const eligibility = await TaskService.getRescheduleEligibility(taskId, profileId);
@@ -2170,12 +2196,34 @@ export class TaskService {
       throw new ForbiddenError('Not authorized to reschedule this task');
     }
 
+    const rescheduledAt = new Date();
+    const previousSchedule = {
+      scheduledDate: task.scheduledDate,
+      scheduledTimeStart: task.scheduledTimeStart,
+      scheduledTimeEnd: task.scheduledTimeEnd,
+      timeSlot: task.timeSlot,
+    };
+    if (!task.originalScheduledDate) {
+      Object.assign(task, buildOriginalScheduleFields(previousSchedule));
+    }
+    task.rescheduleHistory = [
+      ...(task.rescheduleHistory || []),
+      buildRescheduleHistoryEntry({
+        previous: previousSchedule,
+        next: { scheduledDate, scheduledTimeStart, scheduledTimeEnd, timeSlot: task.timeSlot },
+        rescheduledAt,
+        rescheduledBy: params.actorUid || String(profileId),
+        actorRole: 'customer',
+        reason: params.reason,
+        chargeAmount: eligibility.chargeRequired ? eligibility.chargeAmount : undefined,
+      }),
+    ];
     task.scheduledDate = scheduledDate;
     task.scheduledTimeStart = scheduledTimeStart;
     task.scheduledTimeEnd = scheduledTimeEnd;
     task.dateOption = 'on-date';
     task.rescheduleCount = Number(task.rescheduleCount || 0) + 1;
-    task.lastRescheduledAt = new Date();
+    task.lastRescheduledAt = rescheduledAt;
     const helperCommitted = Boolean(task.assigneeId || task.assigneeUid || task.executionPhase);
     if (helperCommitted) {
       task.executionPhase = 'assigned';
@@ -2806,12 +2854,12 @@ export class TaskService {
       isRecurringVisitPlanTask(task as unknown as Record<string, unknown>) &&
       !task.parentTaskId
     ) {
-      const workChild = await RecurringVisitService.resolveActiveWorkChildTask(task);
-      if (workChild) {
+      const workChild = await RecurringVisitService.resolveWorkStartTaskOrSelf(task);
+      if (workChild.parentTaskId) {
         return TaskService.updateTaskStatus(String(workChild._id), profileId, status, options);
       }
       throw new BadRequestError(
-        "Recurring visit work must be started on the paid visit task, not the plan"
+        "Visit payment must be completed before the helper can start work"
       );
     }
 
@@ -2855,13 +2903,7 @@ export class TaskService {
       const isRecurringChildVisit =
         Boolean(task.parentTaskId) && Boolean(task.recurringVisitId);
       if (!isRecurringChildVisit) {
-        let escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
-        if (!escrowForCancel && task.parentTaskId && task.recurringVisitId) {
-          escrowForCancel = await PaymentClient.getEscrowByTaskIdAndVisitId(
-            String(task.parentTaskId),
-            String(task.recurringVisitId),
-          );
-        }
+        const escrowForCancel = await PaymentClient.getEscrowByTaskId(taskId);
         if (isActiveEscrow(escrowForCancel)) {
           throw new BadRequestError(
             "Cannot cancel after payment is held. Contact support if you need help."
@@ -2875,12 +2917,16 @@ export class TaskService {
       | null = null;
 
     if (status === "cancelled") {
-      let escrow = await PaymentClient.getEscrowByTaskId(taskId);
-      if (!escrow && task.parentTaskId && task.recurringVisitId) {
-        escrow = await PaymentClient.getEscrowByTaskIdAndVisitId(
-          String(task.parentTaskId),
-          String(task.recurringVisitId),
-        );
+      // Recurring visit children: the visit's own payment first; never the Work's newest payment.
+      let escrow =
+        task.parentTaskId && task.recurringVisitId
+          ? await PaymentClient.getEscrowByTaskIdAndVisitId(
+              String(task.parentTaskId),
+              String(task.recurringVisitId),
+            )
+          : null;
+      if (!escrow) {
+        escrow = await PaymentClient.getEscrowByTaskId(taskId);
       }
       if (escrow) {
         const isRequesterCancelled = task.requesterId.equals(profileId);
@@ -2900,11 +2946,7 @@ export class TaskService {
           escrow && typeof escrow === "object"
             ? String((escrow as { escrowId?: unknown }).escrowId ?? "").trim() || undefined
             : undefined;
-        const cancelTaskId = escrowPublicId
-          ? undefined
-          : task.parentTaskId && task.recurringVisitId
-            ? String(task.parentTaskId)
-            : taskId;
+        const cancelTaskId = escrowPublicId ? undefined : taskId;
         logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow started', {
           taskId,
           actorProfileId: profileId.toString(),
@@ -3602,6 +3644,10 @@ export class TaskService {
             amount: payoutAmount,
             taskTitle: updatedTask.title || task.title,
             visitId: updatedTask.recurringVisitId ? String(updatedTask.recurringVisitId) : undefined,
+            parentTaskId:
+              updatedTask.recurringVisitId && updatedTask.parentTaskId
+                ? String(updatedTask.parentTaskId)
+                : undefined,
           });
           logger.info(`[Auto-Payout] Payout result from updateTaskStatus for task ${taskId}:`, payoutResult);
           
@@ -3692,7 +3738,7 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const workTask = await RecurringVisitService.resolveWorkStartTaskOrSelf(task);
     const effectiveTaskId = String(workTask._id);
 
     const isPerformer = workTask.assigneeId?.equals(profileId) || false;
@@ -3930,7 +3976,7 @@ export class TaskService {
       throw new NotFoundError("Task not found");
     }
 
-    const workTask = await RecurringVisitService.resolvePerformingWorkTaskOrSelf(task);
+    const workTask = await RecurringVisitService.resolveWorkStartTaskOrSelf(task);
     const effectiveTaskId = String(workTask._id);
 
     const isPerformer = workTask.assigneeId?.equals(profileId) || false;
