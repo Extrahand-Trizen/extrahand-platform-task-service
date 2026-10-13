@@ -1252,8 +1252,15 @@ export class TaskService {
       }
     }
 
-    // Attach dispatchLogs for Book Now tasks if not yet stored
-    if (task.bookingSource === 'book_now' && (!task.dispatchLogs || !task.dispatchLogs.length)) {
+    // Don't reconstruct dispatch history for terminal bookings while serving task details.
+    const isTerminalTask = ['completed', 'cancelled'].includes(
+      String(task.status || '').toLowerCase(),
+    );
+    if (
+      task.bookingSource === 'book_now' &&
+      !isTerminalTask &&
+      (!task.dispatchLogs || !task.dispatchLogs.length)
+    ) {
       try {
         const { BookNowAutoAssignService } = await import('./BookNowAutoAssignService');
         const logs = await BookNowAutoAssignService.buildDispatchLog(task);

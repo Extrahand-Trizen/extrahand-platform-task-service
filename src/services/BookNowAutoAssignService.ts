@@ -487,7 +487,34 @@ export class BookNowAutoAssignService {
    */
   static async buildDispatchLog(task: ITask, assignedPartnerUid?: string): Promise<IDispatchAreaLog[]> {
     const Profile = mongoose.connection.collection('profiles');
-    const profiles = await Profile.find({}).toArray();
+     const profiles = await Profile.find(
+       {
+         $or: [
+           { 'partnerProfile.workAreas.0': { $exists: true } },
+           { 'helperWorkAreas.0': { $exists: true } },
+         ],
+       },
+       {
+         projection: {
+           _id: 1,
+           uid: 1,
+           name: 1,
+           fullName: 1,
+           gender: 1,
+           isActive: 1,
+           isAvailable: 1,
+           helperWorkAreas: 1,
+           homeLocation: 1,
+           location: 1,
+           'partnerProfile.categories': 1,
+           'partnerProfile.workAreas': 1,
+           'partnerProfile.status': 1,
+           'partnerProfile.onLeave': 1,
+           'partnerProfile.workShifts': 1,
+           'partnerProfile.gender': 1,
+         },
+       },
+     ).toArray();
 
     const taskCoords =
       Array.isArray(task.location?.coordinates) && task.location.coordinates.length === 2

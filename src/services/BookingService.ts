@@ -1858,6 +1858,9 @@ export class BookingService {
             amount: rawOrder.amount,
             currency: rawOrder.currency || 'INR',
             ...(typeof rawOrder.keyId === 'string' ? { keyId: rawOrder.keyId } : {}),
+            ...(rawOrder.paymentEnvironment === 'test' || rawOrder.paymentEnvironment === 'live'
+              ? { paymentEnvironment: rawOrder.paymentEnvironment }
+              : {}),
           }
         : escrowResult.order;
 
