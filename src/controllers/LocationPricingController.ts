@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { LocationPricingService } from '../services/LocationPricingService';
 import { HourlyHelperLocationAvailabilityService } from '../services/HourlyHelperLocationAvailabilityService';
 import { LocationType } from '../models/HourlyHelperLocationAvailability';
+import { BadRequestError } from '../errors/AppError';
+import { PostCompareLocationAvailabilityService } from '../services/PostCompareLocationAvailabilityService';
 
 export class LocationPricingController {
   static async ensureCanonicalLocation(req: Request, res: Response): Promise<void> {
@@ -100,6 +102,25 @@ export class LocationPricingController {
       locationType: type as LocationType,
       locationId: id,
       isEnabled,
+      updatedBy,
+    });
+    res.json({ success: true, data });
+  }
+
+  static async listPostCompareAreaAvailabilities(req: Request, res: Response): Promise<void> {
+    const search = req.query.search ? String(req.query.search) : undefined;
+    const data = await PostCompareLocationAvailabilityService.listAreaAvailabilities(search);
+    res.json({ success: true, data });
+  }
+
+  static async togglePostCompareAreaAvailability(req: Request, res: Response): Promise<void> {
+    if (typeof req.body?.isEnabled !== 'boolean') {
+      throw new BadRequestError('isEnabled must be a boolean');
+    }
+    const updatedBy = String(req.body?.updatedBy || (req as any).user?.email || (req as any).user?.uid || 'admin');
+    const data = await PostCompareLocationAvailabilityService.setAreaAvailability({
+      areaId: String(req.params.areaId || ''),
+      isEnabled: req.body.isEnabled,
       updatedBy,
     });
     res.json({ success: true, data });

@@ -972,8 +972,6 @@ export class BookingService {
     preferredHelperGender?: 'any' | 'male' | 'female' | string;
     serviceRecipient?: BookingServiceRecipient | unknown;
     preferredPartnerUid?: string;
-    recurringPlanId?: string;
-    recurringVisitId?: string;
   }) {
     const {
       customerUid,
@@ -994,8 +992,6 @@ export class BookingService {
     } = params;
 
     const preferredPartnerUid = String(params.preferredPartnerUid || '').trim() || undefined;
-    const recurringPlanId = String(params.recurringPlanId || '').trim() || undefined;
-    const recurringVisitId = String(params.recurringVisitId || '').trim() || undefined;
 
     const fulfillmentType = parseBookingFulfillmentType(params.fulfillmentType);
     const preferredHelperGender = normalizePreferredHelperGender(
@@ -1331,8 +1327,6 @@ export class BookingService {
       pricingProfile: normalizedOrderGstExempt ? { gstExempt: true } : undefined,
       consultationMeta: consultationMeta || resolvedLinesWithSchedule[0]?.consultationMeta,
       ...(preferredPartnerUid ? { preferredPartnerUid } : {}),
-      ...(recurringPlanId ? { recurringPlanId } : {}),
-      ...(recurringVisitId ? { recurringVisitId } : {}),
     });
 
     const createdItems: InstanceType<typeof BookingItem>[] = [];
@@ -1864,6 +1858,9 @@ export class BookingService {
             amount: rawOrder.amount,
             currency: rawOrder.currency || 'INR',
             ...(typeof rawOrder.keyId === 'string' ? { keyId: rawOrder.keyId } : {}),
+            ...(rawOrder.paymentEnvironment === 'test' || rawOrder.paymentEnvironment === 'live'
+              ? { paymentEnvironment: rawOrder.paymentEnvironment }
+              : {}),
           }
         : escrowResult.order;
 
@@ -2208,6 +2205,7 @@ export class BookingService {
               isFeatured: false,
               currentRevisionRound: 0,
               negotiationStatus: 'closed' as const,
+              recurring: { enabled: false },
               bookingSource: 'book_now' as const,
               bookingOrderId: order.orderId,
               assignmentStatus: 'pending' as const,
@@ -3292,27 +3290,6 @@ export class BookingService {
       taskId: primaryTaskId,
       taskCount: tasks.length,
     });
-
-    if (order.recurringPlanId && order.recurringVisitId) {
-      setImmediate(() => {
-        void import('./BookNowRecurringService')
-          .then(({ BookNowRecurringService }) =>
-            BookNowRecurringService.onVisitOrderPaid({
-              recurringPlanId: String(order.recurringPlanId),
-              recurringVisitId: String(order.recurringVisitId),
-              bookingOrderId: order.orderId,
-              escrowId: order.paymentEscrowId,
-              paidAt: order.paidAt || new Date(),
-            }),
-          )
-          .catch((error) => {
-            logger.warn('Failed to mark Book Now recurring visit paid', {
-              orderId: order.orderId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-      });
-    }
 
     return { success: true, order, tasks };
   }
