@@ -724,6 +724,7 @@ export class PartnerBookNowController {
       {
         $set: {
           status: 'DELIVERED',
+          fulfillmentStatus: 'COMPLETED',
           completionStatus: 'approved',
           completedAt: now,
           completionApprovedAt: now,
@@ -1224,7 +1225,7 @@ export class PartnerBookNowController {
           qcUpdate.completedAt = now;
           qcUpdate.completionStatus = 'approved';
           qcUpdate.completionApprovedAt = now;
-          qcUpdate.fulfillmentStatus = 'HANDED_OVER';
+          qcUpdate.fulfillmentStatus = 'COMPLETED';
         }
 
         await CustomerOrders.updateOne(
