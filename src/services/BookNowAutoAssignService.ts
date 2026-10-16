@@ -1134,6 +1134,8 @@ export class BookNowAutoAssignService {
           categoryLabel,
           bookingSource: 'book_now',
           eventKey: 'BOOK_NOW_PARTNER_ASSIGNED',
+          action: 'assigned',
+          recipientRole: 'partner',
           budgetAmount: taskAmount,
           amount: taskAmount,
           address: locationAddress,
