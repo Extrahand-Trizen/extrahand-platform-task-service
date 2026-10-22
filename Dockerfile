@@ -66,6 +66,7 @@ ENV RATE_LIMIT_MAX_REQUESTS=100
 # - SERVICE_AUTH_TOKEN
 # - USER_SERVICE_URL
 # - MESSAGING_SERVICE_URL
+# - NOTIFICATION_SERVICE_URL (defaults to CapRover internal service DNS in production)
 # - PAYMENT_SERVICE_URL
 
 # Copy production dependencies from build stage

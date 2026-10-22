@@ -1941,12 +1941,12 @@ export class BookingService {
           if (!freshTask || freshTask.assigneeUid) return;
 
           const taskForAssign = BookingService.mergeTaskForAutoAssign(freshTask, line, order);
-          const result = await BookNowAutoAssignService.autoAssign(taskForAssign as any, {
-            preferredPartnerUid:
-              options?.preferredPartnerUid ||
+          const result = await BookNowAutoAssignService.dispatchBookNowOffers(
+            taskForAssign as any,
+            options?.preferredPartnerUid ||
               String((order as { preferredPartnerUid?: string }).preferredPartnerUid || '').trim() ||
               undefined,
-          });
+          );
 
           const postedArea =
             freshTask.location?.taskArea ||
@@ -2007,6 +2007,11 @@ export class BookingService {
                 });
               }
             }
+          } else if (result.offered) {
+            logger.info('⏳ PARTNER OFFER STATUS: WAITING FOR ACCEPTANCE', {
+              taskId,
+              reason: result.reason,
+            });
           } else {
             logger.info(`⚠️ AUTO-ASSIGNMENT STATUS: UNASSIGNED`);
             logger.info(
@@ -2054,7 +2059,7 @@ export class BookingService {
       };
 
       try {
-        await BookNowAutoAssignService.autoAssign(
+        await BookNowAutoAssignService.dispatchBookNowOffers(
           BookingService.mergeTaskForAutoAssign(task, pseudoLine, order) as any,
         );
       } catch (err) {

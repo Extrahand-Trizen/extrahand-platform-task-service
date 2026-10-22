@@ -84,6 +84,12 @@ router.get(
   asyncHandler(TaskController.getMyApplication)
 );
 
+router.post(
+  "/:id/dispatch/notify-stage",
+  serviceAuthMiddleware,
+  asyncHandler(TaskController.notifyBookNowStageImmediately)
+);
+
 router.get(
   "/:id/reschedule/eligibility",
   serviceAuthMiddleware,

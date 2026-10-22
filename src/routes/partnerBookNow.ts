@@ -52,6 +52,24 @@ router.post(
   asyncHandler(PartnerBookNowController.acceptLead as any),
 );
 
+// GET /api/v1/book-now/my-offers
+// Returns active assignment offers addressed to the authenticated partner.
+router.get(
+  '/my-offers',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(PartnerBookNowController.getMyOffers as any),
+);
+
+// POST /api/v1/book-now/tasks/:id/offer-response
+// Body: { action: 'accept' | 'reject' }
+router.post(
+  '/tasks/:id/offer-response',
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(PartnerBookNowController.respondToOffer as any),
+);
+
 // GET /api/v1/book-now/my-leads
 // Returns the partner's own accepted / active Book Now tasks.
 router.get(

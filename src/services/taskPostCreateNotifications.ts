@@ -438,6 +438,10 @@ export async function runPostCreateNotifications(
       // Auto-assign runs in BookingService.scheduleBookNowAutoAssign after payment materialize.
     }
 
+    if (task.bookingSource === 'book_now') {
+      return;
+    }
+
     const nearbyTaskerSet = new Set(nearbyTaskers);
 
     // Skill-only discovery (TASK_CREATED_RECOMMENDED) is disabled:
@@ -938,4 +942,3 @@ export function schedulePostCreateNotifications(
     });
   });
 }
-

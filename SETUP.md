@@ -125,6 +125,12 @@ openssl rand -hex 32
 
 Use this token in **all services** (User, Task, Messaging, Payment, Verification).
 
+For CapRover production deployments, the task service must reach the notification
+service over the internal app network. Set `NOTIFICATION_SERVICE_URL` to
+`http://srv-captain--extrahand-notification-service:4005` (or the matching
+`srv-captain--<notification-app-name>:4005` if the CapRover app has a different
+name). Do not use `localhost:4005` between separate containers.
+
 ## 📦 Storage Configuration
 
 **Note**: Task Service doesn't directly use storage, but may need it for future task image uploads.
@@ -198,6 +204,5 @@ Expected response:
 - `serviceAccountKey.json` should be in the service root, not in `src/`
 - For production, prefer environment variables over files
 - Task Service calls User Service for profile data (getUserName helper)
-
 
 

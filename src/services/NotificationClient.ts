@@ -1,6 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import logger from '../config/logger';
-import { validateEnv } from '../config/env';
+import { config, validateEnv } from '../config/env';
 import {
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_ENTITY_TYPES,
@@ -70,13 +70,14 @@ export class NotificationClient {
    */
   static initialize(serviceName: string = 'unknown'): void {
     const env = validateEnv();
-    this.baseURL = process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:4005';
+    this.baseURL = config.NOTIFICATION_SERVICE_URL.replace(/\/$/, '');
     this.serviceAuthToken = env.SERVICE_AUTH_TOKEN || '';
     this.serviceName = serviceName;
 
     logger.info('NotificationClient initialized', {
       serviceName,
       baseURL: this.baseURL,
+      nodeEnv: config.NODE_ENV,
       hasAuthToken: !!this.serviceAuthToken
     });
 
@@ -245,7 +246,12 @@ export class NotificationClient {
    *   data: { taskId: 'taskId456' }
    * });
    */
-  static async send(payload: NotificationEvent): Promise<void> {
+  static async send(payload: NotificationEvent): Promise<boolean> {
+    const deliveredRecipients = await this.sendWithDeliveryResults(payload);
+    return deliveredRecipients.length > 0;
+  }
+
+  static async sendWithDeliveryResults(payload: NotificationEvent): Promise<string[]> {
     try {
       // Validate payload
       this.validatePayload(payload, false);
@@ -264,7 +270,7 @@ export class NotificationClient {
           actorId: payload.actorId,
           originalRecipients: payload.recipients,
         });
-        return;
+        return [];
       }
 
       // Generate idempotency key
@@ -289,7 +295,7 @@ export class NotificationClient {
         action: payload.data?.action,
       });
 
-      await axios.post(
+      const response = await axios.post(
         `${this.baseURL}/api/v1/notifications/send`,
         sendPayload,
         {
@@ -298,17 +304,39 @@ export class NotificationClient {
             'X-Service-Auth': this.serviceAuthToken,
             'X-Service-Name': this.serviceName
           },
-          timeout: 10000
+          timeout: 30000
         }
       );
+
+      const sentDeviceCount = Number(response.data?.data?.sent || 0);
+      const deliveredRecipients = Array.isArray(response.data?.data?.deliveredUserIds)
+        ? response.data.data.deliveredUserIds.filter(
+            (uid: unknown): uid is string =>
+              typeof uid === 'string' && sanitizedRecipients.includes(uid),
+          )
+        : [];
+      if (response.data?.success !== true || deliveredRecipients.length === 0) {
+        logger.warn('Notification service accepted request without delivering to a device', {
+          eventKey: payload.eventKey,
+          entityId: payload.entity.id,
+          taskId: payload.data?.taskId,
+          recipientCount: sanitizedRecipients.length,
+          sentDeviceCount,
+          failedDeviceCount: Number(response.data?.data?.failed || 0),
+        });
+        return [];
+      }
 
       logger.info('Notification sent successfully', {
         eventKey: payload.eventKey,
         recipientCount: sanitizedRecipients.length,
         category: payload.category,
         entityId: payload.entity.id,
-        eventId
+        eventId,
+        sentDeviceCount,
+        deliveredRecipientCount: deliveredRecipients.length,
       });
+      return deliveredRecipients;
     } catch (error) {
       // Don't throw error - notifications are non-critical
       // But log it clearly for debugging
@@ -321,6 +349,9 @@ export class NotificationClient {
         });
       } else if (axios.isAxiosError(error)) {
         const axiosError = error as AxiosError;
+        const responseError = (
+          axiosError.response?.data as { error?: unknown } | undefined
+        )?.error;
         logger.error('Failed to send notification', {
           serviceName: this.serviceName,
           entityId: payload.entity?.id,
@@ -329,7 +360,9 @@ export class NotificationClient {
           eventKey: payload.eventKey,
           category: payload.category,
           status: axiosError.response?.status,
+          code: axiosError.code,
           message: axiosError.message,
+          responseError: typeof responseError === 'string' ? responseError : undefined,
           severity: 'transient_error'
         });
       } else {
@@ -339,6 +372,7 @@ export class NotificationClient {
           severity: 'unknown_error'
         });
       }
+      return [];
     }
   }
 
@@ -523,13 +557,6 @@ export class NotificationClient {
     );
   }
 }
-
-
-
-
-
-
-
 
 
 

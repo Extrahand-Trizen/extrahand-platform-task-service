@@ -6,7 +6,7 @@
 
 import axios, { AxiosError } from 'axios';
 import logger from '../config/logger';
-import { validateEnv } from '../config/env';
+import { config, validateEnv } from '../config/env';
 
 export interface InAppNotificationPayload {
   userId: string;
@@ -50,7 +50,7 @@ export class InAppNotificationClient {
    */
   static initialize(baseURL?: string, serviceName?: string): void {
     const env = validateEnv();
-    this.baseURL = baseURL || process.env.NOTIFICATION_SERVICE_URL || 'http://localhost:4005';
+    this.baseURL = (baseURL || config.NOTIFICATION_SERVICE_URL).replace(/\/$/, '');
     this.serviceAuthToken = env.SERVICE_AUTH_TOKEN || '';
     this.serviceName = serviceName || process.env.SERVICE_NAME || 'service-client';
     this.isInitialized = true;

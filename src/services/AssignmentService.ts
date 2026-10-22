@@ -444,6 +444,7 @@ export class AssignmentService {
     task.assignedAt = new Date();
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
+    task.assignmentOffer = undefined;
     task.acceptedApplicationId = applicationId;
     applyAssignedHelperNameToTask(task as any, resolvedHelperName);
     await task.save();
@@ -654,6 +655,7 @@ export class AssignmentService {
     task.assignedAt = new Date();
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
+    task.assignmentOffer = undefined;
     task.acceptedApplicationId = applicationId;
     applyAssignedHelperNameToTask(task as any, resolvedHelperName);
     await task.save();
@@ -915,6 +917,7 @@ export class AssignmentService {
     task.assignedAt = new Date();
     task.status = 'assigned';
     task.assignmentStatus = 'assigned';
+    task.assignmentOffer = undefined;
     task.acceptedApplicationId = null as any;
     applyAssignedHelperNameToTask(task as any, partnerSnapshot.name);
     await task.save();
