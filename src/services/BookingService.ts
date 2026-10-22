@@ -1224,13 +1224,17 @@ export class BookingService {
         ? parseSlotMinutes(schedule.scheduledTimeEnd || '')
         : null;
       const option = DAILY_LABOUR_OPTIONS.find((item) => item.slug === dailyLine.packageSlug);
+      const computedDuration =
+        startMinutes !== null && endMinutes !== null
+          ? (endMinutes - startMinutes + 1440) % 1440
+          : null;
       if (
         !schedule ||
         startMinutes === null ||
         endMinutes === null ||
         !option ||
         schedule.durationMinutes !== option.durationMinutes ||
-        endMinutes - startMinutes !== option.durationMinutes
+        computedDuration !== option.durationMinutes
       ) {
         throw new BadRequestError('Daily Labour booking duration is invalid.');
       }
