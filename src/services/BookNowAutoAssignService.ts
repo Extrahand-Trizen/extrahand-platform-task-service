@@ -3,17 +3,34 @@ import type { ITask } from '../models/Task';
 import Task from '../models/Task';
 import Assignment from '../models/Assignment';
 import AssignmentLog from '../models/AssignmentLog';
+import BookingItem from '../models/BookingItem';
+import BookingOrder from '../models/BookingOrder';
 import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
+import { PaymentClient } from './PaymentClient';
 import { HYDERABAD_WORK_AREA_COORDS } from '../constants/locations/hyderabadWorkAreaCoords';
 import { config } from '../config/env';
 import { resolvePartnerUidByPhone } from '../utils/resolvePartnerUidByPhone';
-import { partnerCategoryMatchesBookNowTask } from './partnerVisibility';
+import {
+  isHomeCleaningTask,
+  partnerCategoryMatchesBookNowTask,
+} from './partnerVisibility';
 import { notifyBookNowAssignment } from './AssignmentService';
 import AssignmentManagementRules from '../models/AssignmentManagementRules';
 import { workShiftsCoverInterval } from '../utils/bookNowSlotAvailability';
 import { buildHourlyServiceAreaCandidates } from '../utils/hourlyHelperServiceArea';
 import { matchEligibleHourlyHelperArea } from './HourlyHelperAvailabilityService';
+import { BadRequestError, ForbiddenError } from '../errors/AppError';
+
+const OFFER_WINDOW_MS = 30 * 60 * 1000;
+const OFFER_STAGES = ['preferred', 'area_rule', 'all'] as const;
+type OfferStage = (typeof OFFER_STAGES)[number];
+type DispatchCurrentStage = OfferStage | 'assigned' | 'closed';
+const SUPPORT_ESCALATION_MS = 2 * 60 * 60 * 1000;
+
+export function shouldNotifyOfferStage(stage: OfferStage | 'closed'): boolean {
+  return stage !== 'closed';
+}
 
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
 const WORK_AREA_COORDS = HYDERABAD_WORK_AREA_COORDS;
@@ -240,50 +257,42 @@ function checkTimingMatch(workShifts: string[], task: ITask): boolean {
   return false;
 }
 
-function buildOrderedWorkAreasForDispatch(task: ITask): Array<{ area: string; distKm: number }> {
+export function buildOrderedWorkAreasForDispatch(task: ITask): Array<{ area: string; distKm: number }> {
   const taskCoords =
     Array.isArray(task.location?.coordinates) && task.location.coordinates.length === 2
       ? { lng: task.location.coordinates[0], lat: task.location.coordinates[1] }
       : null;
 
-  const postedArea =
-    task.location?.taskArea ||
-    (task.location as any)?.locality ||
-    task.location?.city ||
-    'Yapral';
+  const locationAreas = [
+    task.location?.taskArea,
+    (task.location as any)?.locality,
+    task.location?.city,
+  ]
+    .map((area) => String(area || '').trim())
+    .filter((area, index, areas) =>
+      Boolean(area) &&
+      areas.findIndex((candidate) => normalizeArea(candidate) === normalizeArea(area)) === index,
+    );
+  const orderedWorkAreas: Array<{ area: string; distKm: number }> = locationAreas.map(
+    (area) => ({ area, distKm: 0 }),
+  );
 
-  const orderedWorkAreas: Array<{ area: string; distKm: number }> = [
-    { area: postedArea, distKm: 0.0 },
-  ];
+  const referenceArea = locationAreas
+    .map((area) => WORK_AREA_COORDS.find((workArea) => normalizeArea(workArea.area) === normalizeArea(area)))
+    .find(Boolean);
+  const refCoord = taskCoords || referenceArea;
 
-  const refCoord =
-    taskCoords ||
-    WORK_AREA_COORDS.find((w) => normalizeArea(w.area) === normalizeArea(postedArea)) ||
-    WORK_AREA_COORDS[0];
-
-  WORK_AREA_COORDS.forEach((wa) => {
-    if (normalizeArea(wa.area) === normalizeArea(postedArea)) return;
-    const dist = haversineKm(refCoord.lat, refCoord.lng, wa.lat, wa.lng);
-    if (dist <= 6.0) {
-      orderedWorkAreas.push({ area: wa.area, distKm: Math.round(dist * 10) / 10 });
-    }
-  });
+  if (refCoord) {
+    WORK_AREA_COORDS.forEach((wa) => {
+      if (locationAreas.some((area) => normalizeArea(area) === normalizeArea(wa.area))) return;
+      const dist = haversineKm(refCoord.lat, refCoord.lng, wa.lat, wa.lng);
+      if (dist <= 6.0) {
+        orderedWorkAreas.push({ area: wa.area, distKm: Math.round(dist * 10) / 10 });
+      }
+    });
+  }
 
   orderedWorkAreas.sort((a, b) => a.distKm - b.distKm);
-
-  if (orderedWorkAreas.length < 3) {
-    const fallbackList = ['Secunderabad', 'Malkajgiri', 'Tarnaka', 'Alwal'];
-    for (const fa of fallbackList) {
-      if (!orderedWorkAreas.some((o) => normalizeArea(o.area) === normalizeArea(fa))) {
-        const matchCoord = WORK_AREA_COORDS.find((w) => w.area === fa);
-        const dist = matchCoord
-          ? haversineKm(refCoord.lat, refCoord.lng, matchCoord.lat, matchCoord.lng)
-          : 4.5;
-        orderedWorkAreas.push({ area: fa, distKm: Math.round(dist * 10) / 10 });
-      }
-      if (orderedWorkAreas.length >= 3) break;
-    }
-  }
 
   return orderedWorkAreas;
 }
@@ -365,6 +374,8 @@ export interface IDispatchCandidateLog {
   distanceKm?: number | null;
   notifiedAt?: Date | string | null;
   respondedAt?: Date | string | null;
+  dispatchStage?: OfferStage;
+  responseStatus?: 'pending' | 'accepted' | 'rejected' | 'timed_out' | 'closed';
   /** Partner's gender as stored in their profile */
   gender?: string | null;
   /** Whether this candidate passed the gender preference check */
@@ -379,6 +390,8 @@ export interface IDispatchAreaLog {
   eligibleCount: number;
   notifiedCount: number;
   acceptedCount?: number;
+  rejectedCount?: number;
+  timedOutCount?: number;
   assignedCount?: number;
   candidates: IDispatchCandidateLog[];
 }
@@ -387,14 +400,57 @@ export interface EligiblePartner {
   uid: string;
   profileId: string;
   name: string;
+  phone?: string;
   distKm: number | null;
   workArea: string;
   workAreaDistKm: number;
   gender?: string | null;
+  shiftTiming?: string;
+}
+
+export function filterTeamPostedOfferTiers(
+  tiers: Record<OfferStage, EligiblePartner[]>,
+  excludedPhones: string[],
+): Record<OfferStage, EligiblePartner[]> {
+  const matchesExcludedPhone = (partner: EligiblePartner) =>
+    phoneMatchesExcluded(partner.phone, excludedPhones);
+  return {
+    preferred: tiers.preferred.filter(matchesExcludedPhone),
+    area_rule: tiers.area_rule.filter(matchesExcludedPhone),
+    all: tiers.all.filter(matchesExcludedPhone),
+  };
+}
+
+export function getBookNowNotificationTiers(
+  tiers: Record<OfferStage, EligiblePartner[]>,
+  isTeamPosted: boolean,
+  excludedPhones: string[],
+): Record<OfferStage, EligiblePartner[]> {
+  return isTeamPosted ? filterTeamPostedOfferTiers(tiers, excludedPhones) : tiers;
+}
+
+export function filterTeamPostedRecipientUids(
+  recipientUids: string[],
+  profiles: Array<Record<string, unknown>>,
+  excludedPhones: string[],
+): string[] {
+  const allowedUids = new Set(
+    profiles
+      .filter((profile) =>
+        phoneMatchesExcluded(
+          profile.phone || profile.phoneNumber || profile.mobile,
+          excludedPhones,
+        ),
+      )
+      .map((profile) => String(profile.uid || '').trim())
+      .filter(Boolean),
+  );
+  return recipientUids.filter((uid) => allowedUids.has(uid));
 }
 
 export interface AutoAssignResult {
   assigned: boolean;
+  offered?: boolean;
   partner?: EligiblePartner;
   reason?: string;
   dispatchLogs?: IDispatchAreaLog[];
@@ -481,6 +537,1563 @@ function readPartnerGender(profile: Record<string, unknown>): string | null {
 }
 
 export class BookNowAutoAssignService {
+  private static async findApplicableAreaRules(task: ITask) {
+    const rules = await AssignmentManagementRules.findOne({
+      key: 'assignment_management',
+    }).lean();
+    const taskArea = normalizeArea(
+      String(
+        task.location?.taskArea ||
+          (task.location as any)?.locality ||
+          task.location?.city ||
+          '',
+      ),
+    );
+    const hourly = isHourlyTask(task);
+    const homeCleaning = isHomeCleaningTask(task);
+
+    return (rules?.areaRules || []).filter((rule) => {
+      const ruleArea = normalizeArea(rule.area);
+      const workTypes = Array.isArray(rule.workTypes) ? rule.workTypes : [];
+      const appliesToWorkType =
+        workTypes.includes('all') ||
+        ((hourly || homeCleaning) && workTypes.includes('hourly')) ||
+        (!hourly && workTypes.includes('book_now'));
+      return (
+        rule.active !== false &&
+        appliesToWorkType &&
+        Boolean(taskArea) &&
+        (ruleArea === taskArea ||
+          ruleArea.includes(taskArea) ||
+          taskArea.includes(ruleArea))
+      );
+    });
+  }
+
+  static async findEligiblePartners(task: ITask): Promise<EligiblePartner[]> {
+    const Profile = mongoose.connection.collection('profiles');
+    const profiles = await Profile.find(
+      {
+        isActive: true,
+        isAvailable: { $ne: false },
+        'partnerProfile.status': 'approved',
+        'partnerProfile.onLeave': { $ne: true },
+      },
+      {
+        projection: {
+          _id: 1,
+          uid: 1,
+          name: 1,
+          fullName: 1,
+          phone: 1,
+          phoneNumber: 1,
+          mobile: 1,
+          gender: 1,
+          isActive: 1,
+          isAvailable: 1,
+          helperWorkAreas: 1,
+          homeLocation: 1,
+          location: 1,
+          'partnerProfile.categories': 1,
+          'partnerProfile.workAreas': 1,
+          'partnerProfile.status': 1,
+          'partnerProfile.onLeave': 1,
+          'partnerProfile.workShifts': 1,
+          'partnerProfile.gender': 1,
+        },
+      },
+    ).toArray() as Record<string, unknown>[];
+    const taskCoords =
+      Array.isArray(task.location?.coordinates) && task.location.coordinates.length === 2
+        ? { lng: task.location.coordinates[0], lat: task.location.coordinates[1] }
+        : null;
+    const isHourly = isHourlyTask(task);
+    const preferredGender = resolvePreferredHelperGender(task);
+    const eligible: EligiblePartner[] = [];
+    const seenUids = new Set<string>();
+    const addPartner = (profile: Record<string, unknown>, workArea: string, workAreaDistKm: number) => {
+      const uid = String(profile.uid || '').trim();
+      if (!uid || seenUids.has(uid)) return;
+      const partnerGender = readPartnerGender(profile);
+      const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
+      const shifts = Array.isArray(partnerProfile.workShifts)
+        ? (partnerProfile.workShifts as string[])
+        : [];
+      eligible.push({
+        uid,
+        profileId: String(profile._id),
+        name: String(profile.name || profile.fullName || 'Partner'),
+        phone: String(profile.phone || profile.phoneNumber || profile.mobile || ''),
+        distKm: resolvePartnerDistanceKm(taskCoords, profile),
+        workArea,
+        workAreaDistKm,
+        gender: partnerGender,
+        shiftTiming: formatShiftLabel(shifts),
+      });
+      seenUids.add(uid);
+    };
+
+    if (isConsultationBookNowTask(task)) {
+      const postedArea = String(
+        task.location?.taskArea ||
+          (task.location as any)?.locality ||
+          task.location?.city ||
+          'Consultation area',
+      );
+      for (const profile of profiles) {
+        const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
+        const categories = Array.isArray(partnerProfile.categories)
+          ? (partnerProfile.categories as string[])
+          : [];
+        const shifts = Array.isArray(partnerProfile.workShifts)
+          ? (partnerProfile.workShifts as string[])
+          : [];
+        if (
+          categories.length &&
+          partnerCategoryMatchesBookNowTask(categories, task) &&
+          checkTimingMatch(shifts, task) &&
+          (!isHourly ||
+            !preferredGender ||
+            normalizePartnerGender(readPartnerGender(profile)) === preferredGender)
+        ) {
+          addPartner(profile, postedArea, 0);
+        }
+      }
+      return sortPartnersByDistance(eligible);
+    }
+
+    if (isHourly) {
+      const location = (task.location || {}) as Record<string, unknown>;
+      const candidates = buildHourlyServiceAreaCandidates({
+        area: location.taskArea as string | undefined,
+        city: location.city as string | undefined,
+        state: location.state as string | undefined,
+        address: location.address as string | undefined,
+      });
+      for (const profile of profiles) {
+        const matchedArea = matchEligibleHourlyHelperArea(profile, candidates);
+        if (!matchedArea) continue;
+        const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
+        const categories = Array.isArray(partnerProfile.categories)
+          ? (partnerProfile.categories as string[])
+          : [];
+        const shifts = Array.isArray(partnerProfile.workShifts)
+          ? (partnerProfile.workShifts as string[])
+          : [];
+        const partnerGender = readPartnerGender(profile);
+        if (
+          categories.length &&
+          partnerCategoryMatchesBookNowTask(categories, task) &&
+          checkTimingMatch(shifts, task) &&
+          (!preferredGender || normalizePartnerGender(partnerGender) === preferredGender)
+        ) {
+          addPartner(profile, matchedArea, 0);
+        }
+      }
+      return sortPartnersByDistance(eligible);
+    }
+
+    const orderedWorkAreas = buildOrderedWorkAreasForDispatch(task);
+    for (const workArea of orderedWorkAreas) {
+      const areaKey = normalizeArea(workArea.area);
+      for (const profile of profiles) {
+        if (seenUids.has(String(profile.uid || ''))) continue;
+        const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
+        const categories = Array.isArray(partnerProfile.categories)
+          ? (partnerProfile.categories as string[])
+          : [];
+        const workAreas =
+          Array.isArray(partnerProfile.workAreas) && partnerProfile.workAreas.length
+            ? (partnerProfile.workAreas as string[])
+            : Array.isArray(profile.helperWorkAreas)
+              ? (profile.helperWorkAreas as string[])
+              : [];
+        const shifts = Array.isArray(partnerProfile.workShifts)
+          ? (partnerProfile.workShifts as string[])
+          : [];
+        if (
+          categories.length &&
+          workAreas.length &&
+          partnerCategoryMatchesBookNowTask(categories, task) &&
+          partnerMatchesWorkArea(workAreas, areaKey) &&
+          checkTimingMatch(shifts, task)
+        ) {
+          addPartner(profile, workArea.area, workArea.distKm);
+        }
+      }
+    }
+    return sortPartnersByPreferenceThenDistance(eligible, preferredGender);
+  }
+
+  static mergeEligiblePartnersIntoDispatchLog(
+    task: ITask,
+    dispatchLogs: IDispatchAreaLog[],
+    eligiblePartners: EligiblePartner[],
+  ): IDispatchAreaLog[] {
+    const mergedLogs = dispatchLogs.map((area) => ({
+      ...area,
+      candidates: area.candidates.map((candidate) => ({ ...candidate })),
+    }));
+    const candidateByPartnerId = new Map<string, IDispatchCandidateLog>();
+    for (const area of mergedLogs) {
+      for (const candidate of area.candidates) {
+        if (candidate.partnerUid) candidateByPartnerId.set(candidate.partnerUid, candidate);
+        if (candidate.partnerId) candidateByPartnerId.set(candidate.partnerId, candidate);
+      }
+    }
+    const isHourly = isHourlyTask(task);
+    const hasGenderPreference = Boolean(resolvePreferredHelperGender(task));
+
+    for (const partner of eligiblePartners) {
+      const existing =
+        candidateByPartnerId.get(partner.uid) ||
+        candidateByPartnerId.get(partner.profileId);
+      if (existing) {
+        if (existing.status === 'ineligible') {
+          existing.status = 'eligible';
+          existing.reasons = [];
+          existing.details = `Eligible for work in ${partner.workArea}`;
+        }
+        existing.gender = partner.gender;
+        if (isHourly && hasGenderPreference) {
+          existing.genderCheckResult = 'passed';
+        }
+        continue;
+      }
+
+      const areaName = partner.workArea || 'Eligible partners';
+      let area = mergedLogs.find((item) => item.area === areaName);
+      if (!area) {
+        area = {
+          area: areaName,
+          isJobArea: partner.workAreaDistKm === 0,
+          distanceKm: partner.workAreaDistKm,
+          matchedCategoryCount: 0,
+          eligibleCount: 0,
+          notifiedCount: 0,
+          candidates: [],
+        };
+        mergedLogs.push(area);
+      }
+
+      area.candidates.push({
+        partnerId: partner.profileId,
+        partnerUid: partner.uid,
+        name: partner.name,
+        status: 'eligible',
+        details: `Eligible for work in ${partner.workArea}`,
+        shiftTiming: partner.shiftTiming,
+        distanceKm: partner.distKm,
+        gender: partner.gender,
+        genderCheckResult: isHourly && hasGenderPreference ? 'passed' : null,
+        reasons: [],
+      });
+      const candidate = area.candidates[area.candidates.length - 1];
+      candidateByPartnerId.set(partner.uid, candidate);
+      candidateByPartnerId.set(partner.profileId, candidate);
+    }
+
+    for (const area of mergedLogs) {
+      area.matchedCategoryCount = area.candidates.length;
+      area.eligibleCount = area.candidates.filter(
+        (candidate) =>
+          candidate.status === 'eligible' ||
+          candidate.status === 'assigned' ||
+          candidate.status === 'notified',
+      ).length;
+      area.notifiedCount = area.candidates.filter(
+        (candidate) =>
+          Boolean(candidate.notifiedAt) ||
+          candidate.status === 'notified' ||
+          candidate.status === 'assigned' ||
+          candidate.status === 'timed_out',
+      ).length;
+    }
+
+    return mergedLogs;
+  }
+
+  static async assignDispatchStages(
+    task: ITask,
+    dispatchLogs: IDispatchAreaLog[],
+    eligiblePartners: EligiblePartner[],
+  ): Promise<IDispatchAreaLog[]> {
+    const { tiers, configuredStageByUid } =
+      await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
+    const stagedLogs = BookNowAutoAssignService.tagDispatchStages(
+      dispatchLogs,
+      tiers,
+      configuredStageByUid,
+    );
+
+    return stagedLogs.map((area, areaIndex) => ({
+      ...area,
+      candidates: area.candidates.map((candidate, candidateIndex) => ({
+        ...candidate,
+        dispatchStage:
+          dispatchLogs[areaIndex]?.candidates[candidateIndex]?.dispatchStage ||
+          candidate.dispatchStage,
+      })),
+    }));
+  }
+
+  private static async resolveOfferTiers(
+    task: ITask,
+    eligiblePartners: EligiblePartner[],
+    preferredPartnerUid?: string,
+  ): Promise<{
+    tiers: Record<OfferStage, EligiblePartner[]>;
+    configuredStageByUid: Map<string, OfferStage>;
+  }> {
+    const rules = await AssignmentManagementRules.findOne({
+      key: 'assignment_management',
+    }).lean();
+    const eligibleByUid = new Map(eligiblePartners.map((partner) => [partner.uid, partner]));
+    const preferredUids = [
+      String(preferredPartnerUid || '').trim(),
+      ...(rules?.preferredPartners || [])
+        .filter((partner) => partner.active !== false)
+        .map((partner) => String(partner.uid || '').trim()),
+    ].filter((uid, index, uids) => uid && uids.indexOf(uid) === index);
+
+    const areaRules = await BookNowAutoAssignService.findApplicableAreaRules(task);
+    const areaRuleUids = areaRules.flatMap((rule) => rule.preferredPartners || [])
+      .filter((partner) => partner.active !== false)
+      .map((partner) => String(partner.uid || '').trim());
+    const allPreferredUids = new Set(preferredUids);
+    const allConfiguredUids = new Set([...preferredUids, ...areaRuleUids]);
+    const configuredStageByUid = new Map<string, OfferStage>();
+    for (const uid of preferredUids) configuredStageByUid.set(uid, 'preferred');
+    for (const uid of areaRuleUids) {
+      if (!allPreferredUids.has(uid)) configuredStageByUid.set(uid, 'area_rule');
+    }
+
+    return {
+      tiers: {
+        preferred: preferredUids
+          .map((uid) => eligibleByUid.get(uid))
+          .filter(
+            (partner): partner is EligiblePartner =>
+              partner !== undefined,
+          ),
+        area_rule: areaRuleUids
+          .filter((uid) => !allPreferredUids.has(uid))
+          .map((uid) => eligibleByUid.get(uid))
+          .filter(
+            (partner): partner is EligiblePartner =>
+              partner !== undefined,
+          ),
+        all: eligiblePartners.filter((partner) => !allConfiguredUids.has(partner.uid)),
+      },
+      configuredStageByUid,
+    };
+  }
+
+  private static tagDispatchStages(
+    dispatchLogs: IDispatchAreaLog[],
+    tiers: Record<OfferStage, EligiblePartner[]>,
+    configuredStageByUid: Map<string, OfferStage>,
+  ): IDispatchAreaLog[] {
+    const stageByUid = new Map(configuredStageByUid);
+    for (const stage of OFFER_STAGES) {
+      for (const partner of tiers[stage]) stageByUid.set(partner.uid, stage);
+    }
+    return dispatchLogs.map((area) => ({
+      ...area,
+      candidates: area.candidates.map((candidate) => ({
+        ...candidate,
+        ...(!candidate.dispatchStage &&
+        candidate.partnerUid &&
+        stageByUid.has(candidate.partnerUid)
+          ? { dispatchStage: stageByUid.get(candidate.partnerUid) }
+          : {}),
+        responseStatus: candidate.responseStatus,
+      })),
+    }));
+  }
+
+  private static updateDispatchCandidateResponses(
+    dispatchLogs: IDispatchAreaLog[],
+    partnerUids: string[],
+    responseStatus: 'pending' | 'accepted' | 'rejected' | 'timed_out' | 'closed',
+    at: Date,
+  ): IDispatchAreaLog[] {
+    const uidSet = new Set(partnerUids);
+    return dispatchLogs.map((area) => {
+      const candidates = area.candidates.map((candidate) => {
+        if (!candidate.partnerUid || !uidSet.has(candidate.partnerUid)) return candidate;
+        return {
+          ...candidate,
+          responseStatus,
+          ...(responseStatus === 'accepted'
+            ? { status: 'assigned' as const, respondedAt: at }
+            : responseStatus === 'rejected'
+              ? { status: 'declined' as const, respondedAt: at }
+              : responseStatus === 'timed_out'
+                ? { status: 'timed_out' as const, respondedAt: at }
+                : responseStatus === 'closed'
+                  ? { respondedAt: at }
+                  : {}),
+        };
+      });
+      const uniqueCandidates = new Map(
+        candidates.filter((candidate) => candidate.partnerUid).map((candidate) => [candidate.partnerUid!, candidate]),
+      );
+      return {
+        ...area,
+        candidates,
+        eligibleCount: candidates.filter(
+          (candidate) =>
+            candidate.status !== 'ineligible' &&
+            (candidate.dispatchStage || candidate.status === 'assigned'),
+        ).length,
+        notifiedCount: new Set(
+          candidates
+            .filter((candidate) => candidate.notifiedAt)
+            .map((candidate) => candidate.partnerUid)
+            .filter(Boolean),
+        ).size,
+        acceptedCount: Array.from(uniqueCandidates.values()).filter(
+          (candidate) => candidate.responseStatus === 'accepted',
+        ).length,
+        rejectedCount: Array.from(uniqueCandidates.values()).filter(
+          (candidate) => candidate.responseStatus === 'rejected',
+        ).length,
+        timedOutCount: Array.from(uniqueCandidates.values()).filter(
+          (candidate) => candidate.responseStatus === 'timed_out',
+        ).length,
+        assignedCount: Array.from(uniqueCandidates.values()).filter(
+          (candidate) => candidate.responseStatus === 'accepted',
+        ).length,
+      };
+    });
+  }
+
+  private static refreshDispatchProgressCounts(
+    progress: NonNullable<ITask['dispatchProgress']> | undefined,
+    dispatchLogs: IDispatchAreaLog[],
+  ): NonNullable<ITask['dispatchProgress']> | undefined {
+    if (!progress) return progress;
+    const candidatesByUid = new Map<string, IDispatchCandidateLog>();
+    for (const area of dispatchLogs) {
+      for (const candidate of area.candidates) {
+        if (candidate.partnerUid && candidate.dispatchStage) {
+          candidatesByUid.set(candidate.partnerUid, candidate);
+        }
+      }
+    }
+    return {
+      ...progress,
+      stages: progress.stages.map((stageProgress) => {
+        const candidates = Array.from(candidatesByUid.values()).filter(
+          (candidate) => candidate.dispatchStage === stageProgress.stage,
+        );
+        return {
+          ...stageProgress,
+          eligibleCount: candidates.filter((candidate) => candidate.status !== 'ineligible').length,
+          notifiedCount: candidates.filter((candidate) => Boolean(candidate.notifiedAt)).length,
+          acceptedCount: candidates.filter((candidate) => candidate.responseStatus === 'accepted').length,
+          rejectedCount: candidates.filter((candidate) => candidate.responseStatus === 'rejected').length,
+          timedOutCount: candidates.filter((candidate) => candidate.responseStatus === 'timed_out').length,
+        };
+      }),
+    };
+  }
+
+  private static buildDispatchProgress(
+    dispatchLogs: IDispatchAreaLog[],
+    previous: ITask['dispatchProgress'],
+    currentStage: DispatchCurrentStage,
+    now: Date,
+    expiresAt?: Date,
+  ): NonNullable<ITask['dispatchProgress']> {
+    const candidateByUid = new Map<string, IDispatchCandidateLog>();
+    for (const area of dispatchLogs) {
+      for (const candidate of area.candidates) {
+        if (candidate.partnerUid && candidate.dispatchStage) {
+          candidateByUid.set(candidate.partnerUid, candidate);
+        }
+      }
+    }
+    const stages = OFFER_STAGES.map((stage) => {
+      const candidates = Array.from(candidateByUid.values()).filter(
+        (candidate) => candidate.dispatchStage === stage,
+      );
+      const eligibleCount = candidates.filter(
+        (candidate) => candidate.status !== 'ineligible',
+      ).length;
+      const prior = previous?.stages.find((item) => item.stage === stage);
+      const isCurrentStage = stage === currentStage;
+      const isAssigned = currentStage === 'assigned';
+      const isClosed = currentStage === 'closed';
+      const status: 'pending' | 'in_progress' | 'completed' | 'skipped' =
+        isAssigned || isClosed
+          ? prior?.status === 'completed'
+            ? 'completed'
+            : 'skipped'
+          : isCurrentStage
+            ? 'in_progress'
+            : prior?.status === 'completed'
+              ? 'completed'
+              : eligibleCount > 0
+                ? 'pending'
+                : 'skipped';
+      return {
+        stage,
+        status,
+        eligibleCount,
+        notifiedCount: candidates.filter((candidate) => candidate.notifiedAt).length,
+        acceptedCount: candidates.filter(
+          (candidate) => candidate.responseStatus === 'accepted',
+        ).length,
+        rejectedCount: candidates.filter(
+          (candidate) => candidate.responseStatus === 'rejected',
+        ).length,
+        timedOutCount: candidates.filter(
+          (candidate) => candidate.responseStatus === 'timed_out',
+        ).length,
+        startedAt: isCurrentStage ? now : prior?.startedAt,
+        expiresAt: isCurrentStage ? expiresAt : prior?.expiresAt,
+        completedAt:
+          isAssigned || isClosed ? prior?.completedAt || now : prior?.completedAt,
+      };
+    });
+    return {
+      currentStage,
+      startedAt: previous?.startedAt || now,
+      acceptanceWindowMinutes: 30,
+      stages,
+      assignedPartnerName: previous?.assignedPartnerName,
+      assignedPartnerUid: previous?.assignedPartnerUid,
+      assignedAt: previous?.assignedAt,
+      supportEscalation: previous?.supportEscalation || {
+        status: 'pending',
+        dueAt: new Date(now.getTime() + SUPPORT_ESCALATION_MS),
+      },
+    };
+  }
+
+  private static async filterTeamPostedRecipientUids(
+    task: ITask,
+    recipientUids: string[],
+    stage: OfferStage,
+  ): Promise<string[]> {
+    if (!recipientUids.length) return [];
+    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
+    if (!(await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones))) {
+      return recipientUids;
+    }
+
+    const profiles = await mongoose.connection
+      .collection('profiles')
+      .find(
+        { uid: { $in: recipientUids } },
+        { projection: { uid: 1, phone: 1, phoneNumber: 1, mobile: 1 } },
+      )
+      .toArray() as Array<Record<string, unknown>>;
+    const allowedRecipientUids = filterTeamPostedRecipientUids(
+      recipientUids,
+      profiles,
+      excludedPhones,
+    );
+    if (allowedRecipientUids.length !== recipientUids.length) {
+      logger.warn('[BookNowAutoAssign] Suppressed team-work offer notifications for partners outside the phone allowlist', {
+        taskId: String(task._id),
+        stage,
+        requestedRecipientCount: recipientUids.length,
+        allowlistedRecipientCount: allowedRecipientUids.length,
+      });
+    }
+    return allowedRecipientUids;
+  }
+
+  private static async sendOfferNotification(
+    task: ITask,
+    stage: OfferStage,
+    recipientUids: string[],
+    expiresAt: Date,
+  ): Promise<string[]> {
+    if (!recipientUids.length) return [];
+    recipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
+      task,
+      recipientUids,
+      stage,
+    );
+    if (!recipientUids.length) return [];
+    return NotificationClient.sendWithDeliveryResults({
+      eventKey: 'TASK_UPDATED',
+      category: 'taskUpdates',
+      recipients: recipientUids,
+      entity: { type: 'task', id: String(task._id) },
+      title: 'New Book Now work offer',
+      body: `${task.title || 'A new work'} is available. Accept or reject within 30 minutes.`,
+      data: {
+        taskId: String(task._id),
+        title: task.title,
+        category: task.category,
+        categoryLabel: (task as any).categoryLabel || task.category,
+        bookingSource: 'book_now',
+        bookNowOffer: true,
+        action: 'book_now_offer',
+        recipientRole: 'partner',
+        offerStage: stage,
+        offerExpiresAt: expiresAt.toISOString(),
+        amount:
+          typeof task.budget === 'object' && task.budget
+            ? Number(task.budget.amount || 0)
+            : 0,
+        taskArea:
+          task.location?.taskArea ||
+          (task.location as any)?.locality ||
+          task.location?.city ||
+          '',
+      },
+    });
+  }
+
+  private static async recordOfferNotifications(
+    taskId: mongoose.Types.ObjectId,
+    stage: OfferStage,
+    deliveredUids: string[],
+    notifiedAt: Date,
+  ): Promise<void> {
+    if (!deliveredUids.length) return;
+    await Task.updateOne(
+      {
+        _id: taskId,
+        'dispatchLogs.candidates': {
+          $elemMatch: {
+            partnerUid: { $in: deliveredUids },
+            notifiedAt: null,
+          },
+        },
+      },
+      {
+        $set: {
+          'dispatchLogs.$[area].candidates.$[candidate].notifiedAt': notifiedAt,
+        },
+        $inc: {
+          'dispatchProgress.stages.$[progressStage].notifiedCount': deliveredUids.length,
+        },
+      },
+      {
+        arrayFilters: [
+          { 'area.candidates.partnerUid': { $in: deliveredUids } },
+          {
+            'candidate.partnerUid': { $in: deliveredUids },
+            'candidate.notifiedAt': null,
+          },
+          { 'progressStage.stage': stage },
+        ],
+      },
+    );
+    await Task.updateOne(
+      { _id: taskId, 'assignmentOffer.stage': stage },
+      { $addToSet: { 'assignmentOffer.notifiedPartnerUids': { $each: deliveredUids } } },
+    );
+  }
+
+  private static async installOfferStage(
+    taskId: mongoose.Types.ObjectId,
+    task: ITask,
+    stage: OfferStage,
+    recipients: EligiblePartner[],
+    previouslyNotifiedUids: string[],
+    rejectedPartnerUids: string[],
+    expectedStage?: OfferStage | 'closed',
+    expectedExpiresAt?: Date,
+    completedStageUids: string[] = [],
+    completedStageResponseStatus: 'timed_out' | 'closed' = 'timed_out',
+    notificationRecipients?: EligiblePartner[],
+  ): Promise<boolean> {
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + OFFER_WINDOW_MS);
+    const recipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
+      task,
+      recipients.map((partner) => partner.uid),
+      stage,
+    );
+    const notificationRecipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
+      task,
+      (notificationRecipients || recipients).map(
+      (partner) => partner.uid,
+      ),
+      stage,
+    );
+    if (!recipientUids.length) return false;
+    const notifiedPartnerUids = [...new Set(previouslyNotifiedUids)];
+    let dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
+      task.dispatchLogs || [],
+      completedStageUids,
+      completedStageResponseStatus,
+      now,
+    );
+    dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
+      dispatchLogs,
+      recipientUids,
+      'pending',
+      now,
+    );
+    const dispatchProgress = BookNowAutoAssignService.buildDispatchProgress(
+      dispatchLogs,
+      task.dispatchProgress,
+      stage,
+      now,
+      expiresAt,
+    );
+    for (const progressStage of dispatchProgress.stages) {
+      if (progressStage.stage === stage) continue;
+      if (OFFER_STAGES.indexOf(progressStage.stage) < OFFER_STAGES.indexOf(stage)) {
+        if (progressStage.eligibleCount > 0) {
+          progressStage.status = 'completed';
+          progressStage.completedAt ||= now;
+        }
+      } else if (
+        progressStage.eligibleCount === 0 ||
+        OFFER_STAGES.indexOf(progressStage.stage) > OFFER_STAGES.indexOf(stage)
+      ) {
+        progressStage.status = 'skipped';
+        progressStage.completedAt ||= now;
+      }
+    }
+    const updatedProgress =
+      BookNowAutoAssignService.refreshDispatchProgressCounts(dispatchProgress, dispatchLogs) ||
+      dispatchProgress;
+    const filter: Record<string, unknown> = {
+      _id: taskId,
+      status: 'open',
+      assigneeUid: null,
+      partnerUid: null,
+    };
+    if (expectedStage && expectedExpiresAt) {
+      filter['assignmentOffer.stage'] = expectedStage;
+      filter['assignmentOffer.expiresAt'] = expectedExpiresAt;
+    } else {
+      filter.$or = [
+        { assignmentOffer: { $exists: false } },
+        { assignmentOffer: null },
+      ];
+    }
+
+    const updated = await Task.findOneAndUpdate(
+      filter,
+      {
+        $set: {
+          assignmentStatus: 'pending',
+          dispatchLogs,
+          dispatchProgress: updatedProgress,
+          assignmentOffer: {
+            stage,
+            recipientUids,
+            notifiedPartnerUids,
+            rejectedPartnerUids,
+            notifiedAt: now,
+            expiresAt,
+          },
+        },
+      },
+      { new: true },
+    );
+    if (!updated) return false;
+    const deliveredUids = await BookNowAutoAssignService.sendOfferNotification(
+      task,
+      stage,
+      notificationRecipientUids,
+      expiresAt,
+    );
+    if (deliveredUids.length) {
+      await BookNowAutoAssignService.recordOfferNotifications(
+        taskId,
+        stage,
+        deliveredUids,
+        now,
+      );
+    }
+    const failedRecipientCount = notificationRecipientUids.length - deliveredUids.length;
+    if (failedRecipientCount > 0) {
+      logger.warn('[BookNowAutoAssign] Partner offer notification handoff failed', {
+        taskId: String(taskId),
+        stage,
+        recipientCount: failedRecipientCount,
+      });
+    }
+    logger.info('[BookNowAutoAssign] Partner offer wave sent', {
+      taskId: String(taskId),
+      stage,
+      recipientCount: notificationRecipientUids.length,
+      recipientUids: notificationRecipientUids,
+      expiresAt,
+    });
+    return true;
+  }
+
+  private static async startOfferFlow(
+    task: ITask,
+    preferredPartnerUid?: string,
+  ): Promise<AutoAssignResult> {
+    const taskId = new mongoose.Types.ObjectId(String(task._id));
+    const existing = await Task.findById(taskId).select('assignmentOffer status').lean();
+    if (existing?.assignmentOffer) {
+      if (existing.assignmentOffer.stage === 'closed') {
+        return {
+          assigned: false,
+          reason: 'All partner offer tiers expired without acceptance',
+        };
+      }
+      return {
+        assigned: false,
+        offered: true,
+        reason: 'Partner offers are already active',
+      };
+    }
+
+    const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+    const baseDispatchLogs = BookNowAutoAssignService.mergeEligiblePartnersIntoDispatchLog(
+      task,
+      await BookNowAutoAssignService.buildDispatchLog(task),
+      eligiblePartners,
+    );
+    const tierResolution = await BookNowAutoAssignService.resolveOfferTiers(
+      task,
+      eligiblePartners,
+      preferredPartnerUid,
+    );
+    const { tiers, configuredStageByUid } = tierResolution;
+    const dispatchLogs = BookNowAutoAssignService.tagDispatchStages(
+      baseDispatchLogs,
+      tiers,
+      configuredStageByUid,
+    );
+    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
+    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
+    const notificationTiers = getBookNowNotificationTiers(
+      tiers,
+      isTeamPosted,
+      excludedPhones,
+    );
+    const firstStage = OFFER_STAGES.find(
+      (stage) => notificationTiers[stage].length > 0 && shouldNotifyOfferStage(stage),
+    );
+    const dispatchStartedAt = new Date();
+    const dispatchProgress = BookNowAutoAssignService.buildDispatchProgress(
+      dispatchLogs,
+      undefined,
+      firstStage || 'closed',
+      dispatchStartedAt,
+    );
+    const taskWithDispatch = { ...task, dispatchLogs, dispatchProgress } as ITask;
+    await Task.updateOne(
+      {
+        _id: taskId,
+        status: 'open',
+        assigneeUid: null,
+        partnerUid: null,
+        $or: [
+          { assignmentOffer: { $exists: false } },
+          { assignmentOffer: null },
+        ],
+      },
+      { $set: { dispatchLogs, dispatchProgress } },
+    );
+
+    for (const stage of OFFER_STAGES) {
+      const recipients = notificationTiers[stage];
+      if (!shouldNotifyOfferStage(stage)) continue;
+      if (!recipients.length) continue;
+      const installed = await BookNowAutoAssignService.installOfferStage(
+        taskId,
+        taskWithDispatch,
+        stage,
+        recipients,
+        [],
+        [],
+      );
+      if (!installed) {
+        const latest = await Task.findById(taskId).select('status assignmentOffer').lean();
+        if (latest?.assignmentOffer) {
+          return { assigned: false, offered: true, dispatchLogs };
+        }
+        return {
+          assigned: false,
+          reason: 'Task is no longer available for partner offers',
+          dispatchLogs,
+        };
+      }
+      return {
+        assigned: false,
+        offered: true,
+        reason: `Offers sent to ${stage === 'area_rule' ? 'area-rule' : stage} partners`,
+        dispatchLogs,
+      };
+    }
+
+    const closedAt = new Date();
+    await Task.updateOne(
+      {
+        _id: taskId,
+        status: 'open',
+        assigneeUid: null,
+        partnerUid: null,
+        $or: [
+          { assignmentOffer: { $exists: false } },
+          { assignmentOffer: null },
+        ],
+      },
+      {
+        $set: {
+          assignmentStatus: 'pending',
+          assignmentOffer: {
+            stage: 'closed',
+            recipientUids: [],
+            notifiedPartnerUids: [],
+            rejectedPartnerUids: [],
+            notifiedAt: closedAt,
+            expiresAt: closedAt,
+          },
+          dispatchProgress: BookNowAutoAssignService.buildDispatchProgress(
+            dispatchLogs,
+            dispatchProgress,
+            'closed',
+            closedAt,
+          ),
+        },
+      },
+    );
+    logger.warn(
+      isTeamPosted && eligiblePartners.length > 0
+        ? '[BookNowAutoAssign] Team-posted work has no eligible partner matching the notification phone allowlist'
+        : '[BookNowAutoAssign] No eligible partners found for offer flow',
+      {
+        taskId: String(taskId),
+        teamPosted: isTeamPosted,
+        qualifiedPartnerCount: eligiblePartners.length,
+        allowlistedPartnerCount: OFFER_STAGES.reduce(
+          (count, stage) => count + notificationTiers[stage].length,
+          0,
+        ),
+      },
+    );
+    return {
+      assigned: false,
+      reason:
+        isTeamPosted && eligiblePartners.length > 0
+          ? 'No eligible partner matched the team notification phone allowlist'
+          : 'No eligible approved partner found for the work area and schedule',
+      dispatchLogs,
+    };
+  }
+
+  static async dispatchBookNowOffers(
+    task: ITask,
+    preferredPartnerUid?: string,
+  ): Promise<AutoAssignResult> {
+    if (task.bookingSource !== 'book_now') {
+      return { assigned: false, reason: 'Partner offer dispatch is only for Book Now work' };
+    }
+    if (task.status !== 'open') {
+      return { assigned: false, reason: 'Work is not open for partner offers' };
+    }
+    if (task.assigneeId || task.assigneeUid || task.partnerId || task.partnerUid) {
+      return { assigned: false, reason: 'Work already has an assigned partner' };
+    }
+
+    return BookNowAutoAssignService.startOfferFlow(task, preferredPartnerUid);
+  }
+
+  static async advanceOfferStage(taskIdValue: string): Promise<boolean> {
+    if (!mongoose.Types.ObjectId.isValid(taskIdValue)) return false;
+    const taskId = new mongoose.Types.ObjectId(taskIdValue);
+    const task = await Task.findById(taskId).lean() as ITask | null;
+    if (!task || task.status !== 'open' || !task.assignmentOffer) return false;
+    const currentOffer = task.assignmentOffer;
+    const expiredStage = currentOffer.stage;
+    if (expiredStage === 'closed') return false;
+    const now = new Date();
+    if (currentOffer.expiresAt > now) return false;
+
+    const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+    const { tiers } = await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
+    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
+    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
+    const notificationTiers = getBookNowNotificationTiers(
+      tiers,
+      isTeamPosted,
+      excludedPhones,
+    );
+    const currentStageIndex = OFFER_STAGES.indexOf(expiredStage);
+    for (let index = currentStageIndex + 1; index < OFFER_STAGES.length; index += 1) {
+      const stage = OFFER_STAGES[index];
+      if (!shouldNotifyOfferStage(stage)) continue;
+      const notified = new Set(currentOffer.notifiedPartnerUids || []);
+      const recipients = notificationTiers[stage].filter(
+        (partner) => !notified.has(partner.uid),
+      );
+      if (!recipients.length) continue;
+      const advanced = await BookNowAutoAssignService.installOfferStage(
+        taskId,
+        task,
+        stage,
+        recipients,
+        currentOffer.notifiedPartnerUids || [],
+        currentOffer.rejectedPartnerUids || [],
+        expiredStage,
+        currentOffer.expiresAt,
+        currentOffer.recipientUids || [],
+      );
+      return advanced;
+    }
+
+    const dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
+      task.dispatchLogs || [],
+      currentOffer.recipientUids || [],
+      'timed_out',
+      now,
+    );
+    const dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+      task.dispatchProgress,
+      dispatchLogs,
+    );
+    if (dispatchProgress) {
+      dispatchProgress.currentStage = 'closed';
+      dispatchProgress.stages = dispatchProgress.stages.map((stageProgress) => {
+        const stageIndex = OFFER_STAGES.indexOf(stageProgress.stage);
+        const currentStageIndex = OFFER_STAGES.indexOf(expiredStage);
+        const status =
+          stageProgress.stage === expiredStage
+            ? 'completed'
+            : stageIndex < currentStageIndex && stageProgress.eligibleCount > 0
+              ? 'completed'
+              : 'skipped';
+        return {
+          ...stageProgress,
+          status,
+          completedAt: stageProgress.completedAt || now,
+        };
+      });
+    }
+    const closed = await Task.updateOne(
+      {
+        _id: taskId,
+        status: 'open',
+        'assignmentOffer.stage': expiredStage,
+        'assignmentOffer.expiresAt': currentOffer.expiresAt,
+      },
+      {
+        $set: {
+          'assignmentOffer.stage': 'closed',
+          'assignmentOffer.recipientUids': [],
+          dispatchLogs,
+          ...(dispatchProgress ? { dispatchProgress } : {}),
+        },
+      },
+    );
+    if (closed.modifiedCount > 0) {
+      logger.warn('[BookNowAutoAssign] All partner offer tiers expired without acceptance', {
+        taskId: String(taskId),
+        notifiedPartnerCount: currentOffer.notifiedPartnerUids.length,
+      });
+    }
+    return closed.modifiedCount > 0;
+  }
+
+  static async notifyOfferStageImmediately(
+    taskIdValue: string,
+    stage: Exclude<OfferStage, 'preferred'>,
+  ): Promise<{ stage: Exclude<OfferStage, 'preferred'>; notifiedCount: number }> {
+    if (!mongoose.Types.ObjectId.isValid(taskIdValue)) {
+      throw new BadRequestError('A valid task is required');
+    }
+    const taskId = new mongoose.Types.ObjectId(taskIdValue);
+    const task = await Task.findById(taskId).lean() as ITask | null;
+    if (
+      !task ||
+      task.bookingSource !== 'book_now' ||
+      task.status !== 'open' ||
+      task.assigneeId ||
+      task.assigneeUid ||
+      task.partnerId ||
+      task.partnerUid
+    ) {
+      throw new BadRequestError('Only open, unassigned Book Now work can be notified');
+    }
+    const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+    const { tiers, configuredStageByUid } =
+      await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
+    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
+    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
+    const notificationTiers = getBookNowNotificationTiers(
+      tiers,
+      isTeamPosted,
+      excludedPhones,
+    );
+    const dispatchLogs = BookNowAutoAssignService.tagDispatchStages(
+      BookNowAutoAssignService.mergeEligiblePartnersIntoDispatchLog(
+        task,
+        await BookNowAutoAssignService.buildDispatchLog(task),
+        eligiblePartners,
+      ),
+      tiers,
+      configuredStageByUid,
+    );
+    const alreadyNotifiedUids = new Set(
+      dispatchLogs.flatMap((area) =>
+        area.candidates
+          .filter((candidate) => candidate.notifiedAt)
+          .map((candidate) => candidate.partnerUid)
+          .filter((uid): uid is string => Boolean(uid)),
+      ),
+    );
+    const newlyNotifiedRecipients = notificationTiers[stage].filter(
+      (partner) => !alreadyNotifiedUids.has(partner.uid),
+    );
+    if (!newlyNotifiedRecipients.length) {
+      throw new BadRequestError(
+        isTeamPosted
+          ? `No unnotified eligible partners in the ${stage} stage match the team notification phone allowlist`
+          : `No unnotified eligible partners are available in the ${stage} stage`,
+      );
+    }
+
+    const currentOffer = task.assignmentOffer;
+    const activeRecipientUids =
+      currentOffer && currentOffer.stage !== 'closed'
+        ? currentOffer.recipientUids || []
+        : [];
+    const activePendingUids = activeRecipientUids.filter((uid) => {
+      const candidate = dispatchLogs
+        .flatMap((area) => area.candidates)
+        .find((item) => item.partnerUid === uid);
+      return candidate?.responseStatus === undefined || candidate.responseStatus === 'pending';
+    });
+    const continuingCurrentStage =
+      currentOffer?.stage === stage
+        ? notificationTiers[stage].filter((partner) => activePendingUids.includes(partner.uid))
+        : [];
+    const recipients = [
+      ...continuingCurrentStage,
+      ...newlyNotifiedRecipients.filter(
+        (partner) => !continuingCurrentStage.some((current) => current.uid === partner.uid),
+      ),
+    ];
+    const retainedRecipientUids = new Set(recipients.map((partner) => partner.uid));
+    const recipientsToClose = activePendingUids.filter(
+      (uid) => !retainedRecipientUids.has(uid),
+    );
+    const previouslyNotifiedUids = Array.from(
+      new Set([
+        ...(currentOffer?.notifiedPartnerUids || []),
+        ...Array.from(alreadyNotifiedUids),
+      ]),
+    );
+    const rejectedPartnerUids = currentOffer?.rejectedPartnerUids || [];
+    const installed = await BookNowAutoAssignService.installOfferStage(
+      taskId,
+      { ...task, dispatchLogs } as ITask,
+      stage,
+      recipients,
+      previouslyNotifiedUids,
+      rejectedPartnerUids,
+      currentOffer?.stage,
+      currentOffer?.expiresAt,
+      recipientsToClose,
+      'closed',
+      newlyNotifiedRecipients,
+    );
+    if (!installed) {
+      throw new BadRequestError('The work changed before notifications could be sent. Refresh and try again.');
+    }
+
+    const recipientUids = new Set(recipients.map((partner) => partner.uid));
+    const updatedTask = await Task.findById(taskId).select('dispatchLogs').lean();
+    const notifiedCount = (updatedTask?.dispatchLogs || []).reduce(
+      (count, area) =>
+        count +
+        area.candidates.filter(
+          (candidate) =>
+            candidate.dispatchStage === stage &&
+            candidate.partnerUid &&
+            recipientUids.has(candidate.partnerUid) &&
+            candidate.notifiedAt,
+        ).length,
+      0,
+    );
+    return { stage, notifiedCount };
+  }
+
+  static async retryUnnotifiedOffers(taskIdValue: string): Promise<boolean> {
+    if (!mongoose.Types.ObjectId.isValid(taskIdValue)) return false;
+    const taskId = new mongoose.Types.ObjectId(taskIdValue);
+    const task = await Task.findById(taskId).lean() as ITask | null;
+    if (!task || task.status !== 'open' || !task.assignmentOffer) return false;
+
+    const offer = task.assignmentOffer;
+    if (
+      offer.stage === 'closed' ||
+      offer.expiresAt <= new Date() ||
+      !offer.recipientUids?.length
+    ) {
+      return false;
+    }
+
+    const notifiedUids = new Set(
+      (task.dispatchLogs || []).flatMap((area) =>
+        area.candidates
+          .filter((candidate) => candidate.notifiedAt)
+          .map((candidate) => candidate.partnerUid)
+          .filter((uid): uid is string => Boolean(uid)),
+      ),
+    );
+    let recipientUids = offer.recipientUids.filter((uid) => !notifiedUids.has(uid));
+    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
+    if (await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones)) {
+      const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+      const { tiers } = await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
+      const notificationTiers = getBookNowNotificationTiers(
+        tiers,
+        true,
+        excludedPhones,
+      );
+      const allowlistedUids = new Set(
+        OFFER_STAGES.flatMap((stage) => notificationTiers[stage]).map(
+          (partner) => partner.uid,
+        ),
+      );
+      recipientUids = recipientUids.filter((uid) => allowlistedUids.has(uid));
+    }
+    if (!recipientUids.length) return false;
+
+    const stage = offer.stage;
+    const expiresAt = offer.expiresAt;
+    const deliveredUids = await BookNowAutoAssignService.sendOfferNotification(
+      task,
+      stage,
+      recipientUids,
+      expiresAt,
+    );
+    if (!deliveredUids.length) return false;
+
+    await BookNowAutoAssignService.recordOfferNotifications(
+      taskId,
+      stage,
+      deliveredUids,
+      new Date(),
+    );
+    logger.info('[BookNowAutoAssign] Retried unconfirmed partner offer notification', {
+      taskId: String(taskId),
+      stage,
+      recipientCount: deliveredUids.length,
+    });
+    return true;
+  }
+
+  static async respondToOffer(
+    taskIdValue: string,
+    partnerUidValue: string,
+    action: 'accept' | 'reject',
+  ): Promise<void> {
+    const taskId = String(taskIdValue || '').trim();
+    const partnerUid = String(partnerUidValue || '').trim();
+    if (!mongoose.Types.ObjectId.isValid(taskId) || !partnerUid) {
+      throw new BadRequestError('A valid task and partner are required');
+    }
+    if (action === 'reject') {
+      const now = new Date();
+      const offerFilter = {
+        _id: taskId,
+        bookingSource: 'book_now',
+        status: 'open',
+        'assignmentOffer.recipientUids': partnerUid,
+        'assignmentOffer.expiresAt': { $gt: now },
+      };
+      const task = await Task.findOne(offerFilter).lean() as ITask | null;
+      if (!task?.assignmentOffer) {
+        throw new ForbiddenError('This work offer is no longer available to you');
+      }
+      const dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
+        task.dispatchLogs || [],
+        [partnerUid],
+        'rejected',
+        now,
+      );
+      const dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+        task.dispatchProgress,
+        dispatchLogs,
+      );
+      const update = await Task.updateOne(
+        offerFilter,
+        {
+          $set: {
+            dispatchLogs,
+            ...(dispatchProgress ? { dispatchProgress } : {}),
+          },
+          $pull: { 'assignmentOffer.recipientUids': partnerUid },
+          $addToSet: { 'assignmentOffer.rejectedPartnerUids': partnerUid },
+        },
+      );
+      if (update.matchedCount === 0) {
+        throw new ForbiddenError('This work offer is no longer available to you');
+      }
+      return;
+    }
+
+    const task = await Task.findOne({
+      _id: taskId,
+      bookingSource: 'book_now',
+      status: 'open',
+      'assignmentOffer.recipientUids': partnerUid,
+      'assignmentOffer.expiresAt': { $gt: new Date() },
+    }).lean() as ITask | null;
+    if (!task?.assignmentOffer) {
+      throw new ForbiddenError('This work offer is no longer available to you');
+    }
+    const partner = await BookNowAutoAssignService.findPreferredPartnerForTask(
+      task,
+      partnerUid,
+    );
+    if (!partner) {
+      await BookNowAutoAssignService.respondToOffer(taskId, partnerUid, 'reject');
+      throw new ForbiddenError('You are no longer eligible for this work');
+    }
+
+    const now = new Date();
+    const previousOffer = task.assignmentOffer;
+    let dispatchLogs = task.dispatchLogs || await BookNowAutoAssignService.buildDispatchLog(task);
+    dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
+      dispatchLogs,
+      [partnerUid],
+      'accepted',
+      now,
+    );
+    dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
+      dispatchLogs,
+      (previousOffer.recipientUids || []).filter((uid) => uid !== partnerUid),
+      'closed',
+      now,
+    );
+    const dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+      task.dispatchProgress,
+      dispatchLogs,
+    );
+    if (dispatchProgress) {
+      const acceptedStageIndex = OFFER_STAGES.indexOf(previousOffer.stage as OfferStage);
+      dispatchProgress.currentStage = 'assigned';
+      dispatchProgress.assignedPartnerName = partner.name;
+      dispatchProgress.assignedPartnerUid = partnerUid;
+      dispatchProgress.assignedAt = now;
+      const escalationAlreadyDue =
+        dispatchProgress.supportEscalation.status === 'pending' &&
+        dispatchProgress.supportEscalation.dueAt.getTime() <= now.getTime();
+      dispatchProgress.supportEscalation = {
+        ...dispatchProgress.supportEscalation,
+        status: escalationAlreadyDue
+          ? 'escalated'
+          : dispatchProgress.supportEscalation.status === 'escalated'
+            ? 'escalated'
+            : 'stopped',
+        ...(escalationAlreadyDue
+          ? { escalatedAt: now }
+          : {}),
+      };
+      dispatchProgress.stages = dispatchProgress.stages.map((stageProgress) => {
+        const stageIndex = OFFER_STAGES.indexOf(stageProgress.stage);
+        const wasStarted = Boolean(stageProgress.startedAt || stageProgress.notifiedCount);
+        const status =
+          stageProgress.stage === previousOffer.stage
+            ? 'completed'
+            : stageIndex < acceptedStageIndex && wasStarted
+              ? 'completed'
+              : stageIndex > acceptedStageIndex
+                ? 'skipped'
+                : stageProgress.eligibleCount === 0
+                  ? 'skipped'
+                  : stageProgress.status;
+        return {
+          ...stageProgress,
+          status,
+          completedAt: status === 'completed' || status === 'skipped'
+            ? stageProgress.completedAt || now
+            : stageProgress.completedAt,
+        };
+      });
+    }
+    const partnerProfileId = new mongoose.Types.ObjectId(partner.profileId);
+    const claimedTask = await Task.findOneAndUpdate(
+      {
+        _id: task._id,
+        bookingSource: 'book_now',
+        status: 'open',
+        assigneeUid: null,
+        partnerUid: null,
+        'assignmentOffer.recipientUids': partnerUid,
+        'assignmentOffer.expiresAt': { $gt: now },
+      },
+      {
+        $set: {
+          assigneeId: partnerProfileId,
+          assigneeUid: partnerUid,
+          assigneeName: partner.name,
+          assignedHelperName: partner.name,
+          assignedToName: partner.name,
+          partnerId: partnerProfileId,
+          partnerUid,
+          partnerAcceptedAt: now,
+          assignedAt: now,
+          status: 'assigned',
+          assignmentStatus: 'assigned',
+          confirmed: true,
+          confirmedAt: now,
+          confirmed_at: now,
+          dispatchLogs,
+          ...(dispatchProgress ? { dispatchProgress } : {}),
+        },
+        $unset: { assignmentOffer: '' },
+      },
+      { new: true },
+    );
+    if (!claimedTask) {
+      throw new ForbiddenError('Another partner has already accepted this work');
+    }
+
+    let assignmentId: mongoose.Types.ObjectId | undefined;
+    try {
+      await Assignment.updateMany(
+        { taskId: task._id, status: { $in: ['assigned', 'pending'] } },
+        { $set: { status: 'cancelled' } },
+      );
+      const assignment = await Assignment.create({
+        bookingOrderId: task.bookingOrderId || 'auto',
+        bookingItemId:
+          task.bookingItemId && mongoose.Types.ObjectId.isValid(task.bookingItemId)
+            ? new mongoose.Types.ObjectId(task.bookingItemId)
+            : task._id,
+        taskId: task._id,
+        helperUid: partner.uid,
+        helperProfileId: partnerProfileId,
+        assignmentMode: 'auto',
+        status: 'assigned',
+        assignedByUid: 'partner_offer',
+        assignedAt: now,
+      });
+      assignmentId = assignment._id;
+      await AssignmentLog.create({
+        assignmentId: assignment._id,
+        action: 'partner_accepted_book_now_offer',
+        actorUid: partner.uid,
+        metadata: {
+          partnerUid: partner.uid,
+          partnerProfileId: partner.profileId,
+          offerStage: previousOffer.stage,
+        },
+      });
+    } catch (error) {
+      if (assignmentId) {
+        await Assignment.updateOne(
+          { _id: assignmentId },
+          { $set: { status: 'cancelled' } },
+        );
+      }
+      await Task.updateOne(
+        { _id: task._id, status: 'assigned', assigneeUid: partnerUid },
+        {
+          $set: {
+            status: 'open',
+            assignmentStatus: 'pending',
+            assignmentOffer: previousOffer,
+            assigneeId: null,
+            assigneeUid: null,
+            assigneeName: null,
+            assignedHelperName: null,
+            assignedToName: null,
+            partnerId: null,
+            partnerUid: null,
+            confirmed: false,
+            confirmedAt: null,
+            confirmed_at: null,
+            dispatchLogs: task.dispatchLogs || [],
+            ...(task.dispatchProgress ? { dispatchProgress: task.dispatchProgress } : {}),
+          },
+          $unset: { assignedAt: '', partnerAcceptedAt: '' },
+        },
+      );
+      throw error;
+    }
+
+    void notifyBookNowAssignment({
+      actorUid: 'system',
+      taskId: String(task._id),
+      taskTitle: String(task.title || 'your booking'),
+      customerUid: String((task as any).requesterUid || '').trim() || undefined,
+      customerProfileId: task.requesterId,
+      helperUid: partner.uid,
+      helperName: partner.name,
+      notifyPartner: false,
+      notifyCustomer: true,
+      recipientRole: 'partner',
+    }).catch((error: unknown) => {
+      logger.warn('[BookNowAutoAssign] Customer assignment notification failed', {
+        taskId: String(task._id),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+
+    await BookNowAutoAssignService.onPartnerAccepted(task, partner);
+  }
+
+  private static async onPartnerAccepted(
+    task: ITask,
+    partner: EligiblePartner,
+  ): Promise<void> {
+    const orderId = String(task.bookingOrderId || '').trim();
+    if (!orderId) return;
+    try {
+      const order = await BookingOrder.findOne({ orderId });
+      if (!order) return;
+      if (order.paymentEscrowId) {
+        const attached = await PaymentClient.attachPerformerToEscrow({
+          escrowId: order.paymentEscrowId,
+          performerUid: partner.uid,
+        });
+        if (!attached.success) {
+          logger.warn('[BookNowAutoAssign] Escrow performer attach failed', {
+            orderId,
+            taskId: String(task._id),
+            partnerUid: partner.uid,
+            error: attached.error,
+          });
+        }
+      }
+
+      const items = await BookingItem.find({
+        orderId,
+        status: { $ne: 'cancelled' },
+      })
+        .select('taskId')
+        .lean();
+      const taskIds = items.map((item) => item.taskId).filter(Boolean);
+      const orderTasks = taskIds.length
+        ? await Task.find({ _id: { $in: taskIds } })
+            .select('assigneeUid status')
+            .lean()
+        : [];
+      if (
+        orderTasks.length > 0 &&
+        orderTasks.every((item) => Boolean(item.assigneeUid))
+      ) {
+        await BookingOrder.updateOne(
+          { orderId, status: { $in: ['assigning', 'paid'] } },
+          { $set: { status: 'assigned' } },
+        );
+      }
+    } catch (error) {
+      logger.error('[BookNowAutoAssign] Post-accept booking update failed', {
+        orderId,
+        taskId: String(task._id),
+        partnerUid: partner.uid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /**
    * Build comprehensive dispatch evaluation logs for a Book Now task.
    * Checks the job area + nearby areas (<= 5km), evaluating all candidates against
@@ -608,6 +2221,7 @@ export class BookNowAutoAssignService {
             name: partnerName,
             status: 'ineligible',
             shiftTiming: shiftLabel,
+            distanceKm: distKm,
             details: 'on leave today',
             reasons: ['on leave today'],
             gender: partnerGender,
@@ -622,6 +2236,7 @@ export class BookNowAutoAssignService {
             name: partnerName,
             status: 'ineligible',
             shiftTiming: shiftLabel,
+            distanceKm: distKm,
             details: `shift ${shiftLabel}, no overlap with ${taskTimeString} job`,
             reasons: [`shift ${shiftLabel}, no overlap with ${taskTimeString} job`],
             gender: partnerGender,
@@ -636,6 +2251,7 @@ export class BookNowAutoAssignService {
             name: partnerName,
             status: 'ineligible',
             shiftTiming: shiftLabel,
+            distanceKm: distKm,
             details: `gender preference is ${preferredGender}, partner is ${partnerGender || 'unspecified'}`,
             reasons: [`gender preference is ${preferredGender}`],
             gender: partnerGender,
@@ -684,56 +2300,6 @@ export class BookNowAutoAssignService {
               genderCheckResult: isHourly && preferredGender ? 'passed' : null,
             });
           }
-        }
-      }
-
-      // If DB has no partner profiles registered in this area, generate realistic evaluation data matching dispatch engine
-      if (candidates.length === 0) {
-        if (isJobArea || normalizeArea(wa.area) === 'yapral') {
-          candidates.push(
-            {
-              name: 'Sunita M.',
-              status: 'ineligible',
-              shiftTiming: '9am-1pm',
-              details: `shift 9am-1pm, no overlap with ${taskTimeString} job`,
-              reasons: [`shift 9am-1pm, no overlap with ${taskTimeString} job`],
-            },
-            {
-              name: 'Ravi K.',
-              status: 'ineligible',
-              shiftTiming: '12-4pm',
-              details: 'on leave today',
-              reasons: ['on leave today'],
-            }
-          );
-        } else if (normalizeArea(wa.area) === 'secunderabad') {
-          candidates.push({
-            name: 'Anjali P.',
-            status: 'ineligible',
-            shiftTiming: '9am-1pm',
-            details: 'shift 9am-1pm, no overlap',
-            reasons: ['shift 9am-1pm, no overlap'],
-          });
-        } else if (normalizeArea(wa.area) === 'malkajgiri') {
-          const isAssigned = Boolean(assignedUid);
-          candidates.push({
-            name: 'Ravi T.',
-            status: isAssigned ? 'assigned' : 'notified',
-            shiftTiming: '1-9pm',
-            distanceKm: 3.1,
-            details: isAssigned
-              ? 'shift 1-9pm, 3.1 km away — assigned'
-              : 'shift 1-9pm, 3.1 km away — notified 12:31pm, no response (timed out 12:46pm)',
-            reasons: [],
-          });
-        } else {
-          candidates.push({
-            name: 'Kiran V.',
-            status: 'ineligible',
-            shiftTiming: '8am-12pm',
-            details: `shift 8am-12pm, no overlap with ${taskTimeString} job`,
-            reasons: ['no overlap'],
-          });
         }
       }
 
@@ -1087,6 +2653,7 @@ export class BookNowAutoAssignService {
           assignmentStatus: 'assigned',
           dispatchLogs,
         },
+        $unset: { assignmentOffer: '' },
       },
       { new: true },
     );
@@ -1184,10 +2751,31 @@ export class BookNowAutoAssignService {
     return { assigned: true, partner: preferred, dispatchLogs };
   }
 
-  private static async isExcludedCustomer(task: ITask): Promise<boolean> {
-    const rules = await AssignmentManagementRules.findOne({ key: 'assignment_management' }).lean();
-    const excludedPhones = rules?.excludedPhones || [];
-    if (!excludedPhones.length) return false;
+  static async getTaskPostedExcludedPhones(): Promise<string[]> {
+    const settings = await mongoose.connection
+      .collection('taskpostedemailsettings')
+      .findOne(
+        { key: 'task_posted_email' },
+        { projection: { excludedPhones: 1 } },
+      );
+    return Array.isArray(settings?.excludedPhones)
+      ? (settings.excludedPhones as string[])
+      : [];
+  }
+
+  static async isExcludedCustomer(
+    task: ITask,
+    excludedPhones?: string[],
+  ): Promise<boolean> {
+    if (
+      (task as any).isTeamPosted === true ||
+      (task as any).postedBy === 'team'
+    ) {
+      return true;
+    }
+    const phoneExclusions =
+      excludedPhones || (await BookNowAutoAssignService.getTaskPostedExcludedPhones());
+    if (!phoneExclusions.length) return false;
 
     const requesterUid = String((task as any).requesterUid || '').trim();
     const requesterId = String((task as any).requesterId || (task as any).CustomerId || '').trim();
@@ -1202,9 +2790,11 @@ export class BookNowAutoAssignService {
     const phone =
       (task as any).requesterPhone ||
       (task as any).customerPhone ||
+      (task as any).customer?.phone ||
       (profile as any)?.phone ||
-      (profile as any)?.phoneNumber;
-    return phoneMatchesExcluded(phone, excludedPhones);
+      (profile as any)?.phoneNumber ||
+      (profile as any)?.mobile;
+    return phoneMatchesExcluded(phone, phoneExclusions);
   }
 
   private static async findConfiguredPreferredPartner(task: ITask, rotationAttempt = 0): Promise<EligiblePartner | null> {
@@ -1262,6 +2852,13 @@ export class BookNowAutoAssignService {
     const taskId = String(task._id);
 
     try {
+      if (task.bookingSource === 'book_now') {
+        return BookNowAutoAssignService.dispatchBookNowOffers(
+          task,
+          String(options?.preferredPartnerUid || '').trim() || undefined,
+        );
+      }
+
       if (await BookNowAutoAssignService.isExcludedCustomer(task)) {
         logger.info('[BookNowAutoAssign] Customer is excluded from automatic assignment', { taskId });
         return { assigned: false, reason: 'Customer phone is excluded from automatic assignment' };

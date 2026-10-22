@@ -16,6 +16,7 @@ import { ProjectExecutionService } from '../services/ProjectExecutionService';
 import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestProfile';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
 import { resolvePartnerMatchConditions } from '../services/partnerVisibility';
+import { BookNowAutoAssignService } from '../services/BookNowAutoAssignService';
 
 /**
  * Internal/system service callers that legitimately list the Book Now pool
@@ -49,6 +50,29 @@ async function resolveBookNowVisibilityGuard(
 }
 
 export class TaskController {
+  static async notifyBookNowStageImmediately(
+    req: AuthenticatedRequest,
+    res: Response,
+  ): Promise<void> {
+    const serviceName =
+      req.headers['x-service-name'] || (req as any).serviceName;
+    if (serviceName !== 'main-admin-service') {
+      res.status(403).json({ success: false, error: 'Only the admin service can notify this dispatch stage' });
+      return;
+    }
+
+    const stage = req.body?.stage;
+    if (stage !== 'area_rule' && stage !== 'all') {
+      throw new BadRequestError('Stage must be area_rule or all');
+    }
+
+    const result = await BookNowAutoAssignService.notifyOfferStageImmediately(
+      req.params.id,
+      stage,
+    );
+    ApiResponse.success(res, result, 'Partner notifications sent');
+  }
+
   /**
    * GET /api/v1/tasks/count/open
    * Fast open-task count by requesterId
@@ -568,6 +592,7 @@ export class TaskController {
   static async updateTaskStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
     const { status, cancellationReason } = req.body;
     const taskId = req.params.id;
+    const isMainAdminService = req.headers['x-service-name'] === 'main-admin-service';
 
     logger.info('➡️ TaskController.updateTaskStatus called', {
       taskId,
@@ -575,6 +600,12 @@ export class TaskController {
       userUid: req.user?.uid,
       status,
     });
+
+    if (isMainAdminService) {
+      const task = await TaskService.adminUpdateTaskStatus(taskId, status);
+      ApiResponse.success(res, task, 'Task status updated successfully');
+      return;
+    }
 
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');

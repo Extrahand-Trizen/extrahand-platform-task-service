@@ -14,6 +14,7 @@ import { QcDatabase } from '../config/qcDatabase';
 import { QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, QC_DEFAULT_DELIVERY_FEE_INR, haversineKm } from '../constants/quickCommerce';
 import { PaymentClient } from '../services/PaymentClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { BookNowAutoAssignService } from '../services/BookNowAutoAssignService';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -74,7 +75,16 @@ export class PartnerBookNowController {
       return;
     }
 
-    const andConditions: Record<string, any>[] = [partnerMatch.category, partnerMatch.workArea];
+    const andConditions: Record<string, any>[] = [
+      {
+        $or: [
+          { assignmentOffer: { $exists: false } },
+          { assignmentOffer: null },
+        ],
+      },
+      partnerMatch.category,
+      partnerMatch.workArea,
+    ];
 
     // Optional client-provided `categories` param further narrows the feed;
     // it can never widen it past the partner's own category constraints.
@@ -845,6 +855,78 @@ export class PartnerBookNowController {
   }
 
   /**
+   * GET /api/v1/book-now/my-offers
+   * Returns only open Book Now offers addressed to the authenticated partner.
+   */
+  static async getMyOffers(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+    if (!uid) throw new BadRequestError('Partner UID required');
+
+    const now = new Date();
+    const tasks = await Task.find({
+      bookingSource: 'book_now',
+      status: 'open',
+      'assignmentOffer.recipientUids': uid,
+      'assignmentOffer.expiresAt': { $gt: now },
+    })
+      .sort({ 'assignmentOffer.notifiedAt': -1 })
+      .limit(50)
+      .lean() as Record<string, any>[];
+
+    const Profile = mongoose.connection.collection('profiles');
+    const offers = await Promise.all(
+      tasks.map(async (task) => {
+        let requesterName = 'Customer';
+        if (task.requesterId) {
+          const requester = await Profile.findOne(
+            { _id: task.requesterId },
+            { projection: { name: 1, fullName: 1 } },
+          );
+          requesterName = String(requester?.name || requester?.fullName || requesterName);
+        }
+        return {
+          id: String(task._id),
+          title: task.title,
+          category: task.category,
+          categoryLabel: task.categoryLabel || task.category,
+          description: task.description,
+          budget: task.budget,
+          location: task.location,
+          scheduledDate: task.scheduledDate,
+          scheduledTimeStart: task.scheduledTimeStart,
+          scheduledTimeEnd: task.scheduledTimeEnd,
+          createdAt: task.createdAt,
+          requesterName,
+          offerStage: task.assignmentOffer?.stage,
+          offerExpiresAt: task.assignmentOffer?.expiresAt,
+        };
+      }),
+    );
+
+    ApiResponse.success(res, offers, 'Partner work offers retrieved');
+  }
+
+  /**
+   * POST /api/v1/book-now/tasks/:id/offer-response
+   * Accepts the offer atomically or permanently declines it for this partner.
+   */
+  static async respondToOffer(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
+    if (!uid) throw new BadRequestError('Partner UID required');
+    const action = req.body?.action;
+    if (action !== 'accept' && action !== 'reject') {
+      throw new BadRequestError('Action must be accept or reject');
+    }
+
+    await BookNowAutoAssignService.respondToOffer(req.params.id, uid, action);
+    ApiResponse.success(
+      res,
+      { id: req.params.id, action },
+      action === 'accept' ? 'Work offer accepted and assigned' : 'Work offer rejected',
+    );
+  }
+
+  /**
    * GET /api/v1/book-now/my-leads
    * Returns the partner's currently active Book Now tasks.
    */
@@ -926,9 +1008,9 @@ export class PartnerBookNowController {
           scheduledTimeEnd: task.scheduledTimeEnd,
           createdAt: task.createdAt,
           partnerAcceptedAt: task.partnerAcceptedAt,
-          confirmed: Boolean(task.confirmed),
-          confirmedAt: task.confirmedAt || (task as any).confirmed_at || null,
-          confirmed_at: task.confirmedAt || (task as any).confirmed_at || null,
+          confirmed: Boolean(task.confirmed || task.partnerAcceptedAt),
+          confirmedAt: task.confirmedAt || (task as any).confirmed_at || task.partnerAcceptedAt || null,
+          confirmed_at: task.confirmedAt || (task as any).confirmed_at || task.partnerAcceptedAt || null,
           requesterName,
           bookingOrderId: task.bookingOrderId,
           bookingItemId: task.bookingItemId,
@@ -1449,6 +1531,7 @@ export class PartnerBookNowController {
       bookingSource: 'book_now',
       status: 'assigned',
       $or: [{ confirmed: { $ne: true } }, { confirmed: false }],
+      partnerAcceptedAt: { $in: [null] },
     })
       .sort({ assignedAt: -1, createdAt: -1 })
       .lean();

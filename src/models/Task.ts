@@ -403,6 +403,39 @@ export interface ITask extends Document {
   bookingOrderId?: string;
   bookingItemId?: string;
   assignmentStatus?: 'pending' | 'assigned' | 'failed';
+  assignmentOffer?: {
+    stage: 'preferred' | 'area_rule' | 'all' | 'closed';
+    recipientUids: string[];
+    notifiedPartnerUids: string[];
+    rejectedPartnerUids: string[];
+    notifiedAt: Date;
+    expiresAt: Date;
+  };
+  dispatchProgress?: {
+    currentStage: 'preferred' | 'area_rule' | 'all' | 'assigned' | 'closed';
+    startedAt: Date;
+    acceptanceWindowMinutes: number;
+    stages: Array<{
+      stage: 'preferred' | 'area_rule' | 'all';
+      status: 'pending' | 'in_progress' | 'completed' | 'skipped';
+      eligibleCount: number;
+      notifiedCount: number;
+      acceptedCount: number;
+      rejectedCount: number;
+      timedOutCount: number;
+      startedAt?: Date;
+      expiresAt?: Date;
+      completedAt?: Date;
+    }>;
+    assignedPartnerName?: string;
+    assignedPartnerUid?: string;
+    assignedAt?: Date;
+    supportEscalation: {
+      status: 'pending' | 'escalated' | 'stopped';
+      dueAt: Date;
+      escalatedAt?: Date;
+    };
+  };
   /**
    * Soft customer preference for helper gender (Hourly Direct Buy).
    * Copied from BookingOrder; used by BookNowAutoAssignService ranking only.
@@ -429,18 +462,22 @@ export interface ITask extends Document {
     eligibleCount: number;
     notifiedCount: number;
     acceptedCount?: number;
+    rejectedCount?: number;
+    timedOutCount?: number;
     assignedCount?: number;
     candidates: Array<{
       partnerId?: string;
       partnerUid?: string;
       name: string;
       status: 'eligible' | 'ineligible' | 'assigned' | 'notified' | 'timed_out' | 'declined';
+      responseStatus?: 'pending' | 'accepted' | 'rejected' | 'timed_out' | 'closed';
       reasons?: string[];
       details?: string;
       shiftTiming?: string;
       distanceKm?: number | null;
       notifiedAt?: Date | string | null;
       respondedAt?: Date | string | null;
+      dispatchStage?: 'preferred' | 'area_rule' | 'all';
     }>;
   }>;
 
@@ -1039,6 +1076,58 @@ const TaskSchema = new Schema<ITask>(
       type: String,
       enum: ['pending', 'assigned', 'failed'],
     },
+    assignmentOffer: {
+      stage: {
+        type: String,
+        enum: ['preferred', 'area_rule', 'all', 'closed'],
+      },
+      recipientUids: { type: [String], default: [] },
+      notifiedPartnerUids: { type: [String], default: [] },
+      rejectedPartnerUids: { type: [String], default: [] },
+      notifiedAt: Date,
+      expiresAt: Date,
+    },
+    dispatchProgress: {
+      currentStage: {
+        type: String,
+        enum: ['preferred', 'area_rule', 'all', 'assigned', 'closed'],
+      },
+      startedAt: Date,
+      acceptanceWindowMinutes: { type: Number, default: 30 },
+      stages: {
+        type: [
+          {
+            stage: { type: String, enum: ['preferred', 'area_rule', 'all'] },
+            status: {
+              type: String,
+              enum: ['pending', 'in_progress', 'completed', 'skipped'],
+              default: 'pending',
+            },
+            eligibleCount: { type: Number, default: 0 },
+            notifiedCount: { type: Number, default: 0 },
+            acceptedCount: { type: Number, default: 0 },
+            rejectedCount: { type: Number, default: 0 },
+            timedOutCount: { type: Number, default: 0 },
+            startedAt: Date,
+            expiresAt: Date,
+            completedAt: Date,
+          },
+        ],
+        default: [],
+      },
+      assignedPartnerName: String,
+      assignedPartnerUid: String,
+      assignedAt: Date,
+      supportEscalation: {
+        status: {
+          type: String,
+          enum: ['pending', 'escalated', 'stopped'],
+          default: 'pending',
+        },
+        dueAt: Date,
+        escalatedAt: Date,
+      },
+    },
 
     partnerId: {
       type: Schema.Types.ObjectId,
@@ -1064,6 +1153,8 @@ const TaskSchema = new Schema<ITask>(
           eligibleCount: Number,
           notifiedCount: Number,
           acceptedCount: Number,
+          rejectedCount: Number,
+          timedOutCount: Number,
           assignedCount: Number,
           candidates: [
             {
@@ -1074,12 +1165,20 @@ const TaskSchema = new Schema<ITask>(
                 type: String,
                 enum: ['eligible', 'ineligible', 'assigned', 'notified', 'timed_out', 'declined'],
               },
+              responseStatus: {
+                type: String,
+                enum: ['pending', 'accepted', 'rejected', 'timed_out', 'closed'],
+              },
               reasons: [String],
               details: String,
               shiftTiming: String,
               distanceKm: Number,
               notifiedAt: Date,
               respondedAt: Date,
+              dispatchStage: {
+                type: String,
+                enum: ['preferred', 'area_rule', 'all'],
+              },
             },
           ],
         },
@@ -1117,6 +1216,7 @@ TaskSchema.index({ status: 1, scheduledDate: 1 });
 // Global revision: poster's revisable open tasks
 TaskSchema.index({ requesterId: 1, status: 1, currentRevisionRound: 1 }, { name: "requester_status_revision" });
 TaskSchema.index({ bookingSource: 1, status: 1 });
+TaskSchema.index({ bookingSource: 1, status: 1, 'assignmentOffer.expiresAt': 1 });
 TaskSchema.index({ partnerId: 1, status: 1 });
 TaskSchema.index({ partnerUid: 1, status: 1 });
 TaskSchema.index({ partnerId: 1, bookingSource: 1, status: 1 });

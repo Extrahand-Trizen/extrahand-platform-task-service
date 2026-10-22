@@ -1256,17 +1256,40 @@ export class TaskService {
     const isTerminalTask = ['completed', 'cancelled'].includes(
       String(task.status || '').toLowerCase(),
     );
-    if (
-      task.bookingSource === 'book_now' &&
-      !isTerminalTask &&
-      (!task.dispatchLogs || !task.dispatchLogs.length)
-    ) {
+    if (task.bookingSource === 'book_now' && !isTerminalTask) {
       try {
         const { BookNowAutoAssignService } = await import('./BookNowAutoAssignService');
-        const logs = await BookNowAutoAssignService.buildDispatchLog(task);
-        (task as any).dispatchLogs = logs;
+        const isUnassignedOpenTask =
+          task.status === 'open' &&
+          !task.assigneeId &&
+          !task.assigneeUid &&
+          !task.partnerId &&
+          !task.partnerUid;
+        if (isUnassignedOpenTask && !task.assignmentOffer) {
+          await BookNowAutoAssignService.dispatchBookNowOffers(task);
+          const refreshedTask = await Task.findById(taskId).lean();
+          if (refreshedTask) {
+            task = refreshedTask as unknown as ITask;
+          }
+        }
+
+        const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+        const dispatchLogs =
+          task.dispatchLogs && task.dispatchLogs.length
+            ? task.dispatchLogs
+            : await BookNowAutoAssignService.buildDispatchLog(task);
+        const mergedDispatchLogs = BookNowAutoAssignService.mergeEligiblePartnersIntoDispatchLog(
+          task,
+          dispatchLogs,
+          eligiblePartners,
+        );
+        task.dispatchLogs = await BookNowAutoAssignService.assignDispatchStages(
+          task,
+          mergedDispatchLogs,
+          eligiblePartners,
+        );
       } catch (err) {
-        logger.warn('Failed to build on-the-fly dispatch log', { taskId, error: err });
+        logger.warn('Failed to build task-detail eligible partner list', { taskId, error: err });
       }
     }
 
@@ -1734,7 +1757,13 @@ export class TaskService {
 
     const taskRecord = task.toObject() as ITask;
 
-    if (taskRecord.bookingSource === 'book_now' || isHourlyTask(taskRecord)) {
+    if (taskRecord.bookingSource === 'book_now') {
+      try {
+        await BookNowAutoAssignService.dispatchBookNowOffers(taskRecord);
+      } catch (dispatchErr) {
+        logger.error('[BookNowOfferDispatch] Offer dispatch error in TaskService:', dispatchErr);
+      }
+    } else if (isHourlyTask(taskRecord)) {
       try {
         await BookNowAutoAssignService.autoAssign(taskRecord);
       } catch (autoAssignErr) {
@@ -2764,6 +2793,48 @@ export class TaskService {
   /**
    * Update task status
    */
+  static async adminUpdateTaskStatus(
+    taskId: string,
+    status: TaskStatus,
+  ): Promise<ITask> {
+    const validStatuses: TaskStatus[] = [
+      "open",
+      "assigned",
+      "started",
+      "in_progress",
+      "review",
+      "completed",
+      "cancelled",
+    ];
+
+    if (!validStatuses.includes(status)) {
+      throw new BadRequestError("Invalid status");
+    }
+
+    const task = await Task.findById(taskId);
+    if (task) {
+      task.status = status;
+      task.updatedAt = new Date();
+      await task.save();
+      return task;
+    }
+
+    const qcOrder = await findQcOrderById(taskId);
+    if (!qcOrder) {
+      throw new NotFoundError("Task not found");
+    }
+
+    await updateQcOrderById(qcOrder._id, {
+      status,
+      updatedAt: new Date(),
+    });
+    const updatedQcOrder = await findQcOrderById(qcOrder._id);
+    if (!updatedQcOrder) {
+      throw new NotFoundError("Task not found after status update");
+    }
+    return normalizeQcOrderToTask(updatedQcOrder) as unknown as ITask;
+  }
+
   static async updateTaskStatus(
     taskId: string,
     profileId: mongoose.Types.ObjectId,

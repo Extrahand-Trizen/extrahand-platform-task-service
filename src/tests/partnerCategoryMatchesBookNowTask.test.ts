@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { partnerCategoryMatchesBookNowTask } from '../services/partnerVisibility';
+import {
+  isHomeCleaningTask,
+  partnerCategoryMatchesBookNowTask,
+} from '../services/partnerVisibility';
 
 const paintingConsultationTask = {
   category: 'other',
@@ -34,6 +37,43 @@ const dailyLabourTask = {
 assert.equal(partnerCategoryMatchesBookNowTask(['other'], dailyLabourTask), true);
 assert.equal(partnerCategoryMatchesBookNowTask(['daily-labour'], dailyLabourTask), true);
 assert.equal(partnerCategoryMatchesBookNowTask(['cleaning'], dailyLabourTask), false);
+
+const bathroomCleaningTask = {
+  category: 'cleaning',
+  categorySlug: 'cleaning-bathroom',
+  categoryLabel: 'Bathroom Cleaning',
+};
+const fullHouseCleaningTask = {
+  category: 'cleaning',
+  categorySlug: 'full-house-cleaning',
+  categoryLabel: 'Full House Cleaning',
+};
+
+for (const partnerCategory of [
+  'cleaning',
+  'home-cleaning',
+  'house-cleaning',
+  'full-house-cleaning',
+  'bathroom-cleaning',
+  'cleaning-bathroom',
+  'kitchen-cleaning',
+  'deep-cleaning',
+]) {
+  assert.equal(
+    partnerCategoryMatchesBookNowTask([partnerCategory], bathroomCleaningTask),
+    true,
+    `${partnerCategory} should match bathroom cleaning`,
+  );
+  assert.equal(
+    partnerCategoryMatchesBookNowTask([partnerCategory], fullHouseCleaningTask),
+    true,
+    `${partnerCategory} should match full-house cleaning`,
+  );
+}
+
+assert.equal(isHomeCleaningTask(bathroomCleaningTask), true);
+assert.equal(isHomeCleaningTask(fullHouseCleaningTask), true);
+assert.equal(isHomeCleaningTask({ category: 'repair', categoryLabel: 'Plumbing' }), false);
 
 const legacyPaintingTask = {
   category: 'other',

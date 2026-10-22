@@ -175,3 +175,4 @@ activate().catch((err) => {
   console.error('Error activating Daily Labour:', err);
   process.exit(1);
 });
+

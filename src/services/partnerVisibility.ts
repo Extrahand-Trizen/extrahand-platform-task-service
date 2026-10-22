@@ -28,7 +28,24 @@ import {
  * even when the task was created with a different slug variant.
  */
 const CATEGORY_MAP: Record<string, string[]> = {
-  cleaning: ['cleaning', 'home-cleaning', 'home_cleaning'],
+  cleaning: [
+    'cleaning',
+    'home-cleaning',
+    'home_cleaning',
+    'house-cleaning',
+    'full-house-cleaning',
+    'fullhouse-cleaning',
+    'cleaning-full-house',
+    'bathroom-cleaning',
+    'cleaning-bathroom',
+    'kitchen-cleaning',
+    'cleaning-kitchen',
+    'deep-cleaning',
+    'sofa-cleaning',
+    'mattress-cleaning',
+    'window-cleaning',
+    'carpet-cleaning',
+  ],
   repair: [
     'repair',
     'plumbing',
@@ -53,6 +70,19 @@ const CATEGORY_MAP: Record<string, string[]> = {
   beautician: ['beautician', 'beauty', 'beauty-services', 'salon'],
   driver: ['driver', 'chauffeur', 'driving'],
   'home-cleaning': ['cleaning', 'home-cleaning'],
+  'house-cleaning': ['cleaning', 'other'],
+  'full-house-cleaning': ['cleaning', 'other'],
+  'fullhouse-cleaning': ['cleaning', 'other'],
+  'cleaning-full-house': ['cleaning', 'other'],
+  'bathroom-cleaning': ['cleaning', 'other'],
+  'cleaning-bathroom': ['cleaning', 'other'],
+  'kitchen-cleaning': ['cleaning', 'other'],
+  'cleaning-kitchen': ['cleaning', 'other'],
+  'deep-cleaning': ['cleaning', 'other'],
+  'sofa-cleaning': ['cleaning', 'other'],
+  'mattress-cleaning': ['cleaning', 'other'],
+  'window-cleaning': ['cleaning', 'other'],
+  'carpet-cleaning': ['cleaning', 'other'],
   'pest-control': ['pest-control'],
   'beauty-services': ['beauty-services', 'beauty', 'beautician', 'salon'],
   'hourly-helper': ['hourly-helper', 'hourly-based', 'other'],
@@ -260,6 +290,7 @@ export function partnerCategoryMatchesBookNowTask(
     ) {
       return true;
     }
+
     if (PAINTING_SUPPLY_CATEGORY_SLUGS.has(taskSlug)) return true;
     if (taskSubcategory.startsWith('painting-consultation-')) return true;
     if (taskSubcategory.startsWith('consultation-project-')) return true;
@@ -276,6 +307,20 @@ export function partnerCategoryMatchesBookNowTask(
       (subKey && (subKey.includes(partnerKey) || partnerKey.includes(subKey)))
     );
   });
+}
+
+export function isHomeCleaningTask(task: {
+  category?: string;
+  categorySlug?: string;
+  categoryLabel?: string;
+  subcategory?: string;
+}): boolean {
+  const category = normalizeCategory(String(task.category || ''));
+  if (category === 'cleaning') return true;
+
+  return [task.categorySlug, task.categoryLabel, task.subcategory]
+    .map((value) => normalizeCategory(String(value || '')))
+    .some((value) => value.includes('clean'));
 }
 
 /**

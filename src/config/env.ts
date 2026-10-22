@@ -6,6 +6,9 @@ import dotenv from 'dotenv';
 // Load environment variables from .env file
 dotenv.config();
 
+const productionNotificationServiceUrl =
+  'http://srv-captain--extrahand-notification-service:4005';
+
 // Define environment schema
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -51,7 +54,21 @@ const envSchema = z.object({
   TASK_START_OTP_BYPASS_UIDS: z.string().optional(),
   USER_SERVICE_URL: z.string().url().default('http://localhost:4001'),
   MESSAGING_SERVICE_URL: z.string().url().default('http://localhost:4010'),
-  NOTIFICATION_SERVICE_URL: z.string().url().default('http://localhost:4005'),
+  NOTIFICATION_SERVICE_URL: z
+    .string()
+    .url()
+    .transform((value) => {
+      if (process.env.NODE_ENV !== 'production') return value;
+      const hostname = new URL(value).hostname;
+      return ['localhost', '127.0.0.1', '::1'].includes(hostname)
+        ? productionNotificationServiceUrl
+        : value;
+    })
+    .default(
+      process.env.NODE_ENV === 'production'
+        ? productionNotificationServiceUrl
+        : 'http://localhost:4005',
+    ),
   PAYMENT_SERVICE_URL: z.string().url().default('http://localhost:4003'),
   EMAIL_SERVICE_URL: z.string().url().optional(),
   WEB_APP_URL: z.string().url().optional(),
@@ -300,6 +317,10 @@ export class Config {
 
   static get MESSAGING_SERVICE_URL(): string {
     return this.env.MESSAGING_SERVICE_URL;
+  }
+
+  static get NOTIFICATION_SERVICE_URL(): string {
+    return this.env.NOTIFICATION_SERVICE_URL;
   }
 
   static get PAYMENT_SERVICE_URL(): string {

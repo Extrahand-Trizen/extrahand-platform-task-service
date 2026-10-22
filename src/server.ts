@@ -12,6 +12,7 @@ import { ReminderScheduler } from './schedulers/ReminderScheduler';
 import { WorkStartSoonScheduler } from './schedulers/WorkStartSoonScheduler';
 import { ApplicationFollowUpScheduler } from './schedulers/ApplicationFollowUpScheduler';
 import { RecurringVisitScheduler } from './schedulers/RecurringVisitScheduler';
+import { BookNowOfferScheduler } from './schedulers/BookNowOfferScheduler';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
 import { initRedis, disconnectRedis } from './config/redis';
@@ -42,6 +43,7 @@ async function startServer() {
     await WorkStartSoonScheduler.initialize('task-service');
     await ApplicationFollowUpScheduler.initialize('task-service');
     await RecurringVisitScheduler.initialize('task-service');
+    await BookNowOfferScheduler.initialize('task-service');
 
     // Initialize Redis (optional, best-effort)
     await initRedis();
@@ -95,4 +97,3 @@ async function startServer() {
 }
 
 startServer();
-
