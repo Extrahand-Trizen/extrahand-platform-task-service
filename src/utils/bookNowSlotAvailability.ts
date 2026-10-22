@@ -518,6 +518,7 @@ export type PartnerCapacityLocation = {
   hourlyHelper?: boolean;
   preferredHelperGender?: 'any' | 'male' | 'female';
   requiredPartnerUid?: string;
+  requiredPartnerCategory?: string;
   excludeOrderId?: string;
   excludeTaskIds?: string[];
   /** Exact-area eligible partners; when set, replaces work-area key matching. */
@@ -540,6 +541,31 @@ function normalizePartnerGender(value: unknown): string | null {
 
 export function partnerMatchesHourlyHelperCategory(categories: unknown[]): boolean {
   return partnerHasHourlyHelperCategory(categories);
+}
+
+export function partnerMatchesRequiredCapacityCategory(
+  categories: unknown[],
+  requiredCategory: string,
+): boolean {
+  const required = requiredCategory.trim().toLowerCase();
+  const accepted = required === 'daily-labour'
+    ? new Set(['daily-labour', 'other'])
+    : new Set([required]);
+
+  return categories.some((category) => {
+    const value = typeof category === 'string'
+      ? category
+      : category && typeof category === 'object'
+        ? String(
+            (category as Record<string, unknown>).id ??
+            (category as Record<string, unknown>).slug ??
+            (category as Record<string, unknown>).category ??
+            (category as Record<string, unknown>).value ??
+            '',
+          )
+        : '';
+    return accepted.has(value.trim().toLowerCase());
+  });
 }
 
 export function countPartnersAvailableForInterval(
@@ -649,6 +675,13 @@ export async function getPartnerCapacityForSlots(
         if (gender !== preferredGender) continue;
       }
     }
+    if (location?.requiredPartnerCategory) {
+      const categories = Array.isArray(pp.categories) ? (pp.categories as unknown[]) : [];
+      if (!partnerMatchesRequiredCapacityCategory(
+        categories,
+        location.requiredPartnerCategory,
+      )) continue;
+    }
 
     const uid = String(record.uid || '').trim();
     if (!uid) continue;
@@ -741,7 +774,11 @@ export async function getPartnerCapacityForSlots(
     const candidateEnd = slotMinutes + safeDuration;
     const outsideHourlyWindow = location?.hourlyHelper &&
       !isHourlyCapacityCandidateWithinWindow(candidateStart, safeDuration);
-    capacity[minutesToSlotLabel(slotMinutes)] = outsideHourlyWindow
+    const outsideDailyLabourWindow =
+      location?.requiredPartnerCategory === 'daily-labour' &&
+      !isHourlyCapacityCandidateWithinWindow(candidateStart, safeDuration);
+    capacity[minutesToSlotLabel(slotMinutes)] =
+      outsideHourlyWindow || outsideDailyLabourWindow
       ? 0
       : countPartnersAvailableForInterval(
           eligiblePartners,
@@ -769,6 +806,7 @@ export async function assertBookNowSlotAvailable(params: {
   excludeTaskIds?: string[];
   preferredHelperGender?: 'any' | 'male' | 'female';
   allowedPartnerUids?: string[];
+  requiredPartnerCategory?: string;
 }): Promise<void> {
   const date = String(params.date || '').trim();
   const city = normalizeCity(params.city);
@@ -815,7 +853,7 @@ export async function assertBookNowSlotAvailable(params: {
     throw new Error('SLOT_TOO_SOON');
   }
 
-  if (params.availabilityMode !== 'hourly') {
+  if (params.availabilityMode !== 'hourly' && !params.requiredPartnerCategory) {
     const slotStartMinutes = parseHourlySlotToMinutes(slotToCheck);
     if (slotStartMinutes == null || slotStartMinutes < 7 * 60 || slotStartMinutes >= 20 * 60) {
       throw new Error('SLOT_UNAVAILABLE');
@@ -828,7 +866,8 @@ export async function assertBookNowSlotAvailable(params: {
     lat: params.lat,
     lng: params.lng,
     requiredPartnerUid: params.requiredPartnerUid,
-    hourlyHelper: true,
+    requiredPartnerCategory: params.requiredPartnerCategory,
+    hourlyHelper: params.availabilityMode === 'hourly',
     preferredHelperGender: params.preferredHelperGender,
     excludeOrderId: params.excludeOrderId,
     excludeTaskIds: params.excludeTaskIds,

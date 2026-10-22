@@ -20,6 +20,7 @@ const WORK_AREA_COORDS = HYDERABAD_WORK_AREA_COORDS;
 
 // ─── Category Slug → Parent Category Mapping ────────────────────────────────
 const SLUG_TO_PARENT_CATEGORY: Record<string, string> = {
+  'daily-labour': 'daily-labour',
   electrician: 'electrician',
   'electrician-switch-and-socket': 'electrician',
   'switch-and-socket': 'electrician',

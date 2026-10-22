@@ -11,6 +11,7 @@ import {
 import { personalAssistantCatalogIsActive } from '../utils/personalAssistantCatalogVisibility';
 import { BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG } from '../constants/bookNowHubCatalog';
 import BookNowCategoryContent from '../models/BookNowCategoryContent';
+import BookNowHubSection from '../models/BookNowHubSection';
 import fs from 'fs';
 import path from 'path';
 import mongoose from 'mongoose';
@@ -19,6 +20,10 @@ import ServiceSku from '../models/ServiceSku';
 import ServiceVariant from '../models/ServiceVariant';
 import ServiceArea from '../models/ServiceArea';
 import logger from '../config/logger';
+import {
+  DAILY_LABOUR_CATEGORY,
+  DAILY_LABOUR_OPTIONS,
+} from '../constants/dailyLabour';
 
 type SeedCategory = { slug: string; name: string; sortOrder: number };
 type SeedPackage = {
@@ -90,6 +95,75 @@ function loadSeedData(): { categories: SeedCategory[]; packages: SeedPackage[] }
 }
 
 export class BookNowCatalogBootstrap {
+  static async deactivateDailyLabourCatalog(): Promise<{
+    active: false;
+    categories: number;
+    categoryContent: number;
+    hubSections: number;
+    skus: number;
+    variants: number;
+  }> {
+    const category = await ServiceCategory.findOne({ slug: DAILY_LABOUR_CATEGORY.slug })
+      .select('_id')
+      .lean();
+    const skuIds = category
+      ? await ServiceSku.find({
+          categoryId: category._id,
+          slug: { $in: DAILY_LABOUR_OPTIONS.map((option) => option.slug) },
+        })
+          .distinct('_id')
+      : [];
+
+    const [categoryResult, contentResult, hubResult, skuResult, variantResult] =
+      await Promise.all([
+        ServiceCategory.updateOne(
+          { slug: DAILY_LABOUR_CATEGORY.slug },
+          { $set: { isActive: false } },
+        ),
+        BookNowCategoryContent.updateOne(
+          { categorySlug: DAILY_LABOUR_CATEGORY.slug },
+          { $set: { isActive: false } },
+        ),
+        BookNowHubSection.updateOne(
+          { slug: DAILY_LABOUR_CATEGORY.slug },
+          {
+            $set: {
+              isActive: false,
+              'services.$[].isActive': false,
+            },
+          },
+        ),
+        category
+          ? ServiceSku.updateMany(
+              {
+                categoryId: category._id,
+                slug: { $in: DAILY_LABOUR_OPTIONS.map((option) => option.slug) },
+              },
+              { $set: { isActive: false } },
+            )
+          : Promise.resolve({ modifiedCount: 0 }),
+        skuIds.length > 0
+          ? ServiceVariant.updateMany(
+              { skuId: { $in: skuIds } },
+              { $set: { isActive: false } },
+            )
+          : Promise.resolve({ modifiedCount: 0 }),
+      ]);
+    const result = {
+      active: false as const,
+      categories: categoryResult.modifiedCount,
+      categoryContent: contentResult.modifiedCount,
+      hubSections: hubResult.modifiedCount,
+      skus: skuResult.modifiedCount,
+      variants: variantResult.modifiedCount,
+    };
+    logger.info('Daily Labour catalog deactivated', {
+      categorySlug: DAILY_LABOUR_CATEGORY.slug,
+      ...result,
+    });
+    return result;
+  }
+
   /** Seed Hourly Helper category + duration SKUs (pricingUnit=hourly). Idempotent. */
   static async seedHourlyHelperCatalog(): Promise<{ categoryId: string; skus: number }> {
     const category = await ServiceCategory.findOneAndUpdate(
@@ -346,12 +420,12 @@ export class BookNowCatalogBootstrap {
     const hourly = await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
 
     logger.info('Book Now catalog bootstrap complete', {
-      categories: categories.length + 1,
+      categories: categories.length,
       skus: skuCount + hourly.skus,
       hourlyHelperSkus: hourly.skus,
       serviceCities: SERVICE_CITIES.length,
     });
 
-    return { categories: categories.length + 1, skus: skuCount + hourly.skus };
+    return { categories: categories.length, skus: skuCount + hourly.skus };
   }
 }

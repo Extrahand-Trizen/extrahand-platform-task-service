@@ -27,6 +27,14 @@ assert.equal(
   false,
 );
 
+const dailyLabourTask = {
+  category: 'other',
+  categorySlug: 'daily-labour',
+};
+assert.equal(partnerCategoryMatchesBookNowTask(['other'], dailyLabourTask), true);
+assert.equal(partnerCategoryMatchesBookNowTask(['daily-labour'], dailyLabourTask), true);
+assert.equal(partnerCategoryMatchesBookNowTask(['cleaning'], dailyLabourTask), false);
+
 const legacyPaintingTask = {
   category: 'other',
   subcategory: 'painting-consultation-exterior-full',

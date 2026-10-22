@@ -16,6 +16,7 @@ import bookingsRoutes from './bookings';
 import assignmentsRoutes from './assignments';
 import partnerBookNowRoutes from './partnerBookNow';
 import partnerLocationRoutes from './partnerLocation';
+import bookServicesAssistantRoutes from './bookServicesAssistant';
 import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
 import { BookingController } from '../controllers/BookingController';
@@ -154,9 +155,9 @@ router.use('/uploads', uploadRoutes);
 router.use('/test/reminders', testReminderRoutes); // Test endpoints (dev only)
 router.use('/analytics', analyticsRoutes);
 router.use('/bookings', bookingsRoutes);
+router.use('/book-services/assistant', bookServicesAssistantRoutes);
 router.use('/admin/assignments', assignmentsRoutes);
 router.use('/book-now', partnerBookNowRoutes);
 router.use('/', partnerLocationRoutes); // /tasks/:id/partner-location
 
 export default router;
-

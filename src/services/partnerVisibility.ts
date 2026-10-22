@@ -57,6 +57,7 @@ const CATEGORY_MAP: Record<string, string[]> = {
   'beauty-services': ['beauty-services', 'beauty', 'beautician', 'salon'],
   'hourly-helper': ['hourly-helper', 'hourly-based', 'other'],
   'hourly-based': ['hourly-based', 'hourly-helper', 'other'],
+  'daily-labour': ['other'],
 };
 
 export function normalizeCategory(input: string): string {
@@ -223,6 +224,22 @@ export function partnerCategoryMatchesBookNowTask(
   const taskServiceType = String(task.serviceType || '').trim().toLowerCase();
   const taskFlowType = String(task.serviceFlowType || '').trim();
   const taskBookingKind = String(task.bookingKind || '').trim().toLowerCase();
+
+  if (taskSlug === 'daily-labour') {
+    return partnerCategories.some((category) => {
+      const raw = category && typeof category === 'object'
+        ? String(
+            (category as Record<string, unknown>).id ??
+            (category as Record<string, unknown>).slug ??
+            (category as Record<string, unknown>).category ??
+            (category as Record<string, unknown>).value ??
+            '',
+          )
+        : String(category || '');
+      const slug = raw.trim().toLowerCase().replace(/[\s_]+/g, '-');
+      return slug === 'daily-labour' || slug === 'other';
+    });
+  }
 
   const taskCategories = new Set<string>();
   normalized.forEach((cat) => {

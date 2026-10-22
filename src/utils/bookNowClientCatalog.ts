@@ -41,6 +41,7 @@ export const BOOK_NOW_CATALOG_LABELS: Record<string, string> = {
 };
 
 export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
+  'daily-labour': 'other',
   'full-house': 'cleaning',
   bathroom: 'cleaning',
   kitchen: 'cleaning',
@@ -87,6 +88,7 @@ export function resolveBookNowTaskCategory(catalogId: string): TaskCategory {
   const key = String(catalogId || '')
     .trim()
     .toLowerCase();
+  if (key === 'daily-labour') return 'other';
   if (BOOK_NOW_TASK_CATEGORY_BY_CATALOG[key]) {
     return BOOK_NOW_TASK_CATEGORY_BY_CATALOG[key];
   }

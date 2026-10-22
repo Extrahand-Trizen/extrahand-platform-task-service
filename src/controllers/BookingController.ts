@@ -109,6 +109,10 @@ export class BookingController {
       preferredHelperGender: ['male', 'female', 'any'].includes(String(req.query.preferredHelperGender || '').trim().toLowerCase())
         ? String(req.query.preferredHelperGender).trim().toLowerCase() as 'male' | 'female' | 'any'
         : undefined,
+      requiredPartnerCategory:
+        String(req.query.categorySlug || '').trim().toLowerCase() === 'daily-labour'
+          ? 'daily-labour'
+          : undefined,
     });
     res.json({ success: true, data });
   }

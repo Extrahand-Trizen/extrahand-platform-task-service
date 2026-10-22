@@ -26,6 +26,7 @@ export type BookNowHubSectionSeed = {
 
 export const BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG: Record<string, string> = {
   'personal-assistance': cdnImage('personal-assistance'),
+  'daily-labour': cdnImage('hourly-based'),
   'full-house': cdnImage('fullhouse-booknow'),
   bathroom: cdnImage('bathroom-booknow'),
   kitchen: cdnImage('kitchen-booknow'),
@@ -300,5 +301,18 @@ export const BOOK_NOW_HUB_SECTION_SEED: BookNowHubSectionSeed[] = [
       { id: 'geyser', label: 'Geyser', categorySlug: 'appliance-repair', sectionId: 'geyser', imageUrl: cdnImage('geysercheckup-booknow') },
     ],
   },
+  {
+    id: 'daily-labour',
+    title: 'Daily Labour',
+    iconKey: 'Users',
+    sortOrder: 40,
+    services: [
+      {
+        id: 'daily-labour',
+        label: 'Daily Labour',
+        categorySlug: 'daily-labour',
+        imageUrl: cdnImage('hourly-based'),
+      },
+    ],
+  },
 ];
-

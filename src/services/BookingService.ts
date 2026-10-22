@@ -75,6 +75,11 @@ import {
   resolveTaskStartForCancellationPolicy,
 } from './cancellation/cancellationContext';
 import { config } from '../config/env';
+import {
+  DAILY_LABOUR_ACTIVE,
+  DAILY_LABOUR_CATEGORY,
+  DAILY_LABOUR_OPTIONS,
+} from '../constants/dailyLabour';
 import type { BookingFulfillmentType, BookingServiceRecipient } from '../models/BookingOrder';
 import {
   isHelperAssignedOnTask,
@@ -1199,6 +1204,37 @@ export class BookingService {
         schedule: schedule ?? undefined,
       };
     });
+
+    const dailyLabourLines = resolvedLinesWithSchedule.filter(
+      (line) => line.categorySlug === DAILY_LABOUR_CATEGORY.slug,
+    );
+    if (dailyLabourLines.length > 0) {
+      if (!DAILY_LABOUR_ACTIVE) {
+        throw new BadRequestError('Daily Labour is currently unavailable for booking.');
+      }
+      if (resolvedLinesWithSchedule.length !== 1) {
+        throw new BadRequestError('Daily Labour must be booked as a separate booking.');
+      }
+      const dailyLine = dailyLabourLines[0];
+      const schedule = dailyLine.schedule;
+      const startMinutes = schedule
+        ? parseSlotMinutes(schedule.scheduledTimeStart || '')
+        : null;
+      const endMinutes = schedule
+        ? parseSlotMinutes(schedule.scheduledTimeEnd || '')
+        : null;
+      const option = DAILY_LABOUR_OPTIONS.find((item) => item.slug === dailyLine.packageSlug);
+      if (
+        !schedule ||
+        startMinutes === null ||
+        endMinutes === null ||
+        !option ||
+        schedule.durationMinutes !== option.durationMinutes ||
+        endMinutes - startMinutes !== option.durationMinutes
+      ) {
+        throw new BadRequestError('Daily Labour booking duration is invalid.');
+      }
+    }
 
     if (!skipSlotChecks) {
       for (const line of resolvedLinesWithSchedule) {
@@ -2388,6 +2424,7 @@ export class BookingService {
       lat?: number;
       lng?: number;
       preferredHelperGender?: 'any' | 'male' | 'female';
+      requiredPartnerCategory?: string;
     },
   ) {
     const durationMinutes =
@@ -2424,6 +2461,7 @@ export class BookingService {
         lng: Number.isFinite(lng) ? lng : undefined,
         hourlyHelper: opts?.availabilityMode === 'hourly',
         preferredHelperGender: opts?.preferredHelperGender,
+        requiredPartnerCategory: opts?.requiredPartnerCategory,
         allowedPartnerUids: hourlyEligiblePartnerUids,
       }),
     ]);
@@ -2431,9 +2469,11 @@ export class BookingService {
       date: String(date || '').trim(),
       city: String(city || '').trim(),
       ...occupied,
-      partnerCapacityBySlot: opts?.availabilityMode === 'hourly'
-        ? partnerCapacityBySlot
-        : {},
+      partnerCapacityBySlot:
+        opts?.availabilityMode === 'hourly' ||
+        opts?.requiredPartnerCategory === DAILY_LABOUR_CATEGORY.partnerCategory
+          ? partnerCapacityBySlot
+          : {},
     };
   }
 

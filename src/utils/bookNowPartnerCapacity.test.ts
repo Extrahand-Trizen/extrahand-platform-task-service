@@ -10,6 +10,7 @@ import {
   isPartnerTaskBlockingStatus,
   locationKeysForPartnerCapacity,
   partnerMatchesHourlyHelperCategory,
+  partnerMatchesRequiredCapacityCategory,
   partnerWorkAreasMatchLocationKeys,
   workShiftsCoverInterval,
 } from './bookNowSlotAvailability';
@@ -94,6 +95,19 @@ assert.strictEqual(
   true,
 );
 assert.strictEqual(partnerWorkAreasMatchLocationKeys(['Yapral'], ['Bengaluru']), false);
+assert.strictEqual(partnerMatchesRequiredCapacityCategory(['other'], 'daily-labour'), true);
+assert.strictEqual(
+  partnerMatchesRequiredCapacityCategory([{ id: 'other' }], 'daily-labour'),
+  true,
+);
+assert.strictEqual(
+  partnerMatchesRequiredCapacityCategory(['daily-labour'], 'daily-labour'),
+  true,
+);
+assert.strictEqual(
+  partnerMatchesRequiredCapacityCategory(['cleaning'], 'daily-labour'),
+  false,
+);
 
 {
   const keys = locationKeysForPartnerCapacity({

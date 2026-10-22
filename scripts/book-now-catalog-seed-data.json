@@ -132,35 +132,11 @@
     },
     {
       "catalogId": "kitchen",
-      "packageId": "deep-kitchen-clean",
-      "name": "Deep Kitchen Clean",
-      "basePrice": 899,
-      "durationMinutes": 180,
-      "description": "Standard + degreasing, hob, sink descaling."
-    },
-    {
-      "catalogId": "kitchen",
-      "packageId": "empty-kitchen-clean",
-      "name": "Empty Kitchen Clean",
-      "basePrice": 799,
-      "durationMinutes": 150,
-      "description": "Pre move-in/out."
-    },
-    {
-      "catalogId": "kitchen",
       "packageId": "kitchen-chimney-clean",
       "name": "Kitchen Chimney Clean",
       "basePrice": 499,
       "durationMinutes": 60,
       "description": "Filter baffle or mesh clean."
-    },
-    {
-      "catalogId": "kitchen",
-      "packageId": "post-reno-kitchen-clean",
-      "name": "Post Reno Kitchen Clean",
-      "basePrice": 999,
-      "durationMinutes": 180,
-      "description": "Remove construction dust, grout, paint spots."
     },
     {
       "catalogId": "sofa",
