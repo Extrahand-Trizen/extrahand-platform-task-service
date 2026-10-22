@@ -1,4 +1,4 @@
-export const DAILY_LABOUR_ACTIVE = false;
+export const DAILY_LABOUR_ACTIVE = true;
 
 export const DAILY_LABOUR_CATEGORY = {
   slug: 'daily-labour',
