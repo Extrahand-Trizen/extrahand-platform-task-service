@@ -58,14 +58,27 @@ export class CompletionService {
       throw new ForbiddenError('Only the assigned performer can submit completion proof');
     }
 
+    const taskStatus = String(task.status || '').trim().toLowerCase();
     const allowedSubmitStatuses = ['in_progress', 'started', 'review'];
+    const isAssignedButAlreadyStarted =
+      taskStatus === 'assigned' && Boolean(task.startedAt);
     const isRevisionResubmit =
       task.completionStatus === 'revision_requested' &&
-      String(task.status) === 'in_progress';
-    if (!allowedSubmitStatuses.includes(String(task.status)) && !isRevisionResubmit) {
+      taskStatus === 'in_progress';
+    if (
+      !allowedSubmitStatuses.includes(taskStatus) &&
+      !isAssignedButAlreadyStarted &&
+      !isRevisionResubmit
+    ) {
       throw new BadRequestError(
         'Completion proof can only be submitted while work is in progress or under revision'
       );
+    }
+    if (isAssignedButAlreadyStarted) {
+      logger.warn('[CompletionService] Accepting proof for assigned task with a recorded start time', {
+        taskId,
+        startedAt: task.startedAt,
+      });
     }
 
     const normalizedProofUrls = Array.isArray(proofUrls)
