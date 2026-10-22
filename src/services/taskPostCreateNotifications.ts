@@ -128,7 +128,10 @@ export async function runPostCreateNotifications(
       });
     }
 
-    // Email: task posted confirmation â†’ requester
+    const posterUid = resolvePosterUid(uid, requesterProfile);
+    const isBookNow = task.bookingSource === 'book_now';
+
+    // Email: task posted confirmation → requester
     try {
       if (requesterProfile?.email) {
         logger.debug(`[TaskService.postCreateNotifications] Sending task_posted_confirmation email to ${requesterProfile.email}`);
@@ -160,32 +163,6 @@ export async function runPostCreateNotifications(
             category: 'taskUpdates'
           });
         }
-
-        // ðŸ“¬ In-App Notification: task posted confirmation â†’ requester
-        try {
-          await InAppNotificationClient.send({
-            userId: requesterProfile.uid,
-            title: 'Work Posted Successfully',
-            body: `Your task "${task.title}" is now visible to taskers`,
-            category: 'taskUpdates',
-            type: 'success',
-            data: {
-              taskId: task._id.toString(),
-              taskUrl,
-              budget: task.budget?.amount
-            }
-          });
-          logger.info(`[TaskService.postCreateNotifications] In-app notification sent to requester`, {
-            taskId: task._id,
-            userId: requesterProfile.uid
-          });
-        } catch (inAppError) {
-          logger.warn('Failed to send in-app notification to requester', {
-            taskId: task._id,
-            userId: requesterProfile.uid,
-            error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
-          });
-        }
       } else {
         logger.debug(`[TaskService.postCreateNotifications] No email found for requester profile`, {
           requesterId: task.requesterId
@@ -199,7 +176,71 @@ export async function runPostCreateNotifications(
       });
     }
 
-    const posterUid = resolvePosterUid(uid, requesterProfile);
+    // In-app & Push notification confirmation → requester
+    if (posterUid) {
+      const taskUrl = `${config.WEB_APP_URL}/tasks/${task._id}`;
+      const confirmTitle = isBookNow ? 'Booking Confirmed' : 'Work Posted Successfully';
+      const confirmBody = isBookNow
+        ? `Your booking for "${task.title}" has been placed.`
+        : `Your task "${task.title}" is now visible to taskers`;
+
+      try {
+        await InAppNotificationClient.send({
+          userId: posterUid,
+          title: confirmTitle,
+          body: confirmBody,
+          category: 'taskUpdates',
+          type: 'success',
+          data: {
+            taskId: task._id.toString(),
+            taskUrl,
+            budget: task.budget?.amount,
+            bookingSource: task.bookingSource,
+            action: isBookNow ? 'booking_confirmed' : 'task_posted',
+            recipientRole: 'customer',
+          }
+        });
+        logger.info(`[TaskService.postCreateNotifications] In-app notification sent to requester`, {
+          taskId: task._id,
+          userId: posterUid
+        });
+      } catch (inAppError) {
+        logger.warn('Failed to send in-app notification to requester', {
+          taskId: task._id,
+          userId: posterUid,
+          error: inAppError instanceof Error ? inAppError.message : 'Unknown error'
+        });
+      }
+
+      try {
+        await NotificationClient.send({
+          eventKey: 'TASK_UPDATED',
+          category: 'taskUpdates',
+          actorId: 'system',
+          recipients: [posterUid],
+          entity: { type: 'task', id: task._id.toString() },
+          title: confirmTitle,
+          body: confirmBody,
+          data: {
+            taskId: task._id.toString(),
+            title: task.title,
+            bookingSource: task.bookingSource,
+            action: isBookNow ? 'booking_confirmed' : 'task_posted',
+            recipientRole: 'customer',
+          },
+        });
+        logger.info(`[TaskService.postCreateNotifications] Push notification sent to requester`, {
+          taskId: task._id,
+          userId: posterUid
+        });
+      } catch (pushError) {
+        logger.warn('Failed to send push notification to requester', {
+          taskId: task._id,
+          userId: posterUid,
+          error: pushError instanceof Error ? pushError.message : 'Unknown error'
+        });
+      }
+    }
 
     const skillMatchCategories = Array.from(
       new Set(
@@ -714,7 +755,7 @@ export async function runPostCreateNotifications(
                 data: withHelperAlertData({
                   taskId: task._id.toString(),
                   category: task.categoryLabel || task.category,
-                }, posterUid),
+                }, posterUid, task.bookingSource),
               },
               categoryMatchedUsers
             );
@@ -835,7 +876,7 @@ export async function runPostCreateNotifications(
                 taskUrl,
                 route: taskRoute,
                 actionUrl: taskRoute,
-              }, posterUid),
+              }, posterUid, task.bookingSource),
             },
             nearbyAndSkill,
           );
@@ -890,7 +931,7 @@ export async function runPostCreateNotifications(
                 budget: task.budget?.amount,
                 locationLabel,
                 skillMatchCategory: skillMatchCategory || task.categoryLabel || task.category,
-              }, posterUid),
+              }, posterUid, task.bookingSource),
             });
           } catch (inAppError) {
             logger.warn('[TaskService.postCreateNotifications] NEARBY_ALERTS - In-app failed', {

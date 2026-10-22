@@ -232,6 +232,8 @@ export class QcOrderAutoAssignService {
           shopName: order.shopName,
           bookingSource: 'quick_commerce',
           eventKey: 'BOOK_NOW_PARTNER_ASSIGNED',
+          action: 'assigned',
+          recipientRole: 'partner',
           distance: partner.distKm != null ? Number(partner.distKm.toFixed(1)) : undefined,
           partnerName: partner.name,
         },
