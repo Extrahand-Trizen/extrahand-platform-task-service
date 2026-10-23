@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import Task, { ITask } from '../models/Task';
 import logger from '../config/logger';
 import { BookNowAutoAssignService } from '../services/BookNowAutoAssignService';
+import { undispatchedBookNowOfferFilter } from '../utils/bookNowOfferState';
 
 export class BookNowOfferScheduler {
   private static isInitialized = false;
@@ -31,10 +32,7 @@ export class BookNowOfferScheduler {
         assigneeUid: null,
         partnerId: null,
         partnerUid: null,
-        $or: [
-          { assignmentOffer: { $exists: false } },
-          { assignmentOffer: null },
-        ],
+        ...undispatchedBookNowOfferFilter(),
       })
         .sort({ createdAt: 1 })
         .limit(250);

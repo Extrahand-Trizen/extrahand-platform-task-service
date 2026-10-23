@@ -21,6 +21,10 @@ import { workShiftsCoverInterval } from '../utils/bookNowSlotAvailability';
 import { buildHourlyServiceAreaCandidates } from '../utils/hourlyHelperServiceArea';
 import { matchEligibleHourlyHelperArea } from './HourlyHelperAvailabilityService';
 import { BadRequestError, ForbiddenError } from '../errors/AppError';
+import {
+  hasBookNowOfferStarted,
+  undispatchedBookNowOfferFilter,
+} from '../utils/bookNowOfferState';
 
 const OFFER_WINDOW_MS = 30 * 60 * 1000;
 const OFFER_STAGES = ['preferred', 'area_rule', 'all'] as const;
@@ -1269,10 +1273,7 @@ export class BookNowAutoAssignService {
       filter['assignmentOffer.stage'] = expectedStage;
       filter['assignmentOffer.expiresAt'] = expectedExpiresAt;
     } else {
-      filter.$or = [
-        { assignmentOffer: { $exists: false } },
-        { assignmentOffer: null },
-      ];
+      Object.assign(filter, undispatchedBookNowOfferFilter());
     }
 
     const updated = await Task.findOneAndUpdate(
@@ -1333,7 +1334,7 @@ export class BookNowAutoAssignService {
   ): Promise<AutoAssignResult> {
     const taskId = new mongoose.Types.ObjectId(String(task._id));
     const existing = await Task.findById(taskId).select('assignmentOffer status').lean();
-    if (existing?.assignmentOffer) {
+    if (existing?.assignmentOffer && hasBookNowOfferStarted(existing.assignmentOffer)) {
       if (existing.assignmentOffer.stage === 'closed') {
         return {
           assigned: false,
@@ -1388,10 +1389,7 @@ export class BookNowAutoAssignService {
         status: 'open',
         assigneeUid: null,
         partnerUid: null,
-        $or: [
-          { assignmentOffer: { $exists: false } },
-          { assignmentOffer: null },
-        ],
+        ...undispatchedBookNowOfferFilter(),
       },
       { $set: { dispatchLogs, dispatchProgress } },
     );
@@ -1410,7 +1408,7 @@ export class BookNowAutoAssignService {
       );
       if (!installed) {
         const latest = await Task.findById(taskId).select('status assignmentOffer').lean();
-        if (latest?.assignmentOffer) {
+        if (hasBookNowOfferStarted(latest?.assignmentOffer)) {
           return { assigned: false, offered: true, dispatchLogs };
         }
         return {
@@ -1434,10 +1432,7 @@ export class BookNowAutoAssignService {
         status: 'open',
         assigneeUid: null,
         partnerUid: null,
-        $or: [
-          { assignmentOffer: { $exists: false } },
-          { assignmentOffer: null },
-        ],
+        ...undispatchedBookNowOfferFilter(),
       },
       {
         $set: {

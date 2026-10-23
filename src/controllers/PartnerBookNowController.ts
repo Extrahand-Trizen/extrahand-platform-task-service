@@ -15,6 +15,7 @@ import { QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, QC_DEFAULT_DELIVERY_FEE_INR, haver
 import { PaymentClient } from '../services/PaymentClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { BookNowAutoAssignService } from '../services/BookNowAutoAssignService';
+import { undispatchedBookNowOfferFilter } from '../utils/bookNowOfferState';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -77,10 +78,7 @@ export class PartnerBookNowController {
 
     const andConditions: Record<string, any>[] = [
       {
-        $or: [
-          { assignmentOffer: { $exists: false } },
-          { assignmentOffer: null },
-        ],
+        ...undispatchedBookNowOfferFilter(),
       },
       partnerMatch.category,
       partnerMatch.workArea,
