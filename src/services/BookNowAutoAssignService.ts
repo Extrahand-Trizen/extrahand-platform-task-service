@@ -1130,7 +1130,7 @@ export class BookNowAutoAssignService {
       recipients: recipientUids,
       entity: { type: 'task', id: String(task._id) },
       title: 'New Book Now work offer',
-      body: `${task.title || 'A new work'} is available. Accept or reject within 30 minutes.`,
+      body: `${task.title || 'A new work'} is available.`,
       data: {
         taskId: String(task._id),
         title: task.title,
