@@ -61,11 +61,35 @@ export class BookNowOfferScheduler {
         }
       }
 
+      const timedOutTasks = await Task.find({
+        bookingSource: 'book_now',
+        status: 'open',
+        assigneeId: null,
+        assigneeUid: null,
+        partnerId: null,
+        partnerUid: null,
+        'assignmentOffer.stage': 'closed',
+        'dispatchLogs.candidates.responseStatus': 'timed_out',
+      })
+        .select('_id')
+        .limit(250)
+        .lean();
+
+      for (const task of timedOutTasks) {
+        try {
+          await BookNowAutoAssignService.restoreTimedOutOffer(String(task._id));
+        } catch (error) {
+          logger.error('[BookNowOfferScheduler] Could not restore timed-out partner offers', {
+            taskId: String(task._id),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
       const activeOfferTasks = await Task.find({
         bookingSource: 'book_now',
         status: 'open',
         'assignmentOffer.stage': { $in: ['preferred', 'area_rule', 'all'] },
-        'assignmentOffer.expiresAt': { $gt: now },
         'assignmentOffer.recipientUids.0': { $exists: true },
       })
         .select('_id')
@@ -74,31 +98,14 @@ export class BookNowOfferScheduler {
 
       for (const task of activeOfferTasks) {
         try {
-          await BookNowAutoAssignService.retryUnnotifiedOffers(String(task._id));
+          const taskId = String(task._id);
+          if (await BookNowAutoAssignService.closeOffersAtScheduledStart(taskId)) {
+            continue;
+          }
+          await BookNowAutoAssignService.advanceOfferStage(taskId);
+          await BookNowAutoAssignService.retryUnnotifiedOffers(taskId);
         } catch (error) {
           logger.error('[BookNowOfferScheduler] Could not retry partner offer notification', {
-            taskId: String(task._id),
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-
-      const tasks = await Task.find({
-        bookingSource: 'book_now',
-        status: 'open',
-        'assignmentOffer.stage': { $in: ['preferred', 'area_rule', 'all'] },
-        'assignmentOffer.expiresAt': { $lte: now },
-      })
-        .select('_id')
-        .sort({ 'assignmentOffer.expiresAt': 1 })
-        .limit(250)
-        .lean();
-
-      for (const task of tasks) {
-        try {
-          await BookNowAutoAssignService.advanceOfferStage(String(task._id));
-        } catch (error) {
-          logger.error('[BookNowOfferScheduler] Could not advance partner offers', {
             taskId: String(task._id),
             error: error instanceof Error ? error.message : String(error),
           });

@@ -26,14 +26,41 @@ import {
   undispatchedBookNowOfferFilter,
 } from '../utils/bookNowOfferState';
 
-const OFFER_WINDOW_MS = 30 * 60 * 1000;
 const OFFER_STAGES = ['preferred', 'area_rule', 'all'] as const;
 type OfferStage = (typeof OFFER_STAGES)[number];
 type DispatchCurrentStage = OfferStage | 'assigned' | 'closed';
 const SUPPORT_ESCALATION_MS = 2 * 60 * 60 * 1000;
 
-export function shouldNotifyOfferStage(stage: OfferStage | 'closed'): boolean {
-  return stage !== 'closed';
+export function getBookNowScheduledStartAt(task: ITask): Date | null {
+  if (!task.scheduledDate) return null;
+  const dateKey = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(task.scheduledDate));
+  const slotStartLabels: Record<string, string> = {
+    morning: '9:00 AM',
+    midday: '1:00 PM',
+    afternoon: '2:30 PM',
+    evening: '6:00 PM',
+  };
+  const startLabel =
+    String(task.scheduledTimeStart || '').trim() ||
+    slotStartLabels[String(task.timeSlot || '').toLowerCase()] ||
+    '';
+  const match = startLabel.match(/^(\d{1,2}):?(\d{2})?\s*(AM|PM)$/i);
+  if (!match) return null;
+  let hours = Number(match[1]);
+  const minutes = Number(match[2] || 0);
+  if (match[3].toUpperCase() === 'PM' && hours < 12) hours += 12;
+  if (match[3].toUpperCase() === 'AM' && hours === 12) hours = 0;
+  return new Date(`${dateKey}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00+05:30`);
+}
+
+export function isBookNowOfferBeforeScheduledStart(task: ITask, now = new Date()): boolean {
+  const scheduledStart = getBookNowScheduledStartAt(task);
+  return !scheduledStart || now < scheduledStart;
 }
 
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
@@ -410,6 +437,39 @@ export interface EligiblePartner {
   workAreaDistKm: number;
   gender?: string | null;
   shiftTiming?: string;
+}
+
+export function getFirstAvailableOfferStage(
+  tiers: Record<OfferStage, EligiblePartner[]>,
+): OfferStage | undefined {
+  return OFFER_STAGES.find((stage) => tiers[stage].length > 0);
+}
+
+export function getAllBookNowOfferRecipients(
+  tiers: Record<OfferStage, EligiblePartner[]>,
+): EligiblePartner[] {
+  const recipients = new Map<string, EligiblePartner>();
+  for (const stage of OFFER_STAGES) {
+    for (const partner of tiers[stage]) recipients.set(partner.uid, partner);
+  }
+  return Array.from(recipients.values());
+}
+
+export function mergeActiveOfferRecipients(
+  activeRecipientUids: string[],
+  eligiblePartners: EligiblePartner[],
+  newlyNotifiedRecipients: EligiblePartner[],
+): EligiblePartner[] {
+  const eligibleByUid = new Map(eligiblePartners.map((partner) => [partner.uid, partner]));
+  const recipients = new Map<string, EligiblePartner>();
+  for (const uid of activeRecipientUids) {
+    const partner = eligibleByUid.get(uid);
+    if (partner) recipients.set(uid, partner);
+  }
+  for (const partner of newlyNotifiedRecipients) {
+    recipients.set(partner.uid, partner);
+  }
+  return Array.from(recipients.values());
 }
 
 export function filterTeamPostedOfferTiers(
@@ -929,15 +989,17 @@ export class BookNowAutoAssignService {
         return {
           ...candidate,
           responseStatus,
-          ...(responseStatus === 'accepted'
-            ? { status: 'assigned' as const, respondedAt: at }
-            : responseStatus === 'rejected'
-              ? { status: 'declined' as const, respondedAt: at }
-              : responseStatus === 'timed_out'
-                ? { status: 'timed_out' as const, respondedAt: at }
-                : responseStatus === 'closed'
-                  ? { respondedAt: at }
-                  : {}),
+          ...(responseStatus === 'pending'
+            ? { status: 'eligible' as const, respondedAt: null }
+            : responseStatus === 'accepted'
+              ? { status: 'assigned' as const, respondedAt: at }
+              : responseStatus === 'rejected'
+                ? { status: 'declined' as const, respondedAt: at }
+                : responseStatus === 'timed_out'
+                  ? { status: 'timed_out' as const, respondedAt: at }
+                  : responseStatus === 'closed'
+                    ? { respondedAt: at }
+                    : {}),
         };
       });
       const uniqueCandidates = new Map(
@@ -1115,7 +1177,6 @@ export class BookNowAutoAssignService {
     task: ITask,
     stage: OfferStage,
     recipientUids: string[],
-    expiresAt: Date,
   ): Promise<string[]> {
     if (!recipientUids.length) return [];
     recipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
@@ -1130,7 +1191,7 @@ export class BookNowAutoAssignService {
       recipients: recipientUids,
       entity: { type: 'task', id: String(task._id) },
       title: 'New Book Now work offer',
-      body: `${task.title || 'A new work'} is available. Accept or reject within 30 minutes.`,
+      body: `${task.title || 'A new work'} is available.`,
       data: {
         taskId: String(task._id),
         title: task.title,
@@ -1141,7 +1202,6 @@ export class BookNowAutoAssignService {
         action: 'book_now_offer',
         recipientRole: 'partner',
         offerStage: stage,
-        offerExpiresAt: expiresAt.toISOString(),
         amount:
           typeof task.budget === 'object' && task.budget
             ? Number(task.budget.amount || 0)
@@ -1157,7 +1217,6 @@ export class BookNowAutoAssignService {
 
   private static async recordOfferNotifications(
     taskId: mongoose.Types.ObjectId,
-    stage: OfferStage,
     deliveredUids: string[],
     notifiedAt: Date,
   ): Promise<void> {
@@ -1176,9 +1235,6 @@ export class BookNowAutoAssignService {
         $set: {
           'dispatchLogs.$[area].candidates.$[candidate].notifiedAt': notifiedAt,
         },
-        $inc: {
-          'dispatchProgress.stages.$[progressStage].notifiedCount': deliveredUids.length,
-        },
       },
       {
         arrayFilters: [
@@ -1187,13 +1243,20 @@ export class BookNowAutoAssignService {
             'candidate.partnerUid': { $in: deliveredUids },
             'candidate.notifiedAt': null,
           },
-          { 'progressStage.stage': stage },
         ],
       },
     );
+    const updatedTask = await Task.findById(taskId).select('dispatchLogs dispatchProgress').lean();
+    const refreshedProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+      updatedTask?.dispatchProgress,
+      updatedTask?.dispatchLogs || [],
+    );
     await Task.updateOne(
-      { _id: taskId, 'assignmentOffer.stage': stage },
-      { $addToSet: { 'assignmentOffer.notifiedPartnerUids': { $each: deliveredUids } } },
+      { _id: taskId },
+      {
+        ...(refreshedProgress ? { $set: { dispatchProgress: refreshedProgress } } : {}),
+        $addToSet: { 'assignmentOffer.notifiedPartnerUids': { $each: deliveredUids } },
+      },
     );
   }
 
@@ -1205,17 +1268,32 @@ export class BookNowAutoAssignService {
     previouslyNotifiedUids: string[],
     rejectedPartnerUids: string[],
     expectedStage?: OfferStage | 'closed',
-    expectedExpiresAt?: Date,
+    expectedExpiresAt?: Date | null,
     completedStageUids: string[] = [],
-    completedStageResponseStatus: 'timed_out' | 'closed' = 'timed_out',
+    completedStageResponseStatus: 'timed_out' | 'closed' = 'closed',
     notificationRecipients?: EligiblePartner[],
+    expiresAtOverride?: Date | null,
+    preservedRecipientUids: string[] = [],
   ): Promise<boolean> {
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + OFFER_WINDOW_MS);
-    const recipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
+    const expiresAt = expiresAtOverride !== undefined
+      ? expiresAtOverride
+      : stage === 'all'
+        ? null
+        : new Date(now.getTime() + 30 * 60 * 1000);
+    const filteredRecipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
       task,
       recipients.map((partner) => partner.uid),
       stage,
+    );
+    const allowedPreservedRecipientUids =
+      await BookNowAutoAssignService.filterTeamPostedRecipientUids(
+        task,
+        preservedRecipientUids,
+        stage,
+      );
+    const recipientUids = Array.from(
+      new Set([...filteredRecipientUids, ...allowedPreservedRecipientUids]),
     );
     const notificationRecipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
       task,
@@ -1243,7 +1321,7 @@ export class BookNowAutoAssignService {
       task.dispatchProgress,
       stage,
       now,
-      expiresAt,
+      expiresAt || undefined,
     );
     for (const progressStage of dispatchProgress.stages) {
       if (progressStage.stage === stage) continue;
@@ -1269,9 +1347,9 @@ export class BookNowAutoAssignService {
       assigneeUid: null,
       partnerUid: null,
     };
-    if (expectedStage && expectedExpiresAt) {
+    if (expectedStage) {
       filter['assignmentOffer.stage'] = expectedStage;
-      filter['assignmentOffer.expiresAt'] = expectedExpiresAt;
+      filter['assignmentOffer.expiresAt'] = expectedExpiresAt ?? null;
     } else {
       Object.assign(filter, undispatchedBookNowOfferFilter());
     }
@@ -1300,12 +1378,10 @@ export class BookNowAutoAssignService {
       task,
       stage,
       notificationRecipientUids,
-      expiresAt,
     );
     if (deliveredUids.length) {
       await BookNowAutoAssignService.recordOfferNotifications(
         taskId,
-        stage,
         deliveredUids,
         now,
       );
@@ -1372,15 +1448,16 @@ export class BookNowAutoAssignService {
       isTeamPosted,
       excludedPhones,
     );
-    const firstStage = OFFER_STAGES.find(
-      (stage) => notificationTiers[stage].length > 0 && shouldNotifyOfferStage(stage),
-    );
+    const firstStage = getFirstAvailableOfferStage(notificationTiers);
     const dispatchStartedAt = new Date();
     const dispatchProgress = BookNowAutoAssignService.buildDispatchProgress(
       dispatchLogs,
       undefined,
       firstStage || 'closed',
       dispatchStartedAt,
+      firstStage && firstStage !== 'all'
+        ? new Date(dispatchStartedAt.getTime() + 30 * 60 * 1000)
+        : undefined,
     );
     const taskWithDispatch = { ...task, dispatchLogs, dispatchProgress } as ITask;
     await Task.updateOne(
@@ -1394,14 +1471,12 @@ export class BookNowAutoAssignService {
       { $set: { dispatchLogs, dispatchProgress } },
     );
 
-    for (const stage of OFFER_STAGES) {
-      const recipients = notificationTiers[stage];
-      if (!shouldNotifyOfferStage(stage)) continue;
-      if (!recipients.length) continue;
+    if (firstStage) {
+      const recipients = notificationTiers[firstStage];
       const installed = await BookNowAutoAssignService.installOfferStage(
         taskId,
         taskWithDispatch,
-        stage,
+        firstStage,
         recipients,
         [],
         [],
@@ -1420,7 +1495,7 @@ export class BookNowAutoAssignService {
       return {
         assigned: false,
         offered: true,
-        reason: `Offers sent to ${stage === 'area_rule' ? 'area-rule' : stage} partners`,
+        reason: `Offers sent to ${firstStage === 'area_rule' ? 'area-rule' : firstStage} partners`,
         dispatchLogs,
       };
     }
@@ -1443,7 +1518,7 @@ export class BookNowAutoAssignService {
             notifiedPartnerUids: [],
             rejectedPartnerUids: [],
             notifiedAt: closedAt,
-            expiresAt: closedAt,
+            expiresAt: null,
           },
           dispatchProgress: BookNowAutoAssignService.buildDispatchProgress(
             dispatchLogs,
@@ -1488,6 +1563,9 @@ export class BookNowAutoAssignService {
     if (task.status !== 'open') {
       return { assigned: false, reason: 'Work is not open for partner offers' };
     }
+    if (!isBookNowOfferBeforeScheduledStart(task)) {
+      return { assigned: false, reason: 'Scheduled work start time has passed' };
+    }
     if (task.assigneeId || task.assigneeUid || task.partnerId || task.partnerUid) {
       return { assigned: false, reason: 'Work already has an assigned partner' };
     }
@@ -1495,53 +1573,19 @@ export class BookNowAutoAssignService {
     return BookNowAutoAssignService.startOfferFlow(task, preferredPartnerUid);
   }
 
-  static async advanceOfferStage(taskIdValue: string): Promise<boolean> {
+  static async closeOffersAtScheduledStart(taskIdValue: string): Promise<boolean> {
     if (!mongoose.Types.ObjectId.isValid(taskIdValue)) return false;
     const taskId = new mongoose.Types.ObjectId(taskIdValue);
     const task = await Task.findById(taskId).lean() as ITask | null;
     if (!task || task.status !== 'open' || !task.assignmentOffer) return false;
-    const currentOffer = task.assignmentOffer;
-    const expiredStage = currentOffer.stage;
-    if (expiredStage === 'closed') return false;
+    const scheduledStart = getBookNowScheduledStartAt(task);
+    if (!scheduledStart || new Date() < scheduledStart) return false;
+
     const now = new Date();
-    if (currentOffer.expiresAt > now) return false;
-
-    const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
-    const { tiers } = await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
-    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
-    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
-    const notificationTiers = getBookNowNotificationTiers(
-      tiers,
-      isTeamPosted,
-      excludedPhones,
-    );
-    const currentStageIndex = OFFER_STAGES.indexOf(expiredStage);
-    for (let index = currentStageIndex + 1; index < OFFER_STAGES.length; index += 1) {
-      const stage = OFFER_STAGES[index];
-      if (!shouldNotifyOfferStage(stage)) continue;
-      const notified = new Set(currentOffer.notifiedPartnerUids || []);
-      const recipients = notificationTiers[stage].filter(
-        (partner) => !notified.has(partner.uid),
-      );
-      if (!recipients.length) continue;
-      const advanced = await BookNowAutoAssignService.installOfferStage(
-        taskId,
-        task,
-        stage,
-        recipients,
-        currentOffer.notifiedPartnerUids || [],
-        currentOffer.rejectedPartnerUids || [],
-        expiredStage,
-        currentOffer.expiresAt,
-        currentOffer.recipientUids || [],
-      );
-      return advanced;
-    }
-
     const dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
       task.dispatchLogs || [],
-      currentOffer.recipientUids || [],
-      'timed_out',
+      task.assignmentOffer.recipientUids || [],
+      'closed',
       now,
     );
     const dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
@@ -1550,45 +1594,113 @@ export class BookNowAutoAssignService {
     );
     if (dispatchProgress) {
       dispatchProgress.currentStage = 'closed';
-      dispatchProgress.stages = dispatchProgress.stages.map((stageProgress) => {
-        const stageIndex = OFFER_STAGES.indexOf(stageProgress.stage);
-        const currentStageIndex = OFFER_STAGES.indexOf(expiredStage);
-        const status =
-          stageProgress.stage === expiredStage
-            ? 'completed'
-            : stageIndex < currentStageIndex && stageProgress.eligibleCount > 0
-              ? 'completed'
-              : 'skipped';
-        return {
-          ...stageProgress,
-          status,
-          completedAt: stageProgress.completedAt || now,
-        };
-      });
+      dispatchProgress.stages = dispatchProgress.stages.map((stage) => ({
+        ...stage,
+        status: stage.status === 'in_progress' ? 'completed' : stage.status,
+        completedAt: stage.completedAt || now,
+      }));
     }
-    const closed = await Task.updateOne(
+    const result = await Task.updateOne(
       {
         _id: taskId,
         status: 'open',
-        'assignmentOffer.stage': expiredStage,
-        'assignmentOffer.expiresAt': currentOffer.expiresAt,
+        'assignmentOffer.stage': task.assignmentOffer.stage,
       },
       {
         $set: {
           'assignmentOffer.stage': 'closed',
           'assignmentOffer.recipientUids': [],
+          'assignmentOffer.expiresAt': null,
           dispatchLogs,
           ...(dispatchProgress ? { dispatchProgress } : {}),
         },
       },
     );
-    if (closed.modifiedCount > 0) {
-      logger.warn('[BookNowAutoAssign] All partner offer tiers expired without acceptance', {
-        taskId: String(taskId),
-        notifiedPartnerCount: currentOffer.notifiedPartnerUids.length,
-      });
+    return result.modifiedCount > 0;
+  }
+
+  static async advanceOfferStage(taskIdValue: string): Promise<boolean> {
+    if (!mongoose.Types.ObjectId.isValid(taskIdValue)) return false;
+    const taskId = new mongoose.Types.ObjectId(taskIdValue);
+    const task = await Task.findById(taskId).lean() as ITask | null;
+    if (
+      !task ||
+      task.status !== 'open' ||
+      !task.assignmentOffer ||
+      task.assignmentOffer.stage === 'closed'
+    ) {
+      return false;
     }
-    return closed.modifiedCount > 0;
+    if (await BookNowAutoAssignService.closeOffersAtScheduledStart(taskIdValue)) {
+      return true;
+    }
+    const currentOffer = task.assignmentOffer;
+    const currentStageIndex = OFFER_STAGES.indexOf(currentOffer.stage as OfferStage);
+    if (
+      currentStageIndex < 0 ||
+      currentStageIndex >= OFFER_STAGES.length - 1 ||
+      !currentOffer.expiresAt ||
+      currentOffer.expiresAt > new Date()
+    ) {
+      return false;
+    }
+
+    const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+    const { tiers, configuredStageByUid } =
+      await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
+    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
+    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
+    const notificationTiers = getBookNowNotificationTiers(
+      tiers,
+      isTeamPosted,
+      excludedPhones,
+    );
+    const activeUids = new Set(currentOffer.recipientUids || []);
+    const rejectedUids = new Set(currentOffer.rejectedPartnerUids || []);
+    for (let index = currentStageIndex + 1; index < OFFER_STAGES.length; index += 1) {
+      const stage = OFFER_STAGES[index];
+      const newRecipients = notificationTiers[stage].filter(
+        (partner) => !activeUids.has(partner.uid) && !rejectedUids.has(partner.uid),
+      );
+      if (!newRecipients.length) continue;
+
+      const activePendingUids = (currentOffer.recipientUids || []).filter((uid) => {
+        if (rejectedUids.has(uid)) return false;
+        const candidate = (task.dispatchLogs || [])
+          .flatMap((area) => area.candidates)
+          .find((item) => item.partnerUid === uid);
+        return candidate?.responseStatus !== 'rejected';
+      });
+      const allRecipients = mergeActiveOfferRecipients(
+        activePendingUids,
+        eligiblePartners,
+        newRecipients,
+      );
+      const dispatchLogs = BookNowAutoAssignService.tagDispatchStages(
+        task.dispatchLogs || [],
+        tiers,
+        configuredStageByUid,
+      );
+      const nextStageDeadline = stage === 'all'
+        ? null
+        : new Date(Date.now() + 30 * 60 * 1000);
+      return BookNowAutoAssignService.installOfferStage(
+        taskId,
+        { ...task, dispatchLogs } as ITask,
+        stage,
+        allRecipients,
+        currentOffer.notifiedPartnerUids || [],
+        currentOffer.rejectedPartnerUids || [],
+        currentOffer.stage,
+        currentOffer.expiresAt,
+        [],
+        'closed',
+        newRecipients,
+        nextStageDeadline,
+        activePendingUids,
+      );
+    }
+    return false;
   }
 
   static async notifyOfferStageImmediately(
@@ -1604,6 +1716,7 @@ export class BookNowAutoAssignService {
       !task ||
       task.bookingSource !== 'book_now' ||
       task.status !== 'open' ||
+      !isBookNowOfferBeforeScheduledStart(task) ||
       task.assigneeId ||
       task.assigneeUid ||
       task.partnerId ||
@@ -1660,20 +1773,23 @@ export class BookNowAutoAssignService {
         .find((item) => item.partnerUid === uid);
       return candidate?.responseStatus === undefined || candidate.responseStatus === 'pending';
     });
-    const continuingCurrentStage =
-      currentOffer?.stage === stage
-        ? notificationTiers[stage].filter((partner) => activePendingUids.includes(partner.uid))
-        : [];
-    const recipients = [
-      ...continuingCurrentStage,
-      ...newlyNotifiedRecipients.filter(
-        (partner) => !continuingCurrentStage.some((current) => current.uid === partner.uid),
-      ),
-    ];
-    const retainedRecipientUids = new Set(recipients.map((partner) => partner.uid));
-    const recipientsToClose = activePendingUids.filter(
-      (uid) => !retainedRecipientUids.has(uid),
+    const appendToActiveOffer = Boolean(
+      currentOffer &&
+        currentOffer.stage !== 'closed' &&
+        (!currentOffer.expiresAt || currentOffer.expiresAt > new Date()),
     );
+    const recipients = appendToActiveOffer
+      ? mergeActiveOfferRecipients(
+          activePendingUids,
+          eligiblePartners,
+          newlyNotifiedRecipients,
+        )
+      : newlyNotifiedRecipients;
+    const recipientsToClose = appendToActiveOffer
+      ? []
+      : activePendingUids.filter(
+          (uid) => !recipients.some((partner) => partner.uid === uid),
+        );
     const previouslyNotifiedUids = Array.from(
       new Set([
         ...(currentOffer?.notifiedPartnerUids || []),
@@ -1684,15 +1800,17 @@ export class BookNowAutoAssignService {
     const installed = await BookNowAutoAssignService.installOfferStage(
       taskId,
       { ...task, dispatchLogs } as ITask,
-      stage,
+      appendToActiveOffer ? currentOffer!.stage as OfferStage : stage,
       recipients,
       previouslyNotifiedUids,
       rejectedPartnerUids,
       currentOffer?.stage,
-      currentOffer?.expiresAt,
+      currentOffer?.expiresAt ?? null,
       recipientsToClose,
       'closed',
       newlyNotifiedRecipients,
+      appendToActiveOffer ? currentOffer!.expiresAt ?? null : undefined,
+      appendToActiveOffer ? activePendingUids : [],
     );
     if (!installed) {
       throw new BadRequestError('The work changed before notifications could be sent. Refresh and try again.');
@@ -1720,11 +1838,14 @@ export class BookNowAutoAssignService {
     const taskId = new mongoose.Types.ObjectId(taskIdValue);
     const task = await Task.findById(taskId).lean() as ITask | null;
     if (!task || task.status !== 'open' || !task.assignmentOffer) return false;
+    if (!isBookNowOfferBeforeScheduledStart(task)) {
+      await BookNowAutoAssignService.closeOffersAtScheduledStart(taskIdValue);
+      return false;
+    }
 
     const offer = task.assignmentOffer;
     if (
       offer.stage === 'closed' ||
-      offer.expiresAt <= new Date() ||
       !offer.recipientUids?.length
     ) {
       return false;
@@ -1758,18 +1879,15 @@ export class BookNowAutoAssignService {
     if (!recipientUids.length) return false;
 
     const stage = offer.stage;
-    const expiresAt = offer.expiresAt;
     const deliveredUids = await BookNowAutoAssignService.sendOfferNotification(
       task,
       stage,
       recipientUids,
-      expiresAt,
     );
     if (!deliveredUids.length) return false;
 
     await BookNowAutoAssignService.recordOfferNotifications(
       taskId,
-      stage,
       deliveredUids,
       new Date(),
     );
@@ -1779,6 +1897,82 @@ export class BookNowAutoAssignService {
       recipientCount: deliveredUids.length,
     });
     return true;
+  }
+
+  static async restoreTimedOutOffer(taskIdValue: string): Promise<boolean> {
+    if (!mongoose.Types.ObjectId.isValid(taskIdValue)) return false;
+    const taskId = new mongoose.Types.ObjectId(taskIdValue);
+    const task = await Task.findById(taskId).lean() as ITask | null;
+    if (
+      !task ||
+      task.status !== 'open' ||
+      !isBookNowOfferBeforeScheduledStart(task) ||
+      task.assigneeId ||
+      task.assigneeUid ||
+      task.partnerId ||
+      task.partnerUid ||
+      task.assignmentOffer?.stage !== 'closed' ||
+      !(task.dispatchLogs || []).some((area) =>
+        area.candidates.some((candidate) => candidate.responseStatus === 'timed_out'),
+      )
+    ) {
+      return false;
+    }
+
+    const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+    const { tiers, configuredStageByUid } =
+      await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
+    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
+    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
+    const notificationTiers = getBookNowNotificationTiers(
+      tiers,
+      isTeamPosted,
+      excludedPhones,
+    );
+    const rejectedUids = new Set(task.assignmentOffer.rejectedPartnerUids || []);
+    const recipients = getAllBookNowOfferRecipients(notificationTiers).filter(
+      (partner) => !rejectedUids.has(partner.uid),
+    );
+    if (!recipients.length) return false;
+
+    const dispatchLogs = BookNowAutoAssignService.tagDispatchStages(
+      task.dispatchLogs || [],
+      tiers,
+      configuredStageByUid,
+    );
+    const partnersWithConfirmedPush = new Set(
+      dispatchLogs.flatMap((area) =>
+        area.candidates
+          .filter((candidate) => candidate.notifiedAt)
+          .map((candidate) => candidate.partnerUid)
+          .filter((uid): uid is string => Boolean(uid)),
+      ),
+    );
+    const notificationRecipients = recipients.filter(
+      (partner) => !partnersWithConfirmedPush.has(partner.uid),
+    );
+    const restored = await BookNowAutoAssignService.installOfferStage(
+      taskId,
+      { ...task, dispatchLogs } as ITask,
+      'all',
+      recipients,
+      task.assignmentOffer.notifiedPartnerUids || [],
+      task.assignmentOffer.rejectedPartnerUids || [],
+      'closed',
+      task.assignmentOffer.expiresAt ?? null,
+      [],
+      'closed',
+      notificationRecipients,
+      null,
+      [],
+    );
+    if (restored) {
+      logger.info('[BookNowAutoAssign] Restored timed-out offers for persistent all-partner dispatch', {
+        taskId: String(taskId),
+        recipientCount: recipients.length,
+      });
+    }
+    return restored;
   }
 
   static async respondToOffer(
@@ -1798,11 +1992,14 @@ export class BookNowAutoAssignService {
         bookingSource: 'book_now',
         status: 'open',
         'assignmentOffer.recipientUids': partnerUid,
-        'assignmentOffer.expiresAt': { $gt: now },
       };
       const task = await Task.findOne(offerFilter).lean() as ITask | null;
       if (!task?.assignmentOffer) {
         throw new ForbiddenError('This work offer is no longer available to you');
+      }
+      if (!isBookNowOfferBeforeScheduledStart(task)) {
+        await BookNowAutoAssignService.closeOffersAtScheduledStart(taskId);
+        throw new ForbiddenError('This work offer is no longer available because the scheduled start time has passed');
       }
       const dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
         task.dispatchLogs || [],
@@ -1836,10 +2033,13 @@ export class BookNowAutoAssignService {
       bookingSource: 'book_now',
       status: 'open',
       'assignmentOffer.recipientUids': partnerUid,
-      'assignmentOffer.expiresAt': { $gt: new Date() },
     }).lean() as ITask | null;
     if (!task?.assignmentOffer) {
       throw new ForbiddenError('This work offer is no longer available to you');
+    }
+    if (!isBookNowOfferBeforeScheduledStart(task)) {
+      await BookNowAutoAssignService.closeOffersAtScheduledStart(taskId);
+      throw new ForbiddenError('This work offer is no longer available because the scheduled start time has passed');
     }
     const partner = await BookNowAutoAssignService.findPreferredPartnerForTask(
       task,
@@ -1920,7 +2120,6 @@ export class BookNowAutoAssignService {
         assigneeUid: null,
         partnerUid: null,
         'assignmentOffer.recipientUids': partnerUid,
-        'assignmentOffer.expiresAt': { $gt: now },
       },
       {
         $set: {
@@ -2186,8 +2385,11 @@ export class BookNowAutoAssignService {
         if (!categoryMatches) continue;
 
         const partnerName = (p.name || p.fullName || 'Partner') as string;
-        const isApproved = pp.status === 'approved' || p.isActive === true;
-        const onLeave = p.isActive === false || pp.onLeave === true || p.isAvailable === false;
+        const eligibilityReasons: string[] = [];
+        if (p.isActive !== true) eligibilityReasons.push('partner is inactive');
+        if (pp.status !== 'approved') eligibilityReasons.push('partner is not approved');
+        if (p.isAvailable === false) eligibilityReasons.push('partner is unavailable');
+        if (pp.onLeave === true) eligibilityReasons.push('partner is on leave');
 
         const workShifts: string[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
         const shiftLabel = formatShiftLabel(workShifts);
@@ -2209,7 +2411,7 @@ export class BookNowAutoAssignService {
 
         const isThisAssigned = Boolean(assignedUid && (String(p.uid) === String(assignedUid) || String(p._id) === String(assignedUid)));
 
-        if (!isApproved || onLeave) {
+        if (eligibilityReasons.length > 0) {
           candidates.push({
             partnerId: String(p._id),
             partnerUid: String(p.uid),
@@ -2217,8 +2419,8 @@ export class BookNowAutoAssignService {
             status: 'ineligible',
             shiftTiming: shiftLabel,
             distanceKm: distKm,
-            details: 'on leave today',
-            reasons: ['on leave today'],
+            details: eligibilityReasons.join(', '),
+            reasons: eligibilityReasons,
             gender: partnerGender,
             genderCheckResult: isHourly && preferredGender
               ? (normalizePartnerGender(partnerGender) === preferredGender ? 'passed' : 'failed')

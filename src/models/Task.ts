@@ -409,12 +409,12 @@ export interface ITask extends Document {
     notifiedPartnerUids: string[];
     rejectedPartnerUids: string[];
     notifiedAt: Date;
-    expiresAt: Date;
+    expiresAt?: Date | null;
   };
   dispatchProgress?: {
     currentStage: 'preferred' | 'area_rule' | 'all' | 'assigned' | 'closed';
     startedAt: Date;
-    acceptanceWindowMinutes: number;
+    acceptanceWindowMinutes?: number;
     stages: Array<{
       stage: 'preferred' | 'area_rule' | 'all';
       status: 'pending' | 'in_progress' | 'completed' | 'skipped';
@@ -1093,7 +1093,7 @@ const TaskSchema = new Schema<ITask>(
         enum: ['preferred', 'area_rule', 'all', 'assigned', 'closed'],
       },
       startedAt: Date,
-      acceptanceWindowMinutes: { type: Number, default: 30 },
+      acceptanceWindowMinutes: Number,
       stages: {
         type: [
           {
