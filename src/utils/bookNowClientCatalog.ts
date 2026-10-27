@@ -116,3 +116,61 @@ export function normalizeBookNowTaskCategory(raw: string | undefined | null): Ta
 export function resolveBookNowCategoryLabel(catalogId: string): string {
   return BOOK_NOW_CATALOG_LABELS[catalogId] || catalogId;
 }
+export const HOME_CLEANING_SLUGS = [
+  'full-house',
+  'bathroom',
+  'kitchen',
+  'sofa',
+  'mattress',
+  'window-glass',
+  'home-cleaning',
+];
+
+export type ParentCategoryInfo = {
+  slug: string;
+  label: string;
+};
+
+export function resolveParentCategory(catalogIdOrSlug: string): ParentCategoryInfo {
+  const s = String(catalogIdOrSlug || '').trim().toLowerCase();
+  if (HOME_CLEANING_SLUGS.includes(s)) {
+    return { slug: 'home-cleaning', label: 'Home Cleaning' };
+  }
+  if (['ac-services', 'ac-repair', 'ac-servicing', 'gas-refill', 'install', 'uninstall'].includes(s)) {
+    return { slug: 'ac-services', label: 'AC Services' };
+  }
+  if (['appliance-repair', 'washing-machine', 'refrigerator', 'water-purifier', 'geyser'].includes(s)) {
+    return { slug: 'appliance-repair', label: 'Appliance Repair' };
+  }
+  if (['personal-assistance', 'personal-assistant'].includes(s)) {
+    return { slug: 'personal-assistance', label: 'Personal Assistance' };
+  }
+  if (s === 'daily-labour') {
+    return { slug: 'daily-labour', label: 'Daily Labour' };
+  }
+  if (s === 'hourly-helper') {
+    return { slug: 'hourly-helper', label: 'Hourly Helper' };
+  }
+  if (s.startsWith('painting')) {
+    return { slug: 'painting', label: 'Painting' };
+  }
+  if (s.startsWith('electrician')) {
+    return { slug: 'electrician-switch-and-socket', label: 'Switch & Socket' };
+  }
+  if (s.startsWith('plumbing')) {
+    return { slug: 'plumbing', label: 'Plumbing' };
+  }
+  if (s.startsWith('carpentry')) {
+    return { slug: 'carpentry', label: 'Carpentry' };
+  }
+  if (s.startsWith('pest-control')) {
+    return { slug: 'pest-control', label: 'Pest Control' };
+  }
+  if (s.startsWith('car-wash')) {
+    return { slug: 'car-wash', label: 'Car Wash' };
+  }
+  if (s.startsWith('laundry')) {
+    return { slug: 'laundry', label: 'Laundry' };
+  }
+  return { slug: s, label: resolveBookNowCategoryLabel(s) };
+}

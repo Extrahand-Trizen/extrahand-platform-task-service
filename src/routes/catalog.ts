@@ -4,6 +4,7 @@ import { serviceAuthMiddleware } from '../middleware/serviceAuth';
 import { optionalAuthMiddleware } from '../middleware/auth';
 import { asyncHandler } from '../middleware/errorHandler';
 import { LocationPricingController } from '../controllers/LocationPricingController';
+import { BannerController } from '../controllers/BannerController';
 
 const router = Router();
 
@@ -46,6 +47,7 @@ router.post('/internal/location-pricing/locations/:type/:id/activate', asyncHand
 router.post('/internal/location-pricing/locations/:type/:id/deactivate', asyncHandler(LocationPricingController.deactivateLocation));
 router.get('/internal/location-pricing/hourly-skus', asyncHandler(LocationPricingController.listHourlySkus));
 router.get('/internal/location-pricing/categories', asyncHandler(LocationPricingController.listPricingCategories));
+router.patch('/internal/location-pricing/categories/:id/min-order-value', asyncHandler(LocationPricingController.updateCategoryMinOrderValue));
 router.get('/internal/location-pricing/skus', asyncHandler(LocationPricingController.listPricingSkus));
 router.get('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.listHourlyPrices));
 router.post('/internal/location-pricing/hourly-prices', asyncHandler(LocationPricingController.createHourlyPrice));
@@ -74,5 +76,14 @@ router.get(
   asyncHandler(CatalogController.getHelpSupportCategory),
 );
 router.get('/areas', asyncHandler(CatalogController.listAreas));
+
+// Banner APIs
+router.get('/banners', asyncHandler(BannerController.listBanners));
+router.get('/internal/banners', asyncHandler(BannerController.listAdminBanners));
+router.get('/internal/banners/:id', asyncHandler(BannerController.getBannerById));
+router.post('/internal/banners', asyncHandler(BannerController.createBanner));
+router.patch('/internal/banners/:id', asyncHandler(BannerController.updateBanner));
+router.delete('/internal/banners/:id', asyncHandler(BannerController.deleteBanner));
+router.post('/internal/banners/reorder', asyncHandler(BannerController.reorderBanners));
 
 export default router;

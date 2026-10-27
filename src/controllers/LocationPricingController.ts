@@ -50,6 +50,16 @@ export class LocationPricingController {
     res.json({ success: true, data: await LocationPricingService.listPricingCategories() });
   }
 
+  static async updateCategoryMinOrderValue(req: Request, res: Response): Promise<void> {
+    const categoryId = String(req.params.id);
+    const minOrderValue = Number(req.body?.minOrderValue);
+    if (!Number.isFinite(minOrderValue) || minOrderValue < 0) {
+      throw new BadRequestError('minOrderValue must be a non-negative number');
+    }
+    const category = await LocationPricingService.updateCategoryMinOrderValue(categoryId, minOrderValue);
+    res.json({ success: true, data: category });
+  }
+
   static async listPricingSkus(req: Request, res: Response): Promise<void> {
     const categoryId = req.query.categoryId ? String(req.query.categoryId) : undefined;
     const sectionId = req.query.sectionId ? String(req.query.sectionId) : undefined;

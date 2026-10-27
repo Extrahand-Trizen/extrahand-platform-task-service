@@ -1,4 +1,4 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { ReviewService } from '../services/ReviewService';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -83,5 +83,34 @@ export class ReviewController {
 
     ApiResponse.success(res, result.reviews, 'Reviews retrieved successfully');
   }
-}
 
+  /**
+   * GET /api/v1/reviews/service-summary
+   * Get ratings and review counts for a category and its packages
+   */
+  static async getServiceReviewSummary(req: Request, res: Response): Promise<void> {
+    const { categorySlug, catalogId } = req.query;
+    const summary = await ReviewService.getServiceReviewSummary(
+      categorySlug as string | undefined,
+      catalogId as string | undefined
+    );
+    ApiResponse.success(res, summary, 'Service review summary retrieved successfully');
+  }
+
+  /**
+   * GET /api/v1/reviews/service-reviews
+   * Get paginated customer reviews for a service / package
+   */
+  static async getServiceReviews(req: Request, res: Response): Promise<void> {
+    const { categorySlug, catalogId, packageId, rating, limit, skip } = req.query;
+    const result = await ReviewService.getServiceReviews({
+      categorySlug: categorySlug as string | undefined,
+      catalogId: catalogId as string | undefined,
+      packageId: packageId as string | undefined,
+      rating: rating ? parseInt(rating as string, 10) : undefined,
+      limit: limit ? parseInt(limit as string, 10) : undefined,
+      skip: skip ? parseInt(skip as string, 10) : undefined,
+    });
+    ApiResponse.success(res, result, 'Service reviews retrieved successfully');
+  }
+}

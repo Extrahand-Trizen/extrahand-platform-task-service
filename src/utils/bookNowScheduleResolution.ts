@@ -1,3 +1,4 @@
+import { resolveParentCategory } from './bookNowClientCatalog';
 import { addMinutesToTimeLabel } from './recurringVisitScheduleBuilder';
 import {
   deriveBookNowTimeSlot,
@@ -181,6 +182,49 @@ export type BookNowSlotCheck = {
   timeSlot?: BookNowTimeBucket;
   durationMinutes?: number;
 };
+
+export type BookNowSchedulableLine = {
+  categorySlug?: string;
+  schedule?: ResolvedBookNowLineSchedule | null;
+  durationMinutes?: number;
+  quantity?: number;
+};
+
+export function collectCategoryBookNowSlotChecks(
+  lines: BookNowSchedulableLine[],
+): BookNowSlotCheck[] {
+  const byCategoryAndSlot = new Map<string, BookNowSlotCheck>();
+
+  for (const line of lines) {
+    const schedule = line.schedule;
+    if (!isCompleteResolvedBookNowSchedule(schedule)) continue;
+
+    const rawCategory = String(line.categorySlug || "default").trim().toLowerCase();
+    const category = resolveParentCategory(rawCategory).slug;
+    const slotKey = [
+      category,
+      schedule.scheduledDate,
+      schedule.scheduledTimeStart || "",
+      schedule.timeSlot || "",
+    ].join("|");
+
+    const lineDuration = (Number(line.durationMinutes || schedule.durationMinutes || 0)) * Math.max(1, Number(line.quantity || 1));
+    const existing = byCategoryAndSlot.get(slotKey);
+
+    if (existing) {
+      existing.durationMinutes = (Number(existing.durationMinutes) || 0) + lineDuration;
+    } else {
+      byCategoryAndSlot.set(slotKey, {
+        date: schedule.scheduledDate,
+        scheduledTimeStart: schedule.scheduledTimeStart,
+        timeSlot: schedule.timeSlot,
+        durationMinutes: Math.max(lineDuration, Number(schedule.durationMinutes) || 0),
+      });
+    }
+  }
+
+  return [...byCategoryAndSlot.values()];
+}
 
 export function collectDistinctBookNowSlotChecks(
   schedules: Array<ResolvedBookNowLineSchedule | null | undefined>,
