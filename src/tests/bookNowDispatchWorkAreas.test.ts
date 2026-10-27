@@ -3,7 +3,12 @@ import {
   buildOrderedWorkAreasForDispatch,
   filterTeamPostedOfferTiers,
   filterTeamPostedRecipientUids,
+  getBookNowScheduledStartAt,
+  getAllBookNowOfferRecipients,
   getBookNowNotificationTiers,
+  getFirstAvailableOfferStage,
+  isBookNowOfferBeforeScheduledStart,
+  mergeActiveOfferRecipients,
 } from '../services/BookNowAutoAssignService';
 
 const siddipetTask = {
@@ -48,6 +53,64 @@ const partner = (uid: string, phone: string) => ({
   workArea: 'Gachibowli',
   workAreaDistKm: 0,
 });
+assert.deepStrictEqual(
+  mergeActiveOfferRecipients(
+    ['current-recipient'],
+    [partner('current-recipient', '1111111111'), partner('area-rule-partner', '2222222222')],
+    [partner('area-rule-partner', '2222222222')],
+  ).map(({ uid }) => uid),
+  ['current-recipient', 'area-rule-partner'],
+  'Adding area-rule partners should preserve current offers and avoid duplicate recipients',
+);
+assert.deepStrictEqual(
+  getAllBookNowOfferRecipients({
+    preferred: [partner('preferred-partner', '1111111111')],
+    area_rule: [partner('area-rule-partner', '2222222222')],
+    all: [partner('other-partner', '3333333333')],
+  }).map(({ uid }) => uid),
+  ['preferred-partner', 'area-rule-partner', 'other-partner'],
+  'Offer restoration should collect partners from every eligible tier',
+);
+assert.equal(
+  getFirstAvailableOfferStage({
+    preferred: [partner('preferred-partner', '1111111111')],
+    area_rule: [partner('area-rule-partner', '2222222222')],
+    all: [partner('other-partner', '3333333333')],
+  }),
+  'preferred',
+  'Preferred partners must be the first offer stage when available',
+);
+assert.equal(
+  getFirstAvailableOfferStage({
+    preferred: [],
+    area_rule: [partner('area-rule-partner', '2222222222')],
+    all: [partner('other-partner', '3333333333')],
+  }),
+  'area_rule',
+  'Area-rule partners are first when no preferred partners are eligible',
+);
+const scheduledTask = {
+  scheduledDate: new Date('2026-10-27T00:00:00.000+05:30'),
+  scheduledTimeStart: '2:30 PM',
+} as any;
+assert.equal(
+  getBookNowScheduledStartAt(scheduledTask)?.toISOString(),
+  '2026-10-27T09:00:00.000Z',
+);
+assert.equal(
+  isBookNowOfferBeforeScheduledStart(
+    scheduledTask,
+    new Date('2026-10-27T08:59:00.000Z'),
+  ),
+  true,
+);
+assert.equal(
+  isBookNowOfferBeforeScheduledStart(
+    scheduledTask,
+    new Date('2026-10-27T09:00:00.000Z'),
+  ),
+  false,
+);
 const teamTiers = {
   preferred: [partner('allowlisted-partner', '+91 99999 99999')],
   area_rule: [partner('other-area-partner', '8888888888')],

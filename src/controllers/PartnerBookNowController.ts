@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import mongoose from 'mongoose';
-import Task from '../models/Task';
+import Task, { ITask } from '../models/Task';
 import { AuthenticatedRequest } from '../types';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
@@ -14,7 +14,10 @@ import { QcDatabase } from '../config/qcDatabase';
 import { QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, QC_DEFAULT_DELIVERY_FEE_INR, haversineKm } from '../constants/quickCommerce';
 import { PaymentClient } from '../services/PaymentClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
-import { BookNowAutoAssignService } from '../services/BookNowAutoAssignService';
+import {
+  BookNowAutoAssignService,
+  isBookNowOfferBeforeScheduledStart,
+} from '../services/BookNowAutoAssignService';
 import { undispatchedBookNowOfferFilter } from '../utils/bookNowOfferState';
 
 /**
@@ -860,12 +863,10 @@ export class PartnerBookNowController {
     const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
     if (!uid) throw new BadRequestError('Partner UID required');
 
-    const now = new Date();
     const tasks = await Task.find({
       bookingSource: 'book_now',
       status: 'open',
       'assignmentOffer.recipientUids': uid,
-      'assignmentOffer.expiresAt': { $gt: now },
     })
       .sort({ 'assignmentOffer.notifiedAt': -1 })
       .limit(50)
@@ -873,7 +874,9 @@ export class PartnerBookNowController {
 
     const Profile = mongoose.connection.collection('profiles');
     const offers = await Promise.all(
-      tasks.map(async (task) => {
+      tasks
+        .filter((task) => isBookNowOfferBeforeScheduledStart(task as ITask))
+        .map(async (task) => {
         let requesterName = 'Customer';
         if (task.requesterId) {
           const requester = await Profile.findOne(
@@ -896,9 +899,8 @@ export class PartnerBookNowController {
           createdAt: task.createdAt,
           requesterName,
           offerStage: task.assignmentOffer?.stage,
-          offerExpiresAt: task.assignmentOffer?.expiresAt,
         };
-      }),
+        }),
     );
 
     ApiResponse.success(res, offers, 'Partner work offers retrieved');
