@@ -18,6 +18,7 @@ export interface CreateBannerInput {
   actionParams?: Record<string, any>;
   backgroundColor?: string;
   tone?: 'light' | 'dark';
+  cardStyle?: 'full' | 'rounded';
   ctaLabel?: string;
   sortOrder?: number;
   isActive?: boolean;
@@ -82,6 +83,7 @@ export class BannerService {
       ...input,
       placement: input.placement.toLowerCase(),
       tone: input.tone || 'light',
+      cardStyle: input.cardStyle || 'full',
       backgroundColor: input.backgroundColor || '#FFFFFF',
       actionType: input.actionType || 'none',
       isActive: input.isActive !== undefined ? input.isActive : true,
@@ -108,6 +110,7 @@ export class BannerService {
     if (input.actionParams !== undefined) banner.actionParams = input.actionParams;
     if (input.backgroundColor !== undefined) banner.backgroundColor = input.backgroundColor;
     if (input.tone !== undefined) banner.tone = input.tone;
+    if (input.cardStyle !== undefined) banner.cardStyle = input.cardStyle;
     if (input.ctaLabel !== undefined) banner.ctaLabel = (input.ctaLabel ?? '').trim();
     if (input.sortOrder !== undefined) banner.sortOrder = input.sortOrder;
     if (input.isActive !== undefined) banner.isActive = input.isActive;

@@ -3,6 +3,12 @@ import mongoose, { Document, Model, Schema } from 'mongoose';
 export type BannerPlacement = 'book_services' | 'extramart' | 'book_now_scheduled' | 'book_now_instant';
 export type BannerActionType = 'screen' | 'category' | 'url' | 'tab' | 'none';
 export type BannerTone = 'light' | 'dark';
+/**
+ * Controls the card shape/style on the mobile app:
+ * - 'full'    → edge-to-edge full-bleed graphic (no padding, no border radius)
+ * - 'rounded' → padded card with rounded corners (split-card or image card)
+ */
+export type BannerCardStyle = 'full' | 'rounded';
 
 export interface IAppBanner extends Document {
   placement: BannerPlacement;
@@ -16,6 +22,8 @@ export interface IAppBanner extends Document {
   actionParams?: Record<string, any>;
   backgroundColor?: string;
   tone?: BannerTone;
+  /** Card display style: 'full' = edge-to-edge graphic, 'rounded' = padded card with corners */
+  cardStyle?: BannerCardStyle;
   ctaLabel?: string;
   sortOrder: number;
   isActive: boolean;
@@ -50,6 +58,7 @@ const AppBannerSchema = new Schema<IAppBanner>(
     actionParams: { type: Schema.Types.Mixed, default: {} },
     backgroundColor: { type: String, trim: true, default: '#FFFFFF' },
     tone: { type: String, enum: ['light', 'dark'], default: 'light' },
+    cardStyle: { type: String, enum: ['full', 'rounded'], default: 'full' },
     ctaLabel: { type: String, trim: true },
     sortOrder: { type: Number, default: 0, index: true },
     isActive: { type: Boolean, default: true, index: true },

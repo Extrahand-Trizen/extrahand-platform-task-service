@@ -2739,7 +2739,6 @@ export class BookingService {
 
     const dateKey = String(date || '').trim();
     parseCalendarDate(dateKey);
-    const city = String(order.address?.city || '').trim();
     const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
       .select('taskId skuSnapshot durationMinutes')
       .lean();
@@ -2747,7 +2746,6 @@ export class BookingService {
     const assignedTasks = taskIds.length
       ? await Task.find({ _id: { $in: taskIds } }).select('assigneeUid estimatedDuration').lean()
       : [];
-    const durationMinutes = resolveStoredBookingDuration(items, assignedTasks);
     const requiredPartnerUid = Array.from(
       new Set(assignedTasks.map((task) => String(task.assigneeUid || '').trim()).filter(Boolean)),
     );
@@ -2755,33 +2753,23 @@ export class BookingService {
       throw new BadRequestError('Multi-day Hourly bookings cannot be rescheduled yet. Please contact support.');
     }
     const hourly = items.some(isHourlyBookingItem);
-    const lat = Number(order.address?.coordinates?.[1]);
-    const lng = Number(order.address?.coordinates?.[0]);
-    const partnerCapacityBySlot = await getPartnerCapacityForSlots(dateKey, city, durationMinutes, {
-      area: resolveBookingAreaForCapacity(order.address || {}),
-      lat: Number.isFinite(lat) ? lat : undefined,
-      lng: Number.isFinite(lng) ? lng : undefined,
-      requiredPartnerUid: requiredPartnerUid[0],
-      excludeOrderId: orderId,
-      excludeTaskIds: taskIds.map(String),
-    });
-    const slotStarts = hourly ? HOURLY_RESCHEDULE_SLOT_STARTS : RESCHEDULE_SLOT_STARTS;
-    const todayKey = formatScheduleDateKey(new Date());
+    const durationMinutes = resolveStoredBookingDuration(items, assignedTasks);
     const currentBookingDateKey = formatScheduleDateKey(order.scheduledDate);
-    const currentBookingStartMinutes = parseSlotMinutes(String(order.scheduledTimeStart || ''));
+    const normalizedCurrentBookingSlot = normalizeBookNowSlotLabel(String(order.scheduledTimeStart || ''));
+    const slotStarts = hourly ? HOURLY_RESCHEDULE_SLOT_STARTS : RESCHEDULE_SLOT_STARTS;
+
+    // No partner capacity check for rescheduling — show all time slots so
+    // the customer can pick any time. Partner assignment happens separately.
     const slots = slotStarts.map((start) => {
       const normalized = normalizeBookNowSlotLabel(start);
-      const capacity = partnerCapacityBySlot[normalized];
-      const isBeforeOrCurrentTodaySlot =
-        dateKey === todayKey &&
-        currentBookingDateKey === todayKey &&
-        currentBookingStartMinutes != null &&
-        parseSlotMinutes(normalized) != null &&
-        parseSlotMinutes(normalized)! <= currentBookingStartMinutes;
+      // Only block: (1) already-past slots today, (2) the exact current booking slot
+      const isSameDateAndSlot =
+        dateKey === currentBookingDateKey &&
+        normalizedCurrentBookingSlot !== '' &&
+        normalized === normalizedCurrentBookingSlot;
       const unavailable =
-        (typeof capacity === 'number' && capacity === 0) ||
         isBookNowSlotWithinLeadTime(normalized, dateKey) ||
-        isBeforeOrCurrentTodaySlot ||
+        isSameDateAndSlot ||
         (hourly && (() => {
           try {
             assertHourlyScheduledSlotWithinOperatingHours({
