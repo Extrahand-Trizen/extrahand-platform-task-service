@@ -29,13 +29,20 @@ export class MainAdminNotificationClient {
     }
 
     const url = `${config.MAIN_ADMIN_SERVICE_URL.replace(/\/+$/, '')}/api/v1/notifications/work-whatsapp-dispatch`;
-    await axios.post(url, event, {
+    const response = await axios.post(url, event, {
       headers: {
         'Content-Type': 'application/json',
         'X-Service-Auth': config.SERVICE_AUTH_TOKEN,
         'X-Service-Name': 'task-service',
       },
       timeout: 30000,
+    });
+    logger.info('[BookNowAutoAssign] Admin WhatsApp dispatch response', {
+      taskId: event.taskId,
+      stage: event.stage,
+      recipientCount: event.recipientUids.length,
+      result: response.data?.data,
+      httpStatus: response.status,
     });
   }
 
