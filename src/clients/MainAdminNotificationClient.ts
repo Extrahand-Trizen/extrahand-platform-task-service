@@ -16,6 +16,29 @@ export type MainAdminNotificationEvent = {
 const LOG_PREFIX = '[TaskPostedInAppNotification][task-service]';
 
 export class MainAdminNotificationClient {
+  static async dispatchBookNowWorkWhatsApp(event: {
+    taskId: string;
+    stage: 'preferred' | 'area_rule' | 'all';
+    recipientUids: string[];
+    title: string;
+    category: string;
+    locationLabel: string;
+  }): Promise<void> {
+    if (!config.MAIN_ADMIN_SERVICE_URL || !config.SERVICE_AUTH_TOKEN) {
+      throw new Error('Main Admin WhatsApp dispatch endpoint is not configured');
+    }
+
+    const url = `${config.MAIN_ADMIN_SERVICE_URL.replace(/\/+$/, '')}/api/v1/notifications/work-whatsapp-dispatch`;
+    await axios.post(url, event, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Service-Auth': config.SERVICE_AUTH_TOKEN,
+        'X-Service-Name': 'task-service',
+      },
+      timeout: 30000,
+    });
+  }
+
   static async send(event: MainAdminNotificationEvent): Promise<void> {
     if (!config.MAIN_ADMIN_SERVICE_URL) {
       logger.error(`${LOG_PREFIX} MAIN_ADMIN_SERVICE_URL not configured — notification not sent`, {

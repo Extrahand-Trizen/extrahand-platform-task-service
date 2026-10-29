@@ -7,6 +7,7 @@ import BookingItem from '../models/BookingItem';
 import BookingOrder from '../models/BookingOrder';
 import logger from '../config/logger';
 import { NotificationClient } from './NotificationClient';
+import { MainAdminNotificationClient } from '../clients/MainAdminNotificationClient';
 import { PaymentClient } from './PaymentClient';
 import { HYDERABAD_WORK_AREA_COORDS } from '../constants/locations/hyderabadWorkAreaCoords';
 import { config } from '../config/env';
@@ -1185,34 +1186,64 @@ export class BookNowAutoAssignService {
       stage,
     );
     if (!recipientUids.length) return [];
-    return NotificationClient.sendWithDeliveryResults({
-      eventKey: 'TASK_UPDATED',
-      category: 'taskUpdates',
-      recipients: recipientUids,
-      entity: { type: 'task', id: String(task._id) },
-      title: 'New Book Now work offer',
-      body: `${task.title || 'A new work'} is available.`,
-      data: {
+    const [pushResult, whatsappResult] = await Promise.allSettled([
+      NotificationClient.sendWithDeliveryResults({
+        eventKey: 'TASK_UPDATED',
+        category: 'taskUpdates',
+        recipients: recipientUids,
+        entity: { type: 'task', id: String(task._id) },
+        title: 'New Book Now work offer',
+        body: `${task.title || 'A new work'} is available.`,
+        skipWhatsApp: true,
+        data: {
+          taskId: String(task._id),
+          title: task.title,
+          category: task.category,
+          categoryLabel: (task as any).categoryLabel || task.category,
+          bookingSource: 'book_now',
+          bookNowOffer: true,
+          action: 'book_now_offer',
+          recipientRole: 'partner',
+          offerStage: stage,
+          amount:
+            typeof task.budget === 'object' && task.budget
+              ? Number(task.budget.amount || 0)
+              : 0,
+          taskArea:
+            task.location?.taskArea ||
+            (task.location as any)?.locality ||
+            task.location?.city ||
+            '',
+        },
+      }),
+      MainAdminNotificationClient.dispatchBookNowWorkWhatsApp({
         taskId: String(task._id),
-        title: task.title,
-        category: task.category,
-        categoryLabel: (task as any).categoryLabel || task.category,
-        bookingSource: 'book_now',
-        bookNowOffer: true,
-        action: 'book_now_offer',
-        recipientRole: 'partner',
-        offerStage: stage,
-        amount:
-          typeof task.budget === 'object' && task.budget
-            ? Number(task.budget.amount || 0)
-            : 0,
-        taskArea:
+        stage,
+        recipientUids,
+        title: task.title || 'New work',
+        category:
+          (task as any).categoryLabel || task.category || 'work',
+        locationLabel:
           task.location?.taskArea ||
           (task.location as any)?.locality ||
           task.location?.city ||
           '',
-      },
-    });
+      }),
+    ]);
+
+    if (whatsappResult.status === 'rejected') {
+      logger.warn('[BookNowAutoAssign] WhatsApp dispatch request failed', {
+        taskId: String(task._id),
+        stage,
+        recipientCount: recipientUids.length,
+        message:
+          whatsappResult.reason instanceof Error
+            ? whatsappResult.reason.message
+            : String(whatsappResult.reason),
+      });
+    }
+    if (pushResult.status === 'rejected') throw pushResult.reason;
+    return pushResult.value;
   }
 
   private static async recordOfferNotifications(
