@@ -7,6 +7,7 @@ export interface IServiceCategory extends Document {
   iconUrl?: string;
   sortOrder: number;
   isActive: boolean;
+  minOrderValue?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -19,6 +20,7 @@ const ServiceCategorySchema = new Schema<IServiceCategory>(
     iconUrl: { type: String, trim: true },
     sortOrder: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true, index: true },
+    minOrderValue: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

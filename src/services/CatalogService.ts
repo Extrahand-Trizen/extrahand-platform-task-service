@@ -35,6 +35,7 @@ import {
 } from '../utils/personalAssistantCatalogVisibility';
 import { LocationPricingService, type PricedSku, type ResolvedSkuPrice } from './LocationPricingService';
 import { getSkuOfferPrice } from '../utils/skuPricing';
+import { resolveParentCategory } from '../utils/bookNowClientCatalog';
 
 function assertObjectId(id: string, label = 'id'): string {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -297,10 +298,46 @@ function filterPersonalAssistantFromHubResponse(
 
 export class CatalogService {
   static async listCategories(customerUid?: string | null) {
-    const categories = await ServiceCategory.find({ isActive: true })
-      .sort({ sortOrder: 1, name: 1 })
-      .lean();
-    return filterPersonalAssistantCategories(categories, customerUid);
+    const [categories, hubSections] = await Promise.all([
+      ServiceCategory.find({ isActive: true })
+        .sort({ sortOrder: 1, name: 1 })
+        .lean(),
+      BookNowHubSection.find({ isActive: true })
+        .select({ slug: 1, title: 1, minOrderValue: 1 })
+        .lean(),
+    ]);
+
+    const hubMinMap = new Map<string, number>();
+    for (const h of hubSections) {
+      if (typeof (h as any).minOrderValue === 'number') {
+        hubMinMap.set(h.slug, (h as any).minOrderValue);
+      }
+    }
+
+    const mutableCategories: any[] = [...categories];
+    for (const c of mutableCategories) {
+      const parent = resolveParentCategory(c.slug).slug;
+      if (typeof c.minOrderValue !== 'number' && hubMinMap.has(parent)) {
+        c.minOrderValue = hubMinMap.get(parent);
+      } else if (typeof c.minOrderValue !== 'number' && hubMinMap.has(c.slug)) {
+        c.minOrderValue = hubMinMap.get(c.slug);
+      }
+    }
+
+    const categorySlugs = new Set(mutableCategories.map((c) => c.slug));
+    for (const h of hubSections) {
+      if (!categorySlugs.has(h.slug) && typeof (h as any).minOrderValue === 'number') {
+        mutableCategories.push({
+          _id: (h as any)._id,
+          slug: h.slug,
+          name: (h as any).title || h.slug,
+          minOrderValue: (h as any).minOrderValue,
+          isActive: true,
+        });
+      }
+    }
+
+    return filterPersonalAssistantCategories(mutableCategories, customerUid);
   }
 
   static async getCategoryBySlug(slug: string, customerUid?: string | null) {
@@ -325,6 +362,16 @@ export class CatalogService {
     }).lean();
     if (!category) {
       throw new NotFoundError('Category not found');
+    }
+
+    if (category && typeof (category as any).minOrderValue !== 'number') {
+      const hub = await BookNowHubSection.findOne({
+        slug: { $in: [(category as any).slug, 'hourly-helper'] },
+        isActive: true,
+      }).select({ minOrderValue: 1 }).lean();
+      if (hub && typeof (hub as any).minOrderValue === 'number') {
+        (category as any).minOrderValue = (hub as any).minOrderValue;
+      }
     }
 
     const skus = await ServiceSku.find({
@@ -501,6 +548,16 @@ export class CatalogService {
     location?: { area?: string; city?: string; state?: string; pinCode?: string; coordinates?: [number, number] },
   ): Promise<any> {
     const category = await this.getCategoryBySlug(categorySlug, customerUid);
+    const parentSlug = resolveParentCategory(categorySlug).slug;
+    if (category && typeof (category as any).minOrderValue !== 'number') {
+      const hub = await BookNowHubSection.findOne({
+        slug: { $in: [categorySlug, parentSlug] },
+        isActive: true,
+      }).select({ minOrderValue: 1 }).lean();
+      if (hub && typeof (hub as any).minOrderValue === 'number') {
+        (category as any).minOrderValue = (hub as any).minOrderValue;
+      }
+    }
     const [skus, content] = await Promise.all([
       ServiceSku.find({ categoryId: category._id, isActive: true }).sort({ name: 1 }).lean(),
       BookNowCategoryContent.findOne({
@@ -791,6 +848,16 @@ export class CatalogService {
 
   static async getBookNowCategoryPackages(categorySlug: string, customerUid?: string | null, location?: CatalogLocationInput) {
     const category = await this.getCategoryBySlug(categorySlug, customerUid);
+    const parentSlug = resolveParentCategory(categorySlug).slug;
+    if (category && typeof (category as any).minOrderValue !== 'number') {
+      const hub = await BookNowHubSection.findOne({
+        slug: { $in: [categorySlug, parentSlug] },
+        isActive: true,
+      }).select({ minOrderValue: 1 }).lean();
+      if (hub && typeof (hub as any).minOrderValue === 'number') {
+        (category as any).minOrderValue = (hub as any).minOrderValue;
+      }
+    }
     const normalizedCategorySlug = normalizeCatalogLookup(category.slug);
     const [skus, skuContents, categoryContent] = await Promise.all([
       ServiceSku.find({ categoryId: category._id, isActive: true }).lean(),

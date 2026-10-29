@@ -5,6 +5,8 @@ import BookingOrder from '../models/BookingOrder';
 import { buildOriginalScheduleFields, buildRescheduleHistoryEntry } from '../models/rescheduleHistory';
 import BookingItem from '../models/BookingItem';
 import ServiceQuotation from '../models/ServiceQuotation';
+import ServiceCategory from '../models/ServiceCategory';
+import BookNowHubSection from '../models/BookNowHubSection';
 import { CatalogService } from './CatalogService';
 import { PaymentClient } from './PaymentClient';
 import { computeBookingTotals, computeLinePrice } from '../utils/bookingPricing';
@@ -12,6 +14,7 @@ import {
   normalizeBookNowTaskCategory,
   resolveBookNowCategoryLabel,
   resolveBookNowTaskCategory,
+  resolveParentCategory,
 } from '../utils/bookNowClientCatalog';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
@@ -27,7 +30,7 @@ import {
 } from '../utils/bookNowSlotAvailability';
 import {
   assertPerItemScheduleFieldsComplete,
-  collectDistinctBookNowSlotChecks,
+  collectCategoryBookNowSlotChecks,
   isCompleteResolvedBookNowSchedule,
   resolveBookNowLineDurationMinutes,
   resolveBookNowLineSchedule,
@@ -51,7 +54,10 @@ import {
   isHourlyResolvedLine,
   parseBookingFulfillmentType,
 } from '../utils/hourlyBookingGuards';
-import { assertBookNowFixedPriceMinimumCheckout } from '../utils/bookNowFixedPriceMinimum';
+import {
+  assertBookNowFixedPriceMinimumCheckout,
+  type CategoryMinimumConfig,
+} from '../utils/bookNowFixedPriceMinimum';
 import { BookNowCatalogBootstrap } from './BookNowCatalogBootstrap';
 import { abandonUnpaidBookingOrder } from './bookingAbandonUnpaid';
 import { cancelHourlyBooking } from './cancellation/cancellationOrchestrator';
@@ -249,6 +255,7 @@ type ResolvedLine = {
   durationMinutes: number;
   title: string;
   snapshotName: string;
+  taskDescription?: string;
   images?: string[];
   schedule?: ResolvedBookNowLineSchedule;
   serviceFlowType?: ServiceFlowType;
@@ -271,6 +278,7 @@ type PendingBookingLine = {
   durationMinutes: number;
   title: string;
   snapshotName: string;
+  taskDescription?: string;
   images?: string[];
   scheduledDate?: string;
   scheduledTimeStart?: string;
@@ -522,6 +530,7 @@ function serializePendingLine(line: ResolvedLine): PendingBookingLine {
     durationMinutes: line.durationMinutes,
     title: line.title,
     snapshotName: line.snapshotName,
+    taskDescription: line.taskDescription,
     images: Array.isArray(line.images) ? line.images.filter(Boolean) : undefined,
     skuId: line.skuId ? String(line.skuId) : undefined,
     variantId: line.variantId ? String(line.variantId) : undefined,
@@ -560,6 +569,7 @@ function deserializePendingLine(line: PendingBookingLine): ResolvedLine {
     durationMinutes: line.durationMinutes,
     title: line.title,
     snapshotName: line.snapshotName,
+    taskDescription: line.taskDescription,
     images: Array.isArray(line.images) ? line.images.filter(Boolean) : undefined,
     schedule: schedule ?? undefined,
     serviceFlowType: line.serviceFlowType,
@@ -840,6 +850,7 @@ export class BookingService {
       durationMinutes,
       title: name,
       snapshotName: name,
+      taskDescription: normalized.taskDescription,
       images: Array.isArray(normalized.images) ? normalized.images.filter(Boolean) : undefined,
       addonIds: [],
       serviceFlowType: enriched.serviceFlowType,
@@ -928,6 +939,7 @@ export class BookingService {
       durationMinutes,
       title,
       snapshotName: sku.name,
+      taskDescription: normalized.taskDescription,
       images: Array.isArray(normalized.images) ? normalized.images.filter(Boolean) : undefined,
       serviceFlowType: normalized.serviceFlowType,
       bookingKind: normalized.bookingKind,
@@ -1162,7 +1174,67 @@ export class BookingService {
         : undefined,
     });
 
-    assertBookNowFixedPriceMinimumCheckout(resolvedLines);
+    const distinctCategorySlugs = Array.from(
+      new Set(resolvedLines.map((l) => resolveParentCategory(l.categorySlug || '').slug).filter(Boolean)),
+    ) as string[];
+    const allQuerySlugs = Array.from(
+      new Set([
+        ...distinctCategorySlugs,
+        ...resolvedLines.map((l) => l.categorySlug).filter(Boolean),
+      ]),
+    ) as string[];
+    const [categoryDocs, hubDocs] = await Promise.all([
+      allQuerySlugs.length > 0
+        ? ServiceCategory.find({ slug: { $in: allQuerySlugs } }).lean()
+        : [],
+      allQuerySlugs.length > 0
+        ? BookNowHubSection.find({ slug: { $in: allQuerySlugs } }).lean()
+        : [],
+    ]);
+    const categoryConfigs = new Map<string, CategoryMinimumConfig>((categoryDocs as any[]).map((doc: any) => [
+      doc.slug,
+      {
+        categoryId: String(doc._id),
+        categorySlug: doc.slug,
+        categoryName: doc.name,
+        minOrderValue: doc.minOrderValue,
+        hasExplicitConfig: typeof doc.minOrderValue === "number",
+      },
+    ]));
+    for (const hub of hubDocs as any[]) {
+      if (typeof hub.minOrderValue === 'number') {
+        const existing = categoryConfigs.get(hub.slug);
+        if (existing) {
+          existing.minOrderValue = hub.minOrderValue;
+          existing.hasExplicitConfig = true;
+        } else {
+          categoryConfigs.set(hub.slug, {
+            categoryId: String(hub._id),
+            categorySlug: hub.slug,
+            categoryName: hub.title || resolveParentCategory(hub.slug).label,
+            minOrderValue: hub.minOrderValue,
+            hasExplicitConfig: true,
+          });
+        }
+      }
+    }
+    for (const parentSlug of distinctCategorySlugs) {
+      if (!categoryConfigs.has(parentSlug)) {
+        const subDoc = (categoryDocs as any[]).find(
+          (doc: any) => resolveParentCategory(doc.slug).slug === parentSlug && typeof doc.minOrderValue === 'number',
+        );
+        if (subDoc) {
+          categoryConfigs.set(parentSlug, {
+            categoryId: String(subDoc._id),
+            categorySlug: parentSlug,
+            categoryName: resolveParentCategory(parentSlug).label,
+            minOrderValue: subDoc.minOrderValue,
+            hasExplicitConfig: typeof subDoc.minOrderValue === 'number',
+          });
+        }
+      }
+    }
+    assertBookNowFixedPriceMinimumCheckout(resolvedLines, categoryConfigs);
 
     const isHourlyOrder = resolvedLines.some(isHourlyResolvedLine);
 
@@ -1277,9 +1349,7 @@ export class BookingService {
       }
 
       if (!isHourlyOrder) {
-        const slotChecks = collectDistinctBookNowSlotChecks(
-          resolvedLinesWithSchedule.map((line) => line.schedule),
-        );
+        const slotChecks = collectCategoryBookNowSlotChecks(resolvedLinesWithSchedule);
         for (const slotCheck of slotChecks) {
           try {
             await assertBookNowSlotAvailable({
@@ -2205,9 +2275,14 @@ export class BookingService {
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
-      const description =
-        order.bookingNotes?.trim() ||
-        `Book Now: ${line.title}. Address: ${address.line1}, ${address.city} ${address.pinCode}.`;
+      const description = [
+        line.taskDescription?.trim(),
+        order.bookingNotes?.trim() && order.bookingNotes.trim() !== line.taskDescription?.trim()
+          ? `Customer notes:\n${order.bookingNotes.trim()}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n\n') || `Book Now: ${line.title}. Address: ${address.line1}, ${address.city} ${address.pinCode}.`;
       const taskPayload =
         isConsultationProjectOrder && sourceConsultationTask && sourceQuotation
           ? null
@@ -2664,7 +2739,6 @@ export class BookingService {
 
     const dateKey = String(date || '').trim();
     parseCalendarDate(dateKey);
-    const city = String(order.address?.city || '').trim();
     const items = await BookingItem.find({ orderId, status: { $ne: 'cancelled' } })
       .select('taskId skuSnapshot durationMinutes')
       .lean();
@@ -2672,7 +2746,6 @@ export class BookingService {
     const assignedTasks = taskIds.length
       ? await Task.find({ _id: { $in: taskIds } }).select('assigneeUid estimatedDuration').lean()
       : [];
-    const durationMinutes = resolveStoredBookingDuration(items, assignedTasks);
     const requiredPartnerUid = Array.from(
       new Set(assignedTasks.map((task) => String(task.assigneeUid || '').trim()).filter(Boolean)),
     );
@@ -2680,33 +2753,23 @@ export class BookingService {
       throw new BadRequestError('Multi-day Hourly bookings cannot be rescheduled yet. Please contact support.');
     }
     const hourly = items.some(isHourlyBookingItem);
-    const lat = Number(order.address?.coordinates?.[1]);
-    const lng = Number(order.address?.coordinates?.[0]);
-    const partnerCapacityBySlot = await getPartnerCapacityForSlots(dateKey, city, durationMinutes, {
-      area: resolveBookingAreaForCapacity(order.address || {}),
-      lat: Number.isFinite(lat) ? lat : undefined,
-      lng: Number.isFinite(lng) ? lng : undefined,
-      requiredPartnerUid: requiredPartnerUid[0],
-      excludeOrderId: orderId,
-      excludeTaskIds: taskIds.map(String),
-    });
-    const slotStarts = hourly ? HOURLY_RESCHEDULE_SLOT_STARTS : RESCHEDULE_SLOT_STARTS;
-    const todayKey = formatScheduleDateKey(new Date());
+    const durationMinutes = resolveStoredBookingDuration(items, assignedTasks);
     const currentBookingDateKey = formatScheduleDateKey(order.scheduledDate);
-    const currentBookingStartMinutes = parseSlotMinutes(String(order.scheduledTimeStart || ''));
+    const normalizedCurrentBookingSlot = normalizeBookNowSlotLabel(String(order.scheduledTimeStart || ''));
+    const slotStarts = hourly ? HOURLY_RESCHEDULE_SLOT_STARTS : RESCHEDULE_SLOT_STARTS;
+
+    // No partner capacity check for rescheduling — show all time slots so
+    // the customer can pick any time. Partner assignment happens separately.
     const slots = slotStarts.map((start) => {
       const normalized = normalizeBookNowSlotLabel(start);
-      const capacity = partnerCapacityBySlot[normalized];
-      const isBeforeOrCurrentTodaySlot =
-        dateKey === todayKey &&
-        currentBookingDateKey === todayKey &&
-        currentBookingStartMinutes != null &&
-        parseSlotMinutes(normalized) != null &&
-        parseSlotMinutes(normalized)! <= currentBookingStartMinutes;
+      // Only block: (1) already-past slots today, (2) the exact current booking slot
+      const isSameDateAndSlot =
+        dateKey === currentBookingDateKey &&
+        normalizedCurrentBookingSlot !== '' &&
+        normalized === normalizedCurrentBookingSlot;
       const unavailable =
-        (typeof capacity === 'number' && capacity === 0) ||
         isBookNowSlotWithinLeadTime(normalized, dateKey) ||
-        isBeforeOrCurrentTodaySlot ||
+        isSameDateAndSlot ||
         (hourly && (() => {
           try {
             assertHourlyScheduledSlotWithinOperatingHours({

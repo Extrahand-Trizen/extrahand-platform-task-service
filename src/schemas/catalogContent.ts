@@ -95,6 +95,7 @@ export const upsertCategoryContentSchema = z.object({
   faqCategoryKeys: z.array(z.string()).optional(),
   sortOrder: z.number().optional(),
   isActive: z.boolean().optional(),
+  minOrderValue: z.number().nonnegative().optional(),
 });
 
 export const patchCategoryContentSchema = z
@@ -108,6 +109,7 @@ export const patchCategoryContentSchema = z
     faqCategoryKeys: z.array(z.string()).optional(),
     sortOrder: z.number().optional(),
     isActive: z.boolean().optional(),
+    minOrderValue: z.number().nonnegative().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: 'At least one field is required for update',

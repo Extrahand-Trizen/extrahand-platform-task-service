@@ -21,6 +21,64 @@ function extractProfileDisplayName(profile: any): string | null {
   return combined || null;
 }
 
+
+const STATIC_TO_BACKEND_PACKAGE_ALIASES: Record<string, readonly string[]> = {
+  'ac-installation': ['split-ac-installation', 'window-ac-installation', 'ac-install', 'ac-installation-split-ac', 'ac-installation-window-ac'],
+  'ac-uninstallation': ['split-ac-uninstallation', 'window-ac-uninstallation', 'ac-uninstall', 'ac-uninstallation-split-ac', 'ac-uninstallation-window-ac'],
+  'ac-repair': ['ac-diagnosis-inspection', 'ac-repair', 'ac-diagnosis'],
+  'foam-jet-ac-service': ['foam-blast-service', 'foam-jet-ac-service', 'premium-ac-service', 'anti-rust-service'],
+  'ac-gas-refill-checkup': ['r22-gas-refill', 'r32-gas-refill', 'ac-gas-refill-checkup', 'ac-gas-refill-and-check-up'],
+  'wm-checkup': ['wm-checkup', 'washing-machine-check-up', 'washing-machine-check-up-fully-automatic-top-load', 'washing-machine-check-up-fully-automatic-front-load', 'washing-machine-check-up-semi-automatic'],
+  'wm-installation': ['wm-installation', 'washing-machine-installation', 'washing-machine-installation-fully-automatic-top-load', 'washing-machine-installation-fully-automatic-front-load', 'washing-machine-installation-semi-automatic'],
+  'wm-uninstallation': ['wm-uninstallation', 'washing-machine-uninstallation', 'washing-machine-uninstallation-fully-automatic-top-load', 'washing-machine-uninstallation-fully-automatic-front-load', 'washing-machine-uninstallation-semi-automatic'],
+  'fridge-checkup': ['fridge-checkup', 'refrigerator-check-up', 'refrigerator-check-up-single-door', 'refrigerator-check-up-double-door', 'refrigerator-check-up-side-by-side'],
+  'geyser-servicing': ['geyser-servicing', 'geyser-service', 'geyser-service-up-to-10l', 'geyser-service-10l-to-25l', 'geyser-service-above-25l'],
+  'sofa-cleaning': ['sofa-cleaning', '2-seater-dry-foam', '3-seater-dry-foam', 'l-shape-dry-foam', 'sofa-chair-clean', 'sofa-cushion-cleaning'],
+  'kitchen-cleaning': ['standard-kitchen-clean', 'deep-kitchen-clean', 'empty-kitchen-clean', 'post-reno-kitchen-clean', 'kitchen-cabinet-cleaning', 'kitchen-window-cleaning'],
+  'bathroom-cleaning': ['regular-clean', 'deep-clean', 'bathroom-regular', 'bathroom-deep', 'Bathroom Cleaning – Machine Cleaning', 'Bathroom Cleaning – Hands On Cleaning'],
+  'full-house': ['1bhk-economy', '2bhk-economy', '3bhk-economy', '4bhk-economy', 'Full House Cleaning – Furnished Apartment', 'Full House Cleaning – Unfurnished Apartment'],
+  'hourly-helper': ['hourly-30m', 'hourly-1h', 'hourly-2h', 'hourly-3h', 'hourly-4h'],
+};
+
+function getCategoryMatchSlugs(input?: string): string[] {
+  const s = String(input || '').trim().toLowerCase();
+  if (!s) return [];
+  if (['bathroom', 'bathroom-cleaning'].includes(s)) {
+    return ['bathroom', 'bathroom-cleaning'];
+  }
+  if (['kitchen', 'kitchen-cleaning'].includes(s)) {
+    return ['kitchen', 'kitchen-cleaning'];
+  }
+  if (['sofa', 'sofa-cleaning', 'upholstery'].includes(s)) {
+    return ['sofa', 'sofa-cleaning', 'upholstery'];
+  }
+  if (['full-house', 'home-cleaning'].includes(s)) {
+    return ['full-house', 'home-cleaning'];
+  }
+  if (['ac-services', 'ac-repair', 'ac-servicing'].includes(s)) {
+    return ['ac-services', 'ac-repair', 'ac-servicing'];
+  }
+  if (['appliance-repair', 'washing-machine', 'refrigerator', 'water-purifier', 'geyser'].includes(s)) {
+    return ['appliance-repair', 'washing-machine', 'refrigerator', 'water-purifier', 'geyser'];
+  }
+  return [s];
+}
+
+function resolvePackageAliases(packageId?: string): string[] {
+  const id = String(packageId || '').trim().toLowerCase();
+  if (!id) return [];
+  const set = new Set<string>([id]);
+  for (const [canonical, aliases] of Object.entries(STATIC_TO_BACKEND_PACKAGE_ALIASES)) {
+    const canonicalLower = canonical.toLowerCase();
+    const aliasesLower = aliases.map((a) => a.toLowerCase());
+    if (canonicalLower === id || aliasesLower.includes(id)) {
+      set.add(canonicalLower);
+      aliasesLower.forEach((a) => set.add(a));
+    }
+  }
+  return Array.from(set);
+}
+
 export class ReviewService {
   /**
    * Create a review
@@ -354,8 +412,301 @@ export class ReviewService {
       return { reviews: reviews as unknown as IReview[] };
     }
   }
+
+  /**
+   * Aggregate review stats for a service category and its packages
+   */
+  static async getServiceReviewSummary(
+    categorySlug?: string,
+    catalogId?: string
+  ): Promise<{
+    category: {
+      rating: number;
+      reviewCount: number;
+      starBreakdown: Record<number, number>;
+    };
+    packages: Record<string, {
+      rating: number;
+      reviewCount: number;
+      starBreakdown: Record<number, number>;
+    }>;
+  }> {
+    const targetSlug = (categorySlug || catalogId || '').trim().toLowerCase();
+    const catSlugs = getCategoryMatchSlugs(targetSlug);
+
+    const taskQuery: any = {};
+    if (catSlugs.length > 0) {
+      taskQuery.$or = [
+        { categorySlug: { $in: catSlugs } },
+        { category: { $in: catSlugs } },
+        { subcategory: { $in: catSlugs } },
+        { title: { $regex: new RegExp(catSlugs.join('|'), 'i') } },
+      ];
+    }
+
+    const tasks = await Task.find(taskQuery).select('_id title category categorySlug subcategory').lean();
+    let taskIds = tasks.map((t) => t._id);
+    const taskMap = new Map(tasks.map((t) => [String(t._id), t]));
+
+    try {
+      const BookingItemCol = mongoose.connection.collection('bookingitems');
+      const bItems = await BookingItemCol.find({
+        $or: [
+          { 'skuSnapshot.categorySlug': { $in: catSlugs } },
+          { taskId: { $in: taskIds } },
+        ],
+      }).toArray();
+      for (const b of bItems) {
+        if (b.taskId && !taskMap.has(String(b.taskId))) {
+          taskIds.push(b.taskId);
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+
+    if (taskIds.length === 0) {
+      return {
+        category: { rating: 0, reviewCount: 0, starBreakdown: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } },
+        packages: {},
+      };
+    }
+
+    const reviews = await Review.find({
+      taskId: { $in: taskIds },
+      isPublic: true,
+      reviewType: 'poster_to_performer',
+    }).select('taskId rating comment createdAt').lean();
+
+    let catSum = 0;
+    const catBreakdown: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    const pkgBuckets: Record<string, { sum: number; count: number; breakdown: Record<number, number> }> = {};
+
+    function addReviewToBucket(key: string, rating: number) {
+      const normalizedKey = key.trim().toLowerCase();
+      if (!pkgBuckets[normalizedKey]) {
+        pkgBuckets[normalizedKey] = { sum: 0, count: 0, breakdown: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } };
+      }
+      pkgBuckets[normalizedKey].sum += rating;
+      pkgBuckets[normalizedKey].count += 1;
+      const star = Math.min(5, Math.max(1, Math.round(rating)));
+      pkgBuckets[normalizedKey].breakdown[star] = (pkgBuckets[normalizedKey].breakdown[star] || 0) + 1;
+    }
+
+    for (const r of reviews) {
+      catSum += r.rating;
+      const star = Math.min(5, Math.max(1, Math.round(r.rating)));
+      catBreakdown[star] = (catBreakdown[star] || 0) + 1;
+
+      const t = taskMap.get(String(r.taskId));
+      const sub = t?.subcategory || '';
+      if (sub) {
+        addReviewToBucket(sub, r.rating);
+        for (const [canonicalId, aliases] of Object.entries(STATIC_TO_BACKEND_PACKAGE_ALIASES)) {
+          if (aliases.some((a) => a.toLowerCase() === sub.toLowerCase() || (t?.title && t.title.toLowerCase().includes(a.toLowerCase())))) {
+            if (canonicalId.toLowerCase() !== sub.toLowerCase()) {
+              addReviewToBucket(canonicalId, r.rating);
+            }
+          }
+        }
+      }
+    }
+
+    const packages: Record<string, { rating: number; reviewCount: number; starBreakdown: Record<number, number> }> = {};
+    for (const [key, data] of Object.entries(pkgBuckets)) {
+      packages[key] = {
+        rating: data.count > 0 ? Number((data.sum / data.count).toFixed(2)) : 0,
+        reviewCount: data.count,
+        starBreakdown: data.breakdown,
+      };
+    }
+
+    return {
+      category: {
+        rating: reviews.length > 0 ? Number((catSum / reviews.length).toFixed(2)) : 0,
+        reviewCount: reviews.length,
+        starBreakdown: catBreakdown,
+      },
+      packages,
+    };
+  }
+
+  /**
+   * Get detailed customer reviews for a service / package
+   */
+  static async getServiceReviews(params: {
+    categorySlug?: string;
+    catalogId?: string;
+    packageId?: string;
+    rating?: number | null;
+    limit?: number;
+    skip?: number;
+  }): Promise<{
+    reviews: Array<{
+      _id: string;
+      rating: number;
+      title?: string;
+      comment?: string;
+      reviewerName: string;
+      reviewerPhoto?: string;
+      createdAt: Date;
+      serviceName?: string;
+      helpfulCount?: number;
+    }>;
+    total: number;
+    avgRating: number;
+    starBreakdown: Record<number, number>;
+  }> {
+    const { categorySlug, catalogId, packageId, rating, limit = 20, skip = 0 } = params;
+    const targetSlug = (categorySlug || catalogId || '').trim().toLowerCase();
+    const catSlugs = getCategoryMatchSlugs(targetSlug);
+    const packageAliases = resolvePackageAliases(packageId);
+
+    const taskQuery: any = {};
+    const andClauses: any[] = [];
+
+    if (catSlugs.length > 0) {
+      andClauses.push({
+        $or: [
+          { categorySlug: { $in: catSlugs } },
+          { category: { $in: catSlugs } },
+          { subcategory: { $in: catSlugs } },
+          { title: { $regex: new RegExp(catSlugs.join('|'), 'i') } },
+        ],
+      });
+    }
+
+    if (packageAliases.length > 0) {
+      const escapedAliases = packageAliases.map((a) => a.replace(/[-/\^$*+?.()|[\]{}]/g, '\\$&'));
+      andClauses.push({
+        $or: [
+          { subcategory: { $in: packageAliases } },
+          { subcategory: { $in: packageAliases.map((a) => new RegExp('^' + a + '$', 'i')) } },
+          { title: { $regex: new RegExp(escapedAliases.join('|'), 'i') } },
+        ],
+      });
+    }
+
+    if (andClauses.length > 0) {
+      taskQuery.$and = andClauses;
+    }
+
+    const tasks = await Task.find(taskQuery).select('_id title category categorySlug subcategory').lean();
+    let taskIds = tasks.map((t) => t._id);
+    const taskMap = new Map(tasks.map((t) => [String(t._id), t]));
+
+    try {
+      const BookingItemCol = mongoose.connection.collection('bookingitems');
+      const bItemQuery: any = {};
+      if (catSlugs.length > 0) {
+        bItemQuery['skuSnapshot.categorySlug'] = { $in: catSlugs };
+      }
+      if (packageAliases.length > 0) {
+        bItemQuery['skuSnapshot.slug'] = { $in: packageAliases };
+      }
+      if (Object.keys(bItemQuery).length > 0) {
+        const bItems = await BookingItemCol.find(bItemQuery).toArray();
+        for (const b of bItems) {
+          if (b.taskId && !taskMap.has(String(b.taskId))) {
+            taskIds.push(b.taskId);
+          }
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+
+    if (taskIds.length === 0) {
+      return {
+        reviews: [],
+        total: 0,
+        avgRating: 0,
+        starBreakdown: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
+      };
+    }
+
+    const baseReviewQuery: any = {
+      taskId: { $in: taskIds },
+      isPublic: true,
+      reviewType: 'poster_to_performer',
+    };
+
+    const allMatchingReviews = await Review.find(baseReviewQuery).select('rating').lean();
+    const totalMatching = allMatchingReviews.length;
+    let sum = 0;
+    const breakdown: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    for (const r of allMatchingReviews) {
+      sum += r.rating;
+      const star = Math.min(5, Math.max(1, Math.round(r.rating)));
+      breakdown[star] = (breakdown[star] || 0) + 1;
+    }
+    const avgRating = totalMatching > 0 ? Number((sum / totalMatching).toFixed(2)) : 0;
+
+    const filteredReviewQuery: any = { ...baseReviewQuery };
+    if (rating !== null && rating !== undefined && !isNaN(Number(rating))) {
+      filteredReviewQuery.rating = Number(rating);
+    }
+
+    const effectiveLimit = Math.min(Math.max(1, limit), 50);
+    const effectiveSkip = Math.max(0, skip);
+
+    const reviews = await Review.find(filteredReviewQuery)
+      .sort({ createdAt: -1 })
+      .skip(effectiveSkip)
+      .limit(effectiveLimit)
+      .lean();
+
+    const totalFiltered = await Review.countDocuments(filteredReviewQuery);
+
+    const reviewerIds = [
+      ...new Set(
+        reviews
+          .map((r: any) => r.reviewerId?.toString())
+          .filter((id): id is string => Boolean(id && mongoose.Types.ObjectId.isValid(id)))
+      ),
+    ];
+
+    let profileMap = new Map<string, any>();
+    if (reviewerIds.length > 0) {
+      try {
+        const ProfileCol = mongoose.connection.collection('profiles');
+        const profiles = await ProfileCol.find({
+          _id: { $in: reviewerIds.map((id) => new mongoose.Types.ObjectId(id)) },
+        }).toArray();
+        profileMap = new Map(profiles.map((p: any) => [p._id.toString(), p]));
+      } catch (err) {
+        logger.warn('Could not enrich reviewer profiles:', err);
+      }
+    }
+
+    const enriched = reviews.map((r: any) => {
+      const profile = profileMap.get(r.reviewerId?.toString?.() || '');
+      const reviewerName = extractProfileDisplayName(profile) || 'Customer';
+      const reviewerPhoto = profile?.photoURL || profile?.avatar || profile?.profileImageUrl;
+      const t = taskMap.get(String(r.taskId));
+      const serviceName = t?.title || t?.subcategory || (targetSlug ? targetSlug : 'Service');
+
+      return {
+        _id: String(r._id),
+        rating: r.rating,
+        title: r.title,
+        comment: r.comment,
+        reviewerName,
+        reviewerPhoto,
+        createdAt: r.createdAt,
+        serviceName,
+        helpfulCount: Array.isArray(r.helpfulVotes) ? r.helpfulVotes.length : (r.helpfulCount || 0),
+      };
+    });
+
+    return {
+      reviews: enriched,
+      total: totalFiltered,
+      avgRating,
+      starBreakdown: breakdown,
+    };
+  }
+
 }
 
 export default ReviewService;
-
-

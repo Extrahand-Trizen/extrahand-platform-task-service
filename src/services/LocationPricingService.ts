@@ -1,3 +1,4 @@
+import { resolveParentCategory, HOME_CLEANING_SLUGS } from '../utils/bookNowClientCatalog';
 import mongoose from 'mongoose';
 import LocationState from '../models/LocationState';
 import LocationCity from '../models/LocationCity';
@@ -116,12 +117,14 @@ export type PricingSubcategory = {
   name: string;
   categoryId: string;
   sectionId?: string;
+  minOrderValue?: number;
 };
 
 /** App categories such as Home Cleaning, with the subcategories shown inside them. */
 export type PricingCatalogGroup = {
   id: string;
   name: string;
+  minOrderValue?: number;
   subcategories: PricingSubcategory[];
 };
 
@@ -363,6 +366,56 @@ export class LocationPricingService {
     return result;
   }
 
+  static async updateCategoryMinOrderValue(targetIdOrSlug: string, minOrderValue: number) {
+    const isHex = mongoose.Types.ObjectId.isValid(targetIdOrSlug) && targetIdOrSlug.length === 24;
+    const parent = resolveParentCategory(targetIdOrSlug);
+    const parentSlug = parent.slug;
+
+    const relatedSlugs = new Set<string>([targetIdOrSlug, parentSlug]);
+    if (parentSlug === 'home-cleaning') {
+      HOME_CLEANING_SLUGS.forEach((s) => relatedSlugs.add(s));
+    }
+
+    const hubSection = await BookNowHubSection.findOne({
+      $or: [
+        { slug: targetIdOrSlug },
+        { slug: parentSlug },
+        ...(isHex ? [{ _id: targetIdOrSlug }] : []),
+      ],
+    }).lean();
+
+    if (hubSection) {
+      if (Array.isArray(hubSection.services)) {
+        hubSection.services.forEach((s) => {
+          if (s.categorySlug) relatedSlugs.add(s.categorySlug);
+        });
+      }
+      await BookNowHubSection.updateOne(
+        { _id: hubSection._id },
+        { $set: { minOrderValue } },
+      );
+    }
+
+    const slugList = Array.from(relatedSlugs);
+    const updateResult = await ServiceCategory.updateMany(
+      {
+        $or: [
+          { slug: { $in: slugList } },
+          ...(isHex ? [{ _id: targetIdOrSlug }] : []),
+        ],
+      },
+      { $set: { minOrderValue } },
+    );
+
+    return {
+      id: targetIdOrSlug,
+      parentSlug,
+      name: hubSection?.title || parent.label,
+      minOrderValue,
+      updatedCount: updateResult.modifiedCount ?? slugList.length,
+    };
+  }
+
   static async setLocationActive(type: string, id: string, isActive: boolean) {
     return this.updateLocation(type, id, { isActive });
   }
@@ -374,7 +427,7 @@ export class LocationPricingService {
   static async listPricingCategories(): Promise<PricingCatalogGroup[]> {
     const [hubSections, categories, counts] = await Promise.all([
       BookNowHubSection.find({ isActive: true }).sort({ sortOrder: 1, title: 1 }).lean(),
-      ServiceCategory.find({ isActive: true }).select({ _id: 1, slug: 1, name: 1 }).lean(),
+      ServiceCategory.find({ isActive: true }).select({ _id: 1, slug: 1, name: 1, minOrderValue: 1 }).lean(),
       ServiceSku.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
         { $match: { isActive: true } },
         { $group: { _id: '$categoryId', count: { $sum: 1 } } },
@@ -396,10 +449,12 @@ export class LocationPricingService {
             id: service.serviceId,
             name: service.label,
             categoryId: String(category._id),
+            minOrderValue: category.minOrderValue || 0,
             ...(service.sectionId ? { sectionId: service.sectionId } : {}),
           }];
         });
-      return { id: section.slug, name: section.title, subcategories };
+      const groupMinOrderValue = subcategories.length > 0 ? (subcategories[0].minOrderValue ?? 0) : 0;
+      return { id: section.slug, name: section.title, minOrderValue: groupMinOrderValue, subcategories };
     }).filter((group) => group.subcategories.length > 0);
 
     const groupedIds = new Set(groups.map((group) => group.id));
@@ -422,10 +477,12 @@ export class LocationPricingService {
         return {
           id: category.slug,
           name: displayName,
+          minOrderValue: category.minOrderValue || 0,
           subcategories: [{
             id: category.slug,
             name: displayName,
             categoryId: String(category._id),
+            minOrderValue: category.minOrderValue || 0,
           }],
         };
       });
@@ -437,10 +494,12 @@ export class LocationPricingService {
         ungrouped.unshift({
           id: 'hourly-helper',
           name: 'Hourly Based Work',
+          minOrderValue: hourlyInDb.minOrderValue || 0,
           subcategories: [{
             id: 'hourly-helper',
             name: 'Hourly Based Work',
             categoryId: String(hourlyInDb._id),
+            minOrderValue: hourlyInDb.minOrderValue || 0,
           }],
         });
       }
