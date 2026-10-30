@@ -219,6 +219,44 @@ function normalizeArea(s: string): string {
   return String(s).toLowerCase().replace(/[-_\s]+/g, '');
 }
 
+export function getPartnerCategoryValues(
+  categories: unknown,
+  skills: unknown,
+): unknown[] {
+  const values = Array.isArray(categories) ? [...categories] : [];
+  if (skills && typeof skills === 'object' && !Array.isArray(skills)) {
+    values.push(...Object.keys(skills));
+  }
+  return values;
+}
+
+export function getPartnerWorkAreaValues(...sources: unknown[]): string[] {
+  const values: string[] = [];
+  const fields = ['label', 'name', 'area', 'city', 'slug', 'id', 'value'];
+
+  for (const source of sources) {
+    if (!Array.isArray(source)) continue;
+    for (const entry of source) {
+      if (typeof entry === 'string' || typeof entry === 'number') {
+        const value = String(entry).trim();
+        if (value) values.push(value);
+        continue;
+      }
+      if (!entry || typeof entry !== 'object') continue;
+      const record = entry as Record<string, unknown>;
+      for (const field of fields) {
+        const value = String(record[field] || '').trim();
+        if (value) {
+          values.push(value);
+          break;
+        }
+      }
+    }
+  }
+
+  return values;
+}
+
 function normalizePhone(phone: unknown): string {
   return String(phone || '').replace(/\D/g, '');
 }
@@ -705,6 +743,7 @@ export class BookNowAutoAssignService {
           homeLocation: 1,
           location: 1,
           'partnerProfile.categories': 1,
+          'partnerProfile.skills': 1,
           'partnerProfile.workAreas': 1,
           'partnerProfile.status': 1,
           'partnerProfile.onLeave': 1,
@@ -752,9 +791,10 @@ export class BookNowAutoAssignService {
       );
       for (const profile of profiles) {
         const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
-        const categories = Array.isArray(partnerProfile.categories)
-          ? (partnerProfile.categories as string[])
-          : [];
+        const categories = getPartnerCategoryValues(
+          partnerProfile.categories,
+          partnerProfile.skills,
+        );
         const shifts = Array.isArray(partnerProfile.workShifts)
           ? (partnerProfile.workShifts as string[])
           : [];
@@ -784,9 +824,10 @@ export class BookNowAutoAssignService {
         const matchedArea = matchEligibleHourlyHelperArea(profile, candidates);
         if (!matchedArea) continue;
         const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
-        const categories = Array.isArray(partnerProfile.categories)
-          ? (partnerProfile.categories as string[])
-          : [];
+        const categories = getPartnerCategoryValues(
+          partnerProfile.categories,
+          partnerProfile.skills,
+        );
         const shifts = Array.isArray(partnerProfile.workShifts)
           ? (partnerProfile.workShifts as string[])
           : [];
@@ -809,15 +850,14 @@ export class BookNowAutoAssignService {
       for (const profile of profiles) {
         if (seenUids.has(String(profile.uid || ''))) continue;
         const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
-        const categories = Array.isArray(partnerProfile.categories)
-          ? (partnerProfile.categories as string[])
-          : [];
-        const workAreas =
-          Array.isArray(partnerProfile.workAreas) && partnerProfile.workAreas.length
-            ? (partnerProfile.workAreas as string[])
-            : Array.isArray(profile.helperWorkAreas)
-              ? (profile.helperWorkAreas as string[])
-              : [];
+        const categories = getPartnerCategoryValues(
+          partnerProfile.categories,
+          partnerProfile.skills,
+        );
+        const workAreas = getPartnerWorkAreaValues(
+          partnerProfile.workAreas,
+          profile.helperWorkAreas,
+        );
         const shifts = Array.isArray(partnerProfile.workShifts)
           ? (partnerProfile.workShifts as string[])
           : [];

@@ -7,6 +7,8 @@ import {
   getAllBookNowOfferRecipients,
   getBookNowNotificationTiers,
   getFirstAvailableOfferStage,
+  getPartnerCategoryValues,
+  getPartnerWorkAreaValues,
   isBookNowOfferBeforeScheduledStart,
   mergeActiveOfferRecipients,
 } from '../services/BookNowAutoAssignService';
@@ -42,6 +44,20 @@ assert.ok(hyderabadAreas.some(({ area }) => area === 'Gachibowli'));
 assert.ok(
   hyderabadAreas.some(({ area }) => area === 'Madhapur'),
   'Nearby Hyderabad work areas should remain eligible',
+);
+
+assert.deepStrictEqual(
+  getPartnerCategoryValues([], { plumbing: ['water_tank_motor_installation'] }),
+  ['plumbing'],
+  'Partner skill groups must count as registered categories',
+);
+assert.deepStrictEqual(
+  getPartnerWorkAreaValues(
+    [{ id: 'tadepalligudem', label: 'Tadepalligudem' }],
+    ['Kadakatla'],
+  ),
+  ['Tadepalligudem', 'Kadakatla'],
+  'Object and legacy work-area values must both be eligible inputs',
 );
 
 const partner = (uid: string, phone: string) => ({
