@@ -161,23 +161,6 @@ const SLUG_TO_PARENT_CATEGORY: Record<string, string> = {
   home_service: 'cleaning',
 };
 
-const _PRIMARY_CATEGORIES = new Set([
-  'cleaning',
-  'electrician',
-  'plumbing',
-  'carpentry',
-  'painting',
-  'ac_service',
-  'ac-service',
-  'appliance_repair',
-  'pest_control',
-  'beauty_services',
-  'delivery_logistics',
-  'driving',
-  'daily-labour',
-  'home_services',
-]);
-
 function extractParentCategory(task: ITask): string {
   // 1. Use the pre-resolved partner category ID if stored on the task
   const stored = String((task as any).partnerCategoryId || '').trim().toLowerCase();
