@@ -14,6 +14,8 @@ import { QcDatabase } from '../config/qcDatabase';
 import { QC_AVAILABLE_ORDERS_MAX_DISTANCE_KM, QC_DEFAULT_DELIVERY_FEE_INR, haversineKm } from '../constants/quickCommerce';
 import { PaymentClient } from '../services/PaymentClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
+import { NotificationClient } from '../services/NotificationClient';
+import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import {
   BookNowAutoAssignService,
   isBookNowOfferBeforeScheduledStart,
@@ -1224,6 +1226,47 @@ export class PartnerBookNowController {
 
       if (!reopened) {
         throw new NotFoundError('Task not found or you are not the assigned partner');
+      }
+
+      // Notify the customer that their assigned partner cancelled.
+      try {
+        const Profile = mongoose.connection.collection('profiles');
+        let customerUid: string | null = null;
+        if (reopened.requesterId) {
+          const requester = await Profile.findOne(
+            { _id: reopened.requesterId },
+            { projection: { uid: 1 } },
+          );
+          customerUid = requester?.uid ? String(requester.uid) : null;
+        }
+        if (customerUid) {
+          const taskTitle = String(reopened.title || 'your booking');
+          const notifTitle = 'Partner cancelled the task';
+          const notifBody = `Your assigned partner has cancelled "${taskTitle}". Please wait while we assign another partner to you.`;
+          await InAppNotificationClient.send({
+            userId: customerUid,
+            title: notifTitle,
+            body: notifBody,
+            type: 'warning',
+            category: 'taskUpdates',
+            data: { taskId: id, action: 'partner_cancelled', recipientRole: 'customer' },
+          });
+          await NotificationClient.send({
+            eventKey: NOTIFICATION_EVENT_KEYS.TASK_CANCELLED_CUSTOMER,
+            category: 'taskUpdates',
+            actorId: uid,
+            recipients: [customerUid],
+            entity: { type: 'task', id },
+            title: notifTitle,
+            body: notifBody,
+            data: { taskId: id, action: 'partner_cancelled', recipientRole: 'customer' },
+          });
+        }
+      } catch (notifErr: any) {
+        logger.error('[PartnerBookNow] Failed to send partner-cancelled notification to customer', {
+          taskId: id,
+          error: notifErr?.message || notifErr,
+        });
       }
 
       console.log(`[PartnerBookNow] updateLeadStatus: task=${id} uid=${uid} CANCELLED → returned to pool`);

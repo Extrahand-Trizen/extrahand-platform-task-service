@@ -66,7 +66,8 @@ export interface ITask extends Document {
     | "deep_cleaning"
     | "maid"
     | "handyperson"
-    | "accounting";
+    | "accounting"
+    | "daily_labour";
   categorySlug?: string;
   categoryLabel?: string;
   /** Exact partner profile category ID (matches profiles.partnerProfile.categories[]). */
@@ -561,6 +562,7 @@ const TaskSchema = new Schema<ITask>(
         "maid",
         "handyperson",
         "accounting",
+        "daily_labour",
       ],
       required: true,
       index: true,

@@ -233,20 +233,6 @@ const PARTNER_CATEGORY_TO_TASK_CATEGORIES: Record<string, string[]> = {
   'hourly-helper': ALL_BOOK_NOW_TASK_CATEGORIES,
   'hourly-based': ALL_BOOK_NOW_TASK_CATEGORIES,
 };
-  'beauty-services': ['other'],
-  beauty: ['other'],
-  beautician: ['other'],
-  salon: ['other'],
-  'care-services': ['other'],
-  'professional-services': ['other'],
-  'event-services': ['other'],
-  'hourly-helper': ALL_BOOK_NOW_TASK_CATEGORIES,
-  'hourly-based': ALL_BOOK_NOW_TASK_CATEGORIES,
-  'home-help': ['cleaning', 'other'],
-  'kitchen-help': ['cleaning', 'other'],
-  'heavy-work': ['delivery', 'other'],
-  'event-help': ['other'],
-};
 
 const PAINTING_SUPPLY_CATEGORY_SLUGS = new Set([
   'painting',

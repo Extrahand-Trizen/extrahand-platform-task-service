@@ -32,6 +32,7 @@ const TASK_CATEGORY_ENUM: ReadonlySet<string> = new Set([
   'maid',
   'handyperson',
   'accounting',
+  'daily_labour',
 ]);
 
 /** Mirrors extrahand-mobile-app Book Now catalogId → task metadata (no MongoDB required). */
@@ -63,7 +64,7 @@ export const BOOK_NOW_CATALOG_LABELS: Record<string, string> = {
 };
 
 export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
-  'daily-labour': 'other',
+  'daily-labour': 'daily_labour',
   'full-house': 'cleaning',
   bathroom: 'cleaning',
   kitchen: 'cleaning',
@@ -137,7 +138,7 @@ export function resolveBookNowTaskCategory(catalogId: string): TaskCategory {
   const key = String(catalogId || '')
     .trim()
     .toLowerCase();
-  if (key === 'daily-labour') return 'other';
+  if (key === 'daily-labour') return 'daily_labour';
   if (BOOK_NOW_TASK_CATEGORY_BY_CATALOG[key]) {
     return BOOK_NOW_TASK_CATEGORY_BY_CATALOG[key];
   }
@@ -264,7 +265,9 @@ export const CATALOG_SLUG_TO_PARTNER_CATEGORY_ID: Record<string, string> = {
   // Driving
   'driver-chauffeur': 'driving',
   // Daily labour
-  'daily-labour': 'daily-labour',
+  'daily-labour': 'daily_labour',
+  'daily-labour-half-day': 'daily_labour',
+  'daily-labour-full-day': 'daily_labour',
   // Hourly / personal
   'hourly-helper': 'cleaning',
   'personal-assistance': 'professional_services',
