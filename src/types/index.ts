@@ -24,7 +24,14 @@ export interface Location {
 }
 
 // Task types
-export type TaskCategory = 'cleaning' | 'repair' | 'delivery' | 'assembly' | 'gardening' | 'petcare' | 'packers-movers' | 'other';
+export type TaskCategory =
+  // Legacy broad enums (backward-compat)
+  | 'cleaning' | 'repair' | 'delivery' | 'assembly' | 'gardening' | 'petcare' | 'packers-movers' | 'other'
+  // Canonical category IDs (from categoryTree.ts)
+  | 'electrician' | 'appliance_repair' | 'ac_service' | 'plumbing' | 'carpentry'
+  | 'pest_control' | 'beauty_services' | 'delivery_logistics' | 'driving' | 'painting'
+  | 'car_wash' | 'pet_services' | 'event_services' | 'professional_services'
+  | 'care_services' | 'laundry' | 'deep_cleaning' | 'maid' | 'handyperson' | 'accounting';
 export type TaskStatus = 'open' | 'assigned' | 'started' | 'in_progress' | 'review' | 'completed' | 'cancelled';
 export type BudgetType = 'fixed' | 'hourly' | 'negotiable';
 export type Urgency = 'low' | 'medium' | 'high' | 'urgent';

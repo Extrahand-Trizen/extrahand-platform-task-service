@@ -15,6 +15,7 @@ import {
   resolveBookNowCategoryLabel,
   resolveBookNowTaskCategory,
   resolveParentCategory,
+  resolvePartnerCategoryId,
 } from '../utils/bookNowClientCatalog';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
@@ -932,7 +933,9 @@ export class BookingService {
       packageSlug: sku.slug,
       categorySlug: category?.slug || normalized.categorySlug!,
       categoryLabel: category?.name || resolveBookNowCategoryLabel(normalized.categorySlug!),
-      taskCategory: normalizeBookNowTaskCategory(sku.taskCategory || 'cleaning'),
+      taskCategory: normalizeBookNowTaskCategory(
+        sku.taskCategory || resolveBookNowTaskCategory(category?.slug || normalized.categorySlug || ''),
+      ),
       pricingUnit: (sku.pricingUnit as 'fixed' | 'hourly') || 'fixed',
       quantity,
       lineTotal,
@@ -2289,7 +2292,12 @@ export class BookingService {
           : {
               title: line.title,
               description,
-              category: normalizeBookNowTaskCategory(line.taskCategory),
+              category: resolvePartnerCategoryId(
+                line.categorySlug ||
+                (String(line.serviceType || order.serviceType || '').trim().toLowerCase() === 'painting'
+                  ? 'painting'
+                  : ''),
+              ) || normalizeBookNowTaskCategory(line.taskCategory),
               categorySlug:
                 line.categorySlug ||
                 (String(line.serviceType || order.serviceType || '')
@@ -2298,6 +2306,12 @@ export class BookingService {
                   ? 'painting'
                   : undefined),
               categoryLabel: line.categoryLabel,
+              partnerCategoryId: resolvePartnerCategoryId(
+                line.categorySlug ||
+                (String(line.serviceType || order.serviceType || '').trim().toLowerCase() === 'painting'
+                  ? 'painting'
+                  : ''),
+              ) || undefined,
               subcategory: line.packageSlug,
               budget: { amount: line.lineTotal, currency: 'INR', type: line.pricingUnit },
               isNegotiable: false,

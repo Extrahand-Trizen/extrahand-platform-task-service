@@ -146,56 +146,93 @@ const PARTNER_CATEGORY_TO_TASK_CATEGORIES: Record<string, string[]> = {
   'home_services': ALL_BOOK_NOW_TASK_CATEGORIES,
   handyperson: ALL_BOOK_NOW_TASK_CATEGORIES,
   handyman: ALL_BOOK_NOW_TASK_CATEGORIES,
-  // Cleaning family — also eligible for hourly-based/hourly-helper tasks (category: 'other').
+  // ── Exact partner category IDs (from categoryTree.ts / MongoDB) ──────────
+  // Cleaning
   cleaning: ['cleaning', 'other'],
   'home-cleaning': ['cleaning', 'other'],
-  // Repair family (plumbing / electrical / carpentry / AC / appliance).
-  repair: ['repair'],
-  plumbing: ['repair'],
-  electrical: ['repair'],
+  // Electrician
   electrician: ['repair'],
+  electrical: ['repair'],
+  // Appliance repair
   appliance_repair: ['repair'],
-  'appliance-repair-services': ['repair'],
-  ac_service: ['repair'],
-  'ac-services': ['repair'],
-  carpenter: ['repair'],
-  carpentry: ['repair'],
-  'ac-service': ['repair'],
-  'ac-repair': ['repair'],
   'appliance-repair': ['repair'],
-  // Delivery / driving family.
-  delivery: ['delivery'],
-  'delivery-logistics': ['delivery'],
-  driving: ['delivery'],
-  // Assembly family.
-  assembly: ['assembly'],
-  'assembly-services': ['assembly'],
-  'furniture-assembly': ['assembly'],
-  // Gardening family.
-  gardening: ['gardening'],
-  // Pet care family.
+  'appliance-repair-services': ['repair'],
+  // AC service
+  ac_service: ['repair'],
+  'ac-service': ['repair'],
+  'ac-services': ['repair'],
+  'ac-repair': ['repair'],
+  // Plumbing
+  plumbing: ['repair'],
+  // Carpentry
+  carpentry: ['repair'],
+  carpenter: ['repair'],
+  // Pest control
+  pest_control: ['other'],
+  'pest-control': ['other'],
+  // Beauty services
+  beauty_services: ['other'],
+  'beauty-services': ['other'],
+  beauty: ['other'],
+  beautician: ['other'],
+  salon: ['other'],
+  // Care services
+  care_services: ['other'],
+  'care-services': ['other'],
+  // Pet services
+  pet_services: ['petcare'],
+  'pet-services': ['petcare'],
   petcare: ['petcare'],
   'pet-care': ['petcare'],
-  'pet-services': ['petcare'],
-  // Packers & movers family.
-  'packers-movers': ['packers-movers'],
-  moving: ['packers-movers'],
-  // Remaining Book Now catalog services fall under Task.category 'other'.
-  other: ['other'],
+  // Painting
   painting: ['other'],
-  'interior-painting': ['other'],
-  'exterior-painting': ['other'],
-  'rental-painting': ['other'],
-  waterproofing: ['other'],
   'painting-interior': ['other'],
   'painting-exterior': ['other'],
   'painting-rental': ['other'],
   'painting-waterproofing': ['other'],
-  'pest-control': ['cleaning', 'other'],
-  'pest_control': ['other'],
+  'interior-painting': ['other'],
+  'exterior-painting': ['other'],
+  'rental-painting': ['other'],
+  waterproofing: ['other'],
+  // Delivery / logistics
+  delivery_logistics: ['delivery'],
+  'delivery-logistics': ['delivery'],
+  delivery: ['delivery'],
+  // Driving
+  driving: ['delivery'],
+  // Professional services
+  professional_services: ['other'],
+  'professional-services': ['other'],
+  // Event services
+  event_services: ['other'],
+  'event-services': ['other'],
+  // Daily labour
+  'daily-labour': ['other'],
+  // Car wash / laundry
+  car_wash: ['cleaning'],
   'car-wash': ['cleaning'],
   carwash: ['cleaning'],
   laundry: ['cleaning'],
+  // Assembly
+  assembly: ['assembly'],
+  'assembly-services': ['assembly'],
+  'furniture-assembly': ['assembly'],
+  // Gardening
+  gardening: ['gardening'],
+  // Packers & movers
+  'packers-movers': ['packers-movers'],
+  moving: ['packers-movers'],
+  // Repair (coarse)
+  repair: ['repair'],
+  // Misc
+  other: ['other'],
+  'home-help': ['cleaning', 'other'],
+  'kitchen-help': ['cleaning', 'other'],
+  'heavy-work': ['delivery', 'other'],
+  'event-help': ['other'],
+  'hourly-helper': ALL_BOOK_NOW_TASK_CATEGORIES,
+  'hourly-based': ALL_BOOK_NOW_TASK_CATEGORIES,
+};
   'beauty-services': ['other'],
   beauty: ['other'],
   beautician: ['other'],

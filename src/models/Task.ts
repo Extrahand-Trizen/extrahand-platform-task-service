@@ -37,6 +37,7 @@ export interface ITask extends Document {
   description: string;
 
   category:
+    // ── Legacy broad enums (kept for backward-compat) ──────────────────────
     | "cleaning"
     | "repair"
     | "delivery"
@@ -44,9 +45,32 @@ export interface ITask extends Document {
     | "gardening"
     | "petcare"
     | "packers-movers"
-    | "other";
+    | "other"
+    // ── Canonical category IDs (from categoryTree.ts / CATEGORY_TO_SLUG) ───
+    | "electrician"
+    | "appliance_repair"
+    | "ac_service"
+    | "plumbing"
+    | "carpentry"
+    | "pest_control"
+    | "beauty_services"
+    | "delivery_logistics"
+    | "driving"
+    | "painting"
+    | "car_wash"
+    | "pet_services"
+    | "event_services"
+    | "professional_services"
+    | "care_services"
+    | "laundry"
+    | "deep_cleaning"
+    | "maid"
+    | "handyperson"
+    | "accounting";
   categorySlug?: string;
   categoryLabel?: string;
+  /** Exact partner profile category ID (matches profiles.partnerProfile.categories[]). */
+  partnerCategoryId?: string;
   subcategory?: string;
 
   // ── Packers & Movers specific fields (only populated when category = 'packers-movers') ──
@@ -507,6 +531,7 @@ const TaskSchema = new Schema<ITask>(
     category: {
       type: String,
       enum: [
+        // ── Legacy broad enums (backward-compat) ───────────────────────────
         "cleaning",
         "repair",
         "delivery",
@@ -515,12 +540,35 @@ const TaskSchema = new Schema<ITask>(
         "petcare",
         "packers-movers",
         "other",
+        // ── Canonical category IDs (from categoryTree.ts) ──────────────────
+        "electrician",
+        "appliance_repair",
+        "ac_service",
+        "plumbing",
+        "carpentry",
+        "pest_control",
+        "beauty_services",
+        "delivery_logistics",
+        "driving",
+        "painting",
+        "car_wash",
+        "pet_services",
+        "event_services",
+        "professional_services",
+        "care_services",
+        "laundry",
+        "deep_cleaning",
+        "maid",
+        "handyperson",
+        "accounting",
       ],
       required: true,
       index: true,
     },
     categorySlug: { type: String, index: true },
     categoryLabel: String,
+    /** Exact partner profile category ID (matches profiles.partnerProfile.categories[]). */
+    partnerCategoryId: { type: String, index: true },
     subcategory: String,
 
     // ── Packers & Movers specific fields ──────────────────────────────────────

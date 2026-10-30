@@ -66,9 +66,13 @@ export function isBookNowOfferBeforeScheduledStart(task: ITask, now = new Date()
 // ─── Work Area Coordinates (Hyderabad / Telangana) ───────────────────────────
 const WORK_AREA_COORDS = HYDERABAD_WORK_AREA_COORDS;
 
-// ─── Category Slug → Parent Category Mapping ────────────────────────────────
+// ─── Category Slug → Partner Profile Category ID Mapping ────────────────────
+// Keys = categorySlug values stored on tasks.
+// Values = exact IDs stored in profiles.partnerProfile.categories[].
 const SLUG_TO_PARENT_CATEGORY: Record<string, string> = {
+  // Daily labour
   'daily-labour': 'daily-labour',
+  // Electrician
   electrician: 'electrician',
   'electrician-switch-and-socket': 'electrician',
   'switch-and-socket': 'electrician',
@@ -76,6 +80,10 @@ const SLUG_TO_PARENT_CATEGORY: Record<string, string> = {
   'fan-installation': 'electrician',
   'electrician-wiring': 'electrician',
   wiring: 'electrician',
+  'electrician-fan-and-light': 'electrician',
+  'electrician-mcb-wiring': 'electrician',
+  'electrician-general': 'electrician',
+  // Cleaning
   cleaning: 'cleaning',
   'home-cleaning': 'cleaning',
   'house-cleaning': 'cleaning',
@@ -97,16 +105,59 @@ const SLUG_TO_PARENT_CATEGORY: Record<string, string> = {
   glass: 'cleaning',
   carpet: 'cleaning',
   'carpet-cleaning': 'cleaning',
+  // Plumbing
   plumbing: 'plumbing',
   'plumbing-leak': 'plumbing',
   leak: 'plumbing',
   'plumbing-tap-repair': 'plumbing',
   'tap-repair': 'plumbing',
+  'plumbing-toilet': 'plumbing',
+  'plumbing-tap-mixer': 'plumbing',
+  'plumbing-pipeline': 'plumbing',
+  'plumbing-drainage': 'plumbing',
+  'plumbing-water-tank': 'plumbing',
+  'plumbing-bath-shower': 'plumbing',
+  'plumbing-general': 'plumbing',
+  // Carpentry
   carpentry: 'carpentry',
+  'carpentry-door-window': 'carpentry',
+  'carpentry-furniture': 'carpentry',
+  'carpentry-general': 'carpentry',
+  'bath-accessories': 'carpentry',
+  'bath-accessories-installation': 'carpentry',
+  // AC service
+  'ac-services': 'ac_service',
+  'ac-repair': 'ac_service',
+  'ac-servicing': 'ac_service',
+  'ac-installation': 'ac_service',
+  // Appliance repair
+  'appliance-repair': 'appliance_repair',
+  'appliance-repair-services': 'appliance_repair',
+  // Painting
   painting: 'painting',
-  'ac-repair': 'ac-repair',
-  home_services: 'home_services',
-  home_service: 'home_services',
+  'painting-interior': 'painting',
+  'painting-exterior': 'painting',
+  'painting-rental': 'painting',
+  'painting-waterproofing': 'painting',
+  // Pest control
+  'pest-control': 'pest_control',
+  'pest-control-termite': 'pest_control',
+  'pest-control-cockroach': 'pest_control',
+  'pest-control-general': 'pest_control',
+  // Beauty
+  'womens-beauty': 'beauty_services',
+  'womens-hair': 'beauty_services',
+  'mens-grooming': 'beauty_services',
+  beauty: 'beauty_services',
+  // Delivery / logistics
+  delivery: 'delivery_logistics',
+  'delivery-logistics': 'delivery_logistics',
+  'pick-drop': 'delivery_logistics',
+  // Driving
+  driving: 'driving',
+  // Misc
+  home_services: 'cleaning',
+  home_service: 'cleaning',
 };
 
 const PRIMARY_CATEGORIES = new Set([
@@ -115,17 +166,30 @@ const PRIMARY_CATEGORIES = new Set([
   'plumbing',
   'carpentry',
   'painting',
-  'ac-repair',
+  'ac_service',
+  'ac-service',
+  'appliance_repair',
+  'pest_control',
+  'beauty_services',
+  'delivery_logistics',
+  'driving',
+  'daily-labour',
   'home_services',
 ]);
 
 function extractParentCategory(task: ITask): string {
+  // 1. Use the pre-resolved partner category ID if stored on the task
+  const stored = String((task as any).partnerCategoryId || '').trim().toLowerCase();
+  if (stored) return stored;
+
   const slug = String((task as any).categorySlug || task.categoryLabel || '')
     .trim()
     .toLowerCase();
   const subcategory = String(task.subcategory || '')
     .trim()
     .toLowerCase();
+
+  // 2. Painting special-case (consultation/project flow)
   if (
     slug === 'painting' ||
     slug.startsWith('painting-') ||
@@ -138,22 +202,20 @@ function extractParentCategory(task: ITask): string {
   if (String(task.serviceType || '').trim().toLowerCase() === 'painting') {
     return 'painting';
   }
-  if (
-    String((task as any).serviceFlowType || '').trim() === 'consultation_project'
-  ) {
+  if (String((task as any).serviceFlowType || '').trim() === 'consultation_project') {
     const serviceType = String(task.serviceType || '').trim().toLowerCase();
-    if (!serviceType || serviceType === 'painting') {
-      return 'painting';
-    }
+    if (!serviceType || serviceType === 'painting') return 'painting';
   }
-  if (task.category && PRIMARY_CATEGORIES.has(String(task.category).toLowerCase())) {
-    return String(task.category).toLowerCase();
-  }
-  const lower = slug;
-  if (SLUG_TO_PARENT_CATEGORY[lower]) return SLUG_TO_PARENT_CATEGORY[lower];
+
+  // 3. Exact slug lookup
+  if (SLUG_TO_PARENT_CATEGORY[slug]) return SLUG_TO_PARENT_CATEGORY[slug];
+
+  // 4. Prefix-based lookup
   for (const [key, parent] of Object.entries(SLUG_TO_PARENT_CATEGORY)) {
-    if (lower.startsWith(key + '-') || lower === key || lower.endsWith('-' + key)) return parent;
+    if (slug.startsWith(key + '-') || slug === key || slug.endsWith('-' + key)) return parent;
   }
+
+  // 5. Fall back to the coarse task.category field
   return String(task.category || '').toLowerCase();
 }
 
