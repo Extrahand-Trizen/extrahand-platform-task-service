@@ -6,8 +6,6 @@ import { UserMatchingService } from './UserMatchingService';
 import { UserServiceClient } from '../clients/UserServiceClient';
 import { EmailServiceClient } from '../clients/EmailServiceClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
-import { fireWhatsAppNotify } from '../clients/WhatsAppClient';
-import { taskOpenAppButton } from '../utils/whatsappTaskButtons';
 import { MainAdminNotificationClient } from '../clients/MainAdminNotificationClient';
 import { NotificationPreferenceChecker } from './NotificationPreferenceChecker';
 import { config } from '../config/env';
@@ -564,6 +562,7 @@ export async function runPostCreateNotifications(
                 category: 'keywordTaskAlerts',
                 actorId: posterUid,
                 entity: { type: 'task', id: task._id.toString() },
+                skipWhatsApp: String(task.bookingSource || '') === 'book_now',
                 title: `Alert: Task matches your saved keywords`,
                 body: `A new task has been posted with keywords you're interested in: ${taskKeywords.slice(0, 2).join(', ')}`,
                 data: {
@@ -754,6 +753,7 @@ export async function runPostCreateNotifications(
                 category: 'keywordTaskAlerts', // Using same category preference
                 actorId: posterUid,
                 entity: { type: 'task', id: task._id.toString() },
+                skipWhatsApp: String(task.bookingSource || '') === 'book_now',
                 title: `New ${task.categoryLabel || task.category} task posted!`,
                 body: `A new ${task.categoryLabel || task.category} task has been posted: ${task.title.substring(0, 50)}${task.title.length > 50 ? '...' : ''}`,
                 data: withHelperAlertData({
@@ -865,6 +865,7 @@ export async function runPostCreateNotifications(
               category: 'recommendedTaskAlerts',
               actorId: posterUid,
               entity: { type: 'task', id: task._id.toString() },
+              skipWhatsApp: String(task.bookingSource || '') === 'book_now',
               title: `Matched your skills nearby: ${task.title}`,
               body: `A ${task.categoryLabel || task.category} task has been posted near ${locationLabel} and matches your skills.`,
               data: withHelperAlertData({
@@ -884,9 +885,54 @@ export async function runPostCreateNotifications(
             },
             nearbyAndSkill,
           );
+
+          const whatsappEligibleUids: string[] = [];
+          for (const nearbyUid of nearbyAndSkill) {
+            const alreadyApplied = await TaskApplication.exists({
+              taskId: task._id,
+              applicantUid: nearbyUid,
+              status: { $in: ['pending', 'accepted'] },
+            });
+            if (!alreadyApplied) whatsappEligibleUids.push(nearbyUid);
+          }
+
+          if (whatsappEligibleUids.length > 0 && String(task.bookingSource || '') !== 'book_now') {
+            try {
+              await MainAdminNotificationClient.dispatchBookNowWorkWhatsApp({
+                taskId: task._id.toString(),
+                stage: 'all',
+                recipientUids: whatsappEligibleUids,
+                title: task.title || 'New work',
+                category: skillMatchCategory || task.categoryLabel || task.category || 'work',
+                locationLabel,
+              });
+              logger.info(
+                '[TaskService.postCreateNotifications] Automatic WhatsApp dispatch accepted',
+                {
+                  taskId: task._id,
+                  recipientCount: whatsappEligibleUids.length,
+                  stage: 'all',
+                },
+              );
+            } catch (whatsappError) {
+              logger.error(
+                '[TaskService.postCreateNotifications] Automatic WhatsApp dispatch failed',
+                {
+                  taskId: task._id,
+                  recipientCount: whatsappEligibleUids.length,
+                  error:
+                    whatsappError instanceof Error
+                      ? whatsappError.message
+                      : String(whatsappError),
+                },
+              );
+            }
+          }
         }
 
-        // In-app + WhatsApp only for nearby ∩ skill helpers
+        // In-app only for nearby ∩ skill helpers. WhatsApp is dispatched in one
+        // batch above so the Admin Server can enforce its global toggle and
+        // duplicate prevention.
         for (const nearbyUid of nearbyAndSkill) {
           try {
             // Governance: one WA per work+helper; skip if already applied.
@@ -897,25 +943,6 @@ export async function runPostCreateNotifications(
             });
             if (alreadyApplied) continue;
 
-            const categoryLabel =
-              skillMatchCategory || task.categoryLabel || task.category || 'work';
-            fireWhatsAppNotify({
-              uid: nearbyUid,
-              templateKey: 'wa_nearby_work_skill_match',
-              category: 'recommendedTaskAlerts',
-              templateBody: {
-                var_1: task.title || 'New work',
-                var_2: String(categoryLabel),
-                var_3: String(locationLabel),
-              },
-              templateButtons: taskOpenAppButton(task._id.toString()),
-              idempotencyKey: `wa_nearby_work_skill_match:${task._id.toString()}:${nearbyUid}`,
-              metadata: {
-                workId: task._id.toString(),
-                triggerType: 'skill_nearby',
-                recipientRole: 'helper',
-              },
-            });
             await InAppNotificationClient.send({
               userId: nearbyUid,
               title: 'New Skill Matched Nearby',
