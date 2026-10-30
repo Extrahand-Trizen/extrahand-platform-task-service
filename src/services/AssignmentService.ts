@@ -920,7 +920,9 @@ export class AssignmentService {
     task.assignmentOffer = undefined;
     task.acceptedApplicationId = null as any;
     applyAssignedHelperNameToTask(task as any, partnerSnapshot.name);
-    await task.save();
+    // Older tasks can contain category values that are no longer in the
+    // current enum, so validate only fields changed by this assignment.
+    await task.save({ validateModifiedOnly: true });
 
     logger.info('Direct partner assigned (Book Now)', {
       taskId: task._id,
