@@ -161,7 +161,7 @@ const SLUG_TO_PARENT_CATEGORY: Record<string, string> = {
   home_service: 'cleaning',
 };
 
-const PRIMARY_CATEGORIES = new Set([
+const _PRIMARY_CATEGORIES = new Set([
   'cleaning',
   'electrician',
   'plumbing',

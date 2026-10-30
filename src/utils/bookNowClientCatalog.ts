@@ -225,8 +225,7 @@ export const CATALOG_SLUG_TO_PARTNER_CATEGORY_ID: Record<string, string> = {
   'ac-services': 'ac_service',
   'ac-repair': 'ac_service',
   'ac-service': 'ac_service',
-  // Plumbing family
-  plumbing: 'plumbing',
+  // Plumbing family (plumbing itself is in canonical block above)
   'plumbing-toilet': 'plumbing',
   'plumbing-tap-mixer': 'plumbing',
   'plumbing-pipeline': 'plumbing',
@@ -234,7 +233,7 @@ export const CATALOG_SLUG_TO_PARTNER_CATEGORY_ID: Record<string, string> = {
   'plumbing-water-tank': 'plumbing',
   'plumbing-bath-shower': 'plumbing',
   'plumbing-general': 'plumbing',
-  // Carpentry family
+  // Carpentry family (carpentry itself is in canonical block above)
   carpenter: 'carpentry',
   'carpentry-door-window': 'carpentry',
   'carpentry-furniture': 'carpentry',
