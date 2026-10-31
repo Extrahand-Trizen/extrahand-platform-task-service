@@ -30,7 +30,8 @@
     "backfill:recurring-visits": "ts-node src/scripts/backfillRecurringVisits.ts",
     "validate:recurring-visits": "ts-node src/scripts/validateRecurringVisitMigration.ts",
     "lint": "eslint src --ext .ts",
-    "health": "curl -f http://localhost:4002/api/v1/health || exit 1"
+    "health": "curl -f http://localhost:4002/api/v1/health || exit 1",
+    "deactivate:full-home-deep-clean": "ts-node -r dotenv/config src/scripts/deactivateFullHomeDeepCleanCatalog.ts"
   },
   "engines": {
     "node": ">=20.19.0"

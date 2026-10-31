@@ -164,6 +164,59 @@ export class BookNowCatalogBootstrap {
     return result;
   }
 
+  static async deactivateFullHomeDeepClean(): Promise<{
+    active: false;
+    skus: number;
+    variants: number;
+  }> {
+    const skuSlugs = ['full-home-deep', 'full-home-deep-clean'];
+    const category = await ServiceCategory.findOne({ slug: 'full-house' })
+      .select('_id')
+      .lean();
+    const skuIds = category
+      ? await ServiceSku.find({
+          categoryId: category._id,
+          $or: [
+            { slug: { $in: skuSlugs } },
+            { name: /^full home deep clean$/i },
+          ],
+        }).distinct('_id')
+      : [];
+
+    const [skuResult, variantResult] = await Promise.all([
+      category
+        ? ServiceSku.updateMany(
+            {
+              categoryId: category._id,
+              $or: [
+                { slug: { $in: skuSlugs } },
+                { name: /^full home deep clean$/i },
+              ],
+            },
+            { $set: { isActive: false } },
+          )
+        : Promise.resolve({ modifiedCount: 0 }),
+      skuIds.length > 0
+        ? ServiceVariant.updateMany(
+            { skuId: { $in: skuIds } },
+            { $set: { isActive: false } },
+          )
+        : Promise.resolve({ modifiedCount: 0 }),
+    ]);
+
+    const result = {
+      active: false as const,
+      skus: skuResult.modifiedCount,
+      variants: variantResult.modifiedCount,
+    };
+    logger.info('Full Home Deep Clean catalog item deactivated', {
+      categorySlug: 'full-house',
+      skuSlugs,
+      ...result,
+    });
+    return result;
+  }
+
   /** Seed Hourly Helper category + duration SKUs (pricingUnit=hourly). Idempotent. */
   static async seedHourlyHelperCatalog(): Promise<{ categoryId: string; skus: number }> {
     const category = await ServiceCategory.findOneAndUpdate(
@@ -398,6 +451,8 @@ export class BookNowCatalogBootstrap {
         );
       }
     }
+
+    await BookNowCatalogBootstrap.deactivateFullHomeDeepClean();
 
     for (const city of SERVICE_CITIES) {
       await ServiceArea.findOneAndUpdate(

@@ -107,14 +107,6 @@
       "description": "2 Bedrooms + attached bathrooms."
     },
     {
-      "catalogId": "full-house",
-      "packageId": "full-home-deep",
-      "name": "Full Home Deep Clean",
-      "basePrice": 2499,
-      "durationMinutes": 360,
-      "description": "Thorough deep cleaning including walls, fans, exhausts."
-    },
-    {
       "catalogId": "bathroom",
       "packageId": "regular-clean",
       "name": "Bathroom Cleaning",
