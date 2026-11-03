@@ -53,6 +53,13 @@ function parseCatalogLocation(query: Request['query']): CatalogLocationInput {
 }
 
 export class CatalogController {
+  static async getBookNowHomeCategories(req: Request, res: Response): Promise<void> {
+    const categories = await CatalogService.getBookNowHomeCategories(
+      getCatalogCustomerUid(req),
+    );
+    res.json({ success: true, data: categories });
+  }
+
   static async getBookNowAvailability(req: Request, res: Response): Promise<void> {
     const availability = await BookNowAvailabilityService.getAvailabilityForAddress(
       parseCatalogLocation(req.query),

@@ -369,6 +369,144 @@ function filterPersonalAssistantFromHubResponse(
 }
 
 export class CatalogService {
+  static async getBookNowHomeCategories(customerUid?: string | null) {
+    const [categories, categoryContents, hubSectionDocs] = await Promise.all([
+      ServiceCategory.find({ isActive: true })
+        .select({ slug: 1, name: 1, sortOrder: 1 })
+        .sort({ sortOrder: 1, name: 1 })
+        .lean(),
+      BookNowCategoryContent.find({})
+        .select({ categorySlug: 1, title: 1, heroImageUrl: 1, isActive: 1, sortOrder: 1 })
+        .sort({ sortOrder: 1, title: 1 })
+        .lean(),
+      BookNowHubSection.find({ isActive: true })
+        .select({ slug: 1, title: 1, iconKey: 1, sortOrder: 1, services: 1 })
+        .sort({ sortOrder: 1, title: 1 })
+        .lean(),
+    ]);
+    const visibleCategories = filterPersonalAssistantCategories(categories, customerUid);
+    if (visibleCategories.length === 0) return [];
+
+    const categoryIds = visibleCategories.map((category) => category._id);
+    const activeCategoryIds = await ServiceSku.distinct('categoryId', {
+      categoryId: { $in: categoryIds },
+      isActive: true,
+    });
+    const activeCategoryIdSet = new Set(activeCategoryIds.map(String));
+    const categoryBySlug = new Map(
+      visibleCategories.map((category) => [
+        normalizeCatalogLookup(category.slug),
+        category,
+      ] as const),
+    );
+    const categoryContentBySlug = new Map(
+      categoryContents.map((content) => [
+        normalizeCatalogLookup(content.categorySlug),
+        content,
+      ] as const),
+    );
+    const inactiveCategorySlugs = new Set(
+      categoryContents
+        .filter((content) => content.isActive === false)
+        .map((content) => normalizeCatalogLookup(content.categorySlug)),
+    );
+    const sections = hubSectionDocs.length > 0
+      ? hubSectionDocs.map((section) => ({
+          id: section.slug,
+          slug: section.slug,
+          title: section.title,
+          iconKey: section.iconKey || 'Broom',
+          sortOrder: Number(section.sortOrder || 0),
+          services: section.services,
+        }))
+      : BOOK_NOW_HUB_SECTION_SEED.map((section) => ({
+          id: section.id,
+          slug: section.id,
+          title: section.title,
+          iconKey: section.iconKey,
+          sortOrder: section.sortOrder,
+          services: section.services,
+        }));
+    const groupedCategorySlugs = new Set(
+      sections.flatMap((section) => [
+        normalizeCatalogLookup(section.id),
+        ...section.services.map((service) => normalizeCatalogLookup(service.categorySlug)),
+      ]),
+    );
+    const toHomeService = (service: (typeof sections)[number]['services'][number]) => {
+      const slug = normalizeCatalogLookup(service.categorySlug);
+      const category = categoryBySlug.get(slug);
+      const content = categoryContentBySlug.get(slug);
+      if (
+        service.isActive === false ||
+        !category ||
+        !activeCategoryIdSet.has(String(category._id)) ||
+        inactiveCategorySlugs.has(slug)
+      ) {
+        return null;
+      }
+      return {
+        id: service.serviceId,
+        label: service.label,
+        categorySlug: service.categorySlug,
+        categoryName: category.name || content?.title || service.label,
+        sectionId: service.sectionId || '',
+        imageUrl: service.imageUrl || content?.heroImageUrl || '',
+        previewPackages: [],
+        totalPackages: 0,
+      };
+    };
+    const groupedSections = sections
+      .map((section) => ({
+        id: section.id,
+        slug: section.slug,
+        title: section.title,
+        iconKey: section.iconKey,
+        sortOrder: section.sortOrder,
+        services: section.services.map(toHomeService).filter(
+          (service): service is NonNullable<typeof service> => service !== null,
+        ),
+      }))
+      .filter((section) => section.services.length > 0);
+    const fallbackSections = visibleCategories
+      .filter((category) => {
+        const slug = normalizeCatalogLookup(category.slug);
+        return (
+          activeCategoryIdSet.has(String(category._id)) &&
+          !groupedCategorySlugs.has(slug) &&
+          !inactiveCategorySlugs.has(slug)
+        );
+      })
+      .map((category) => {
+        const slug = normalizeCatalogLookup(category.slug);
+        const content = categoryContentBySlug.get(slug);
+        return {
+          id: slug,
+          slug,
+          title: content?.title || category.name || slug,
+          iconKey: 'Broom',
+          sortOrder: Number(category.sortOrder || 999),
+          services: [{
+            id: slug,
+            label: content?.title || category.name || slug,
+            categorySlug: slug,
+            categoryName: category.name || slug,
+            sectionId: '',
+            imageUrl: content?.heroImageUrl || '',
+            previewPackages: [],
+            totalPackages: 0,
+          }],
+        };
+      });
+
+    return filterPersonalAssistantFromHubResponse(
+      [...groupedSections, ...fallbackSections].sort(
+        (a, b) => a.sortOrder - b.sortOrder,
+      ),
+      customerUid,
+    );
+  }
+
   static async listAdminServices(): Promise<AdminCatalogCategory[]> {
     const [categories, categoryContents, skuContents, hubSectionDocs] = await Promise.all([
       ServiceCategory.find({ isActive: true })

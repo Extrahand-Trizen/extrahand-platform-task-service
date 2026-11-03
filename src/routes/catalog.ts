@@ -27,6 +27,7 @@ router.get('/internal/home-promotions', asyncHandler(CatalogController.listCusto
 router.post('/internal/home-promotions', asyncHandler(CatalogController.createCustomerHomePromotion));
 router.patch('/internal/home-promotions/:id', asyncHandler(CatalogController.patchCustomerHomePromotion));
 router.get('/home-promotions', asyncHandler(CatalogController.listPublicCustomerHomePromotions));
+router.get('/home-categories', asyncHandler(CatalogController.getBookNowHomeCategories));
 router.get('/internal/skus/operational', asyncHandler(CatalogController.listOperationalSkus));
 router.patch(
   '/internal/skus/operational/:id/offer',
