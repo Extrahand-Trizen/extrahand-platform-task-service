@@ -1258,6 +1258,7 @@ export class CatalogService {
     customerUid?: string | null,
     location?: CatalogLocationInput,
     featuredOnly = false,
+    includeLocationPricing = true,
   ) {
     const limit = Math.max(1, Math.min(Number(previewLimit || 5), 8));
     const [categories, skuContents, categoryContents] = await Promise.all([
@@ -1274,9 +1275,6 @@ export class CatalogService {
     const skus = await ServiceSku.find({ categoryId: { $in: categoryIds }, isActive: true })
       .sort({ name: 1, _id: 1 })
       .lean();
-    const priceBySkuId = hasCatalogLocation(location)
-      ? await LocationPricingService.priceSkusForAddress(skus, location)
-      : undefined;
     const contentBySkuKey = new Map<string, (typeof skuContents)[number]>();
     skuContents.forEach((content) => {
       const normalizedCategory = normalizeCatalogLookup(content.categorySlug);
@@ -1291,6 +1289,30 @@ export class CatalogService {
         contentBySkuKey.set(`${normalizedCategory}::${key}`, content);
       });
     });
+    const categorySlugById = new Map(
+      categoriesForHub.map((category) => [String(category._id), normalizeCatalogLookup(category.slug)] as const),
+    );
+    const findSkuContent = (categorySlug: string, sku: (typeof skus)[number]) => {
+      const candidateKeys = [
+        normalizeCatalogLookup(String(sku.slug || '')),
+        normalizeContentIdentity(String(sku.slug || '')),
+        normalizeCatalogLookup(String(sku.name || '')),
+        normalizeContentIdentity(String(sku.name || '')),
+      ].filter(Boolean);
+      return candidateKeys
+        .map((key) => contentBySkuKey.get(`${categorySlug}::${key}`))
+        .find(Boolean);
+    };
+    const skusToPrice = featuredOnly
+      ? skus.filter((sku) => {
+          const categorySlug = categorySlugById.get(String(sku.categoryId));
+          return categorySlug && findSkuContent(categorySlug, sku)?.isFeaturedOnHome === true;
+        })
+      : skus;
+    const priceBySkuId =
+      includeLocationPricing && hasCatalogLocation(location)
+        ? await LocationPricingService.priceSkusForAddress(skusToPrice, location)
+        : undefined;
     const categoryContentBySlug = new Map(
       categoryContents.map((content) => [normalizeCatalogLookup(content.categorySlug), content] as const),
     );
@@ -1313,15 +1335,7 @@ export class CatalogService {
       const contentBySkuSlug = new Map<string, (typeof skuContents)[number]>();
 
       categorySkus.forEach((sku) => {
-        const candidateKeys = [
-          normalizeCatalogLookup(String(sku.slug || '')),
-          normalizeContentIdentity(String(sku.slug || '')),
-          normalizeCatalogLookup(String(sku.name || '')),
-          normalizeContentIdentity(String(sku.name || '')),
-        ].filter(Boolean);
-        const content = candidateKeys
-          .map((key) => contentBySkuKey.get(`${normalizedCategorySlug}::${key}`))
-          .find(Boolean);
+        const content = findSkuContent(normalizedCategorySlug, sku);
         if (content) {
           contentBySkuSlug.set(normalizeCatalogLookup(String(sku.slug || '')), content);
           contentBySkuSlug.set(normalizeContentIdentity(String(sku.slug || '')), content);
@@ -1332,13 +1346,8 @@ export class CatalogService {
 
       if (featuredOnly) {
         categorySkus = categorySkus.filter((sku) => {
-          const skuSlug = normalizeCatalogLookup(String(sku.slug || ''));
-          const content =
-            contentBySkuSlug.get(skuSlug) ??
-            contentBySkuSlug.get(normalizeContentIdentity(String(sku.slug || ''))) ??
-            contentBySkuSlug.get(normalizeCatalogLookup(String(sku.name || ''))) ??
-            contentBySkuSlug.get(normalizeContentIdentity(String(sku.name || '')));
-          return content?.isFeaturedOnHome === true;
+          return contentBySkuSlug.get(normalizeCatalogLookup(String(sku.slug || '')))
+            ?.isFeaturedOnHome === true;
         });
       }
 

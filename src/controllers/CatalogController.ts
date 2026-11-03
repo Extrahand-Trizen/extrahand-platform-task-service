@@ -182,6 +182,7 @@ export class CatalogController {
       getCatalogCustomerUid(req),
       parseCatalogLocation(req.query),
       req.query.featuredOnly === 'true',
+      req.query.includeLocationPricing !== 'false',
     );
     res.json({ success: true, data: sections });
   }
