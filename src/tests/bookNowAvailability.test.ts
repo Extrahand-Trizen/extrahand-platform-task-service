@@ -37,10 +37,21 @@ async function runTests() {
       value: () => ({ lean: async () => [] }),
     });
     resolvedAddress.cityId = new mongoose.Types.ObjectId();
-    const listedAvailability = await BookNowAvailabilityService.getAvailabilityForAddress({});
-    assert.equal(listedAvailability.isEnabled, true);
-    assert.equal(listedAvailability.message, null);
+    const unconfiguredAvailability = await BookNowAvailabilityService.getAvailabilityForAddress({});
+    assert.equal(unconfiguredAvailability.isEnabled, false);
+    assert.equal(unconfiguredAvailability.isExplicit, false);
+    assert.match(unconfiguredAvailability.message || '', /not available at this location/i);
 
+    Object.defineProperty(BookNowLocationAvailability, 'find', {
+      configurable: true,
+      value: () => ({
+        lean: async () => [{
+          locationType: 'city',
+          locationId: resolvedAddress.cityId,
+          isEnabled: true,
+        }],
+      }),
+    });
     Object.defineProperty(BookNowServiceLocationAvailability, 'find', {
       configurable: true,
       value: () => ({

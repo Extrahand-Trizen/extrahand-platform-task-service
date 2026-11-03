@@ -83,7 +83,7 @@ export class BookNowAvailabilityService {
     const globalRule = matched
       ? ruleByLocation.get(`${matched.type}:${String(matched.id)}`)
       : undefined;
-    const globalEnabled = globalRule?.isEnabled ?? candidates.length > 0;
+    const globalEnabled = globalRule?.isEnabled ?? false;
     if (selectedCatalogId && globalEnabled) {
       const serviceRules = await BookNowServiceLocationAvailability.find({
         catalogId: selectedCatalogId,
@@ -118,13 +118,15 @@ export class BookNowAvailabilityService {
     if (!matched) {
       const hasResolvedLocation = candidates.length > 0;
       return {
-        isEnabled: hasResolvedLocation,
+        isEnabled: globalEnabled,
         isExplicit: false,
         locationType: null,
         locationId: null,
         catalogId: selectedCatalogId || null,
         message: hasResolvedLocation
-          ? null
+          ? globalEnabled
+            ? null
+            : 'Book Now services are not available at this location. Please choose another service location.'
           : 'Book Now services are not available at this location. Please choose another service location.',
       };
     }
@@ -226,7 +228,7 @@ export class BookNowAvailabilityService {
       ];
       const matched = candidates.find(({ type, id }) => id && getRule(type, id));
       return {
-        isEnabled: matched ? getRule(matched.type, matched.id)!.isEnabled : true,
+        isEnabled: matched ? getRule(matched.type, matched.id)!.isEnabled : false,
         source: matched?.type,
         rule: matched ? getRule(matched.type, matched.id) : undefined,
       };
@@ -270,7 +272,7 @@ export class BookNowAvailabilityService {
         | 'mixed'
         | undefined;
       let serviceAvailabilityEnabled: boolean | undefined;
-      let isEnabled = true;
+      let isEnabled = false;
       if (locationType === 'city') {
         const city = cityById.get(locationId);
         const stateRule = city?.stateId ? getRule('state', city.stateId) : undefined;
@@ -346,7 +348,7 @@ export class BookNowAvailabilityService {
         isEnabled = ownRule.isEnabled;
         availabilityMode = ownRule.isEnabled ? 'enabled' : 'disabled';
       } else if (locationType === 'city' || locationType === 'pincode') {
-        isEnabled = inheritedRule ? inheritedRule.isEnabled : true;
+        isEnabled = inheritedRule ? inheritedRule.isEnabled : false;
         availabilityMode = isEnabled ? 'enabled' : 'disabled';
       }
       if (catalogId) {

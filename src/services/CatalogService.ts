@@ -1651,13 +1651,21 @@ export class CatalogService {
   }
 
   static async getBookNowCategoryPackages(categorySlug: string, customerUid?: string | null, location?: CatalogLocationInput) {
-    const category = await this.getCategoryBySlug(categorySlug, customerUid);
+    assertPersonalAssistantAccessible(categorySlug, customerUid);
     const parentSlug = resolveParentCategory(categorySlug).slug;
-    if (category && typeof (category as any).minOrderValue !== 'number') {
-      const hub = await BookNowHubSection.findOne({
+    const [category, hub] = await Promise.all([
+      ServiceCategory.findOne({
+        slug: resolveCategoryAlias(categorySlug),
+        isActive: true,
+      }).lean(),
+      BookNowHubSection.findOne({
         slug: { $in: [categorySlug, parentSlug] },
         isActive: true,
-      }).select({ minOrderValue: 1 }).lean();
+      }).select({ minOrderValue: 1 }).lean(),
+    ]);
+    if (!category) throw new NotFoundError('Category not found');
+
+    if (category && typeof (category as any).minOrderValue !== 'number') {
       if (hub && typeof (hub as any).minOrderValue === 'number') {
         (category as any).minOrderValue = (hub as any).minOrderValue;
       }
