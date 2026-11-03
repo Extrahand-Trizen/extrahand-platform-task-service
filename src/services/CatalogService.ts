@@ -410,14 +410,35 @@ export class CatalogService {
         .filter((content) => content.isActive === false)
         .map((content) => normalizeCatalogLookup(content.categorySlug)),
     );
-    const sections = hubSectionDocs.length > 0
+    const sections: Array<{
+      id: string;
+      slug: string;
+      title: string;
+      iconKey: string;
+      sortOrder: number;
+      services: Array<{
+        serviceId: string;
+        label: string;
+        categorySlug: string;
+        sectionId?: string;
+        imageUrl?: string;
+        isActive?: boolean;
+      }>;
+    }> = hubSectionDocs.length > 0
       ? hubSectionDocs.map((section) => ({
           id: section.slug,
           slug: section.slug,
           title: section.title,
           iconKey: section.iconKey || 'Broom',
           sortOrder: Number(section.sortOrder || 0),
-          services: section.services,
+          services: section.services.map((service) => ({
+            serviceId: service.serviceId,
+            label: service.label,
+            categorySlug: service.categorySlug,
+            sectionId: service.sectionId,
+            imageUrl: service.imageUrl,
+            isActive: service.isActive,
+          })),
         }))
       : BOOK_NOW_HUB_SECTION_SEED.map((section) => ({
           id: section.id,
@@ -425,7 +446,14 @@ export class CatalogService {
           title: section.title,
           iconKey: section.iconKey,
           sortOrder: section.sortOrder,
-          services: section.services,
+          services: section.services.map((service) => ({
+            serviceId: service.id,
+            label: service.label,
+            categorySlug: service.categorySlug,
+            sectionId: service.sectionId,
+            imageUrl: service.imageUrl,
+            isActive: true,
+          })),
         }));
     const groupedCategorySlugs = new Set(
       sections.flatMap((section) => [
