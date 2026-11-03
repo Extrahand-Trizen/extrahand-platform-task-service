@@ -11,11 +11,15 @@ export interface IBookNowSkuContent extends Document {
   displayName: string;
   shortDescription?: string;
   longDescription?: string;
+  filterId?: string;
+  filterLabel?: string;
   includes: string[];
   excludes: string[];
   imageUrls: string[];
   faqItems: IBookNowSkuFaqItem[];
   sortOrder: number;
+  isFeaturedOnHome: boolean;
+  featuredSortOrder: number;
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -36,11 +40,15 @@ const BookNowSkuContentSchema = new Schema<IBookNowSkuContent>(
     displayName: { type: String, required: true, trim: true },
     shortDescription: { type: String, trim: true },
     longDescription: { type: String, trim: true },
+    filterId: { type: String, trim: true, lowercase: true },
+    filterLabel: { type: String, trim: true },
     includes: [{ type: String, trim: true }],
     excludes: [{ type: String, trim: true }],
     imageUrls: [{ type: String, trim: true }],
     faqItems: { type: [BookNowSkuFaqItemSchema], default: [] },
     sortOrder: { type: Number, default: 0 },
+    isFeaturedOnHome: { type: Boolean, default: false, index: true },
+    featuredSortOrder: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true, index: true },
   },
   { timestamps: true },

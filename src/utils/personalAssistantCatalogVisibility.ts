@@ -29,11 +29,9 @@ export function isPersonalAssistantCategorySlug(slug: string): boolean {
   );
 }
 
-/** Public catalog + checkout: hidden until published, unless caller is on preview allowlist. */
-export function canAccessPersonalAssistantCatalog(customerUid?: string | null): boolean {
-  if (isPersonalAssistantCatalogPublished()) return true;
-  if (!customerUid) return false;
-  return getPersonalAssistantPreviewUids().has(customerUid);
+/** Catalog visibility is controlled by the active category, service, and content records. */
+export function canAccessPersonalAssistantCatalog(_customerUid?: string | null): boolean {
+  return true;
 }
 
 export function personalAssistantCatalogIsActive(): boolean {

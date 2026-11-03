@@ -4,6 +4,8 @@ import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppErr
 import logger from '../config/logger';
 import { ReviewRatings } from '../types';
 import mongoose from 'mongoose';
+import { NotificationClient } from './NotificationClient';
+import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 
 function extractProfileDisplayName(profile: any): string | null {
   if (!profile || typeof profile !== 'object') return null;
@@ -197,6 +199,65 @@ export class ReviewService {
       }
     } catch (error) {
       logger.warn('Could not update performer rating:', error);
+    }
+
+    try {
+      const partnerProfile = await mongoose.connection.collection('profiles').findOne({ _id: performerId });
+      const partnerUid = partnerProfile?.uid ? String(partnerProfile.uid).trim() : '';
+
+      if (!partnerUid) {
+        logger.warn('Could not notify performer about rating: profile has no UID', {
+          taskId,
+          performerId: String(performerId),
+        });
+      } else {
+        const notificationTitle = 'You received a new rating';
+        const notificationBody = `A customer rated your work ${rating} out of 5 for "${task.title || 'your task'}".`;
+        const notificationData = {
+          taskId,
+          status: 'completed',
+          rating,
+          eventKey: 'TASK_UPDATED',
+          entityType: 'task',
+          action: 'view_review',
+          recipientRole: 'partner',
+        };
+        const notificationResults = await Promise.allSettled([
+          NotificationClient.send({
+            eventKey: 'TASK_UPDATED',
+            category: 'taskUpdates',
+            actorId: _reviewerUid || String(reviewerId),
+            recipients: [partnerUid],
+            entity: { type: 'task', id: taskId },
+            title: notificationTitle,
+            body: notificationBody,
+            data: notificationData,
+          }),
+          InAppNotificationClient.send({
+            userId: partnerUid,
+            title: notificationTitle,
+            body: notificationBody,
+            type: 'info',
+            category: 'taskUpdates',
+            data: notificationData,
+          }),
+        ]);
+
+        notificationResults.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            logger.warn('Could not deliver performer rating notification', {
+              taskId,
+              channel: index === 0 ? 'push' : 'in-app',
+              error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+            });
+          }
+        });
+      }
+    } catch (error) {
+      logger.warn('Could not notify performer about rating', {
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     logger.info(`✅ Review created successfully: ${review._id} for task ${taskId}`);

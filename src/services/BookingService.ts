@@ -19,7 +19,6 @@ import {
 } from '../utils/bookNowClientCatalog';
 import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
 import logger from '../config/logger';
-import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
 import {
   assertBookNowSlotAvailable,
   deriveBookNowTimeSlot,
@@ -60,6 +59,7 @@ import {
   type CategoryMinimumConfig,
 } from '../utils/bookNowFixedPriceMinimum';
 import { BookNowCatalogBootstrap } from './BookNowCatalogBootstrap';
+import { BookNowAvailabilityService } from './BookNowAvailabilityService';
 import { abandonUnpaidBookingOrder } from './bookingAbandonUnpaid';
 import { cancelHourlyBooking } from './cancellation/cancellationOrchestrator';
 import { evaluateProjectCancellation } from './cancellation/projectCancellationPolicy';
@@ -180,6 +180,29 @@ async function assertHourlyHelperAvailableForAddress(address: BookingAddress): P
   return helpers.map((helper) => helper.uid);
 }
 
+async function assertBookNowLocationAvailable(
+  address: BookingAddress,
+  catalogIds: string[] = [],
+): Promise<void> {
+  const availabilities = await Promise.all(
+    [...new Set(catalogIds.filter(Boolean))].map((catalogId) =>
+      BookNowAvailabilityService.getAvailabilityForAddress(address, catalogId),
+    ),
+  );
+  const availability =
+    availabilities.find((result) => !result.isEnabled) ||
+    (availabilities.length === 0
+      ? await BookNowAvailabilityService.getAvailabilityForAddress(address)
+      : undefined);
+  if (availability && !availability.isEnabled) {
+    throw new BadRequestError(
+      availability.message ||
+        'Book Now services are not available at this location. Please choose another service location.',
+      'BOOK_NOW_LOCATION_UNAVAILABLE',
+    );
+  }
+}
+
 export type BookingLineInput = {
   skuSlug?: string;
   categorySlug?: string;
@@ -250,6 +273,7 @@ type ResolvedLine = {
   categorySlug: string;
   categoryLabel: string;
   taskCategory: string;
+  partnerCategoryId?: string;
   pricingUnit: 'fixed' | 'hourly';
   quantity: number;
   lineTotal: number;
@@ -273,6 +297,7 @@ type PendingBookingLine = {
   categorySlug: string;
   categoryLabel: string;
   taskCategory: string;
+  partnerCategoryId?: string;
   pricingUnit: 'fixed' | 'hourly';
   quantity: number;
   lineTotal: number;
@@ -525,6 +550,7 @@ function serializePendingLine(line: ResolvedLine): PendingBookingLine {
     categorySlug: line.categorySlug,
     categoryLabel: line.categoryLabel,
     taskCategory: line.taskCategory,
+    partnerCategoryId: line.partnerCategoryId,
     pricingUnit: line.pricingUnit,
     quantity: line.quantity,
     lineTotal: line.lineTotal,
@@ -564,6 +590,7 @@ function deserializePendingLine(line: PendingBookingLine): ResolvedLine {
     categorySlug: line.categorySlug,
     categoryLabel: line.categoryLabel,
     taskCategory: line.taskCategory,
+    partnerCategoryId: line.partnerCategoryId,
     pricingUnit: line.pricingUnit,
     quantity: line.quantity,
     lineTotal: line.lineTotal,
@@ -936,6 +963,7 @@ export class BookingService {
       taskCategory: normalizeBookNowTaskCategory(
         sku.taskCategory || resolveBookNowTaskCategory(category?.slug || normalized.categorySlug || ''),
       ),
+      partnerCategoryId: sku.partnerCategoryId || undefined,
       pricingUnit: (sku.pricingUnit as 'fixed' | 'hourly') || 'fixed',
       quantity,
       lineTotal,
@@ -1033,21 +1061,6 @@ export class BookingService {
       consultationMeta,
       gstExempt: params.gstExempt,
     });
-
-    const serviceable = await CatalogService.isPinCodeServiceable(
-      address.pinCode,
-      address.city,
-      customerUid,
-      address.coordinates,
-    );
-    const hardcodedSupported = isHardcodedSupportedLocation({
-      city: address.city,
-      state: address.state,
-      address: address.line1,
-    });
-    if (!serviceable && !hardcodedSupported) {
-      throw new BadRequestError('Service is not available in this area yet');
-    }
 
     const rawLines: BookingLineInput[] =
       params.items && params.items.length > 0
@@ -1240,6 +1253,15 @@ export class BookingService {
     assertBookNowFixedPriceMinimumCheckout(resolvedLines, categoryConfigs);
 
     const isHourlyOrder = resolvedLines.some(isHourlyResolvedLine);
+    const hasBookNowServices = resolvedLines.some((line) => !isHourlyResolvedLine(line));
+    if (hasBookNowServices) {
+      await assertBookNowLocationAvailable(
+        address,
+        resolvedLines
+          .filter((line) => !isHourlyResolvedLine(line))
+          .map((line) => line.categorySlug),
+      );
+    }
 
     const hourlyEligiblePartnerUids =
       looksHourlyInput || isHourlyOrder
@@ -1273,10 +1295,34 @@ export class BookingService {
         );
       }
 
+      const dailyLabourOption =
+        line.categorySlug === DAILY_LABOUR_CATEGORY.slug
+          ? DAILY_LABOUR_OPTIONS.find((option) => option.slug === line.packageSlug)
+          : undefined;
+      const durationMinutes =
+        dailyLabourOption?.durationMinutes ??
+        schedule?.durationMinutes ??
+        line.durationMinutes;
+      const scheduledTimeStart = schedule?.scheduledTimeStart;
+      const startMinutes = scheduledTimeStart
+        ? parseSlotMinutes(scheduledTimeStart)
+        : null;
+      const scheduledTimeEnd =
+        dailyLabourOption && startMinutes !== null
+          ? minutesToSlot(startMinutes + dailyLabourOption.durationMinutes)
+          : schedule?.scheduledTimeEnd;
+      const normalizedSchedule = schedule
+        ? {
+            ...schedule,
+            durationMinutes,
+            scheduledTimeEnd: scheduledTimeEnd ?? schedule.scheduledTimeEnd,
+          }
+        : undefined;
+
       return {
         ...line,
-        durationMinutes: schedule?.durationMinutes ?? line.durationMinutes,
-        schedule: schedule ?? undefined,
+        durationMinutes,
+        schedule: normalizedSchedule,
       };
     });
 
@@ -1287,33 +1333,49 @@ export class BookingService {
       if (!DAILY_LABOUR_ACTIVE) {
         throw new BadRequestError('Daily Labour is currently unavailable for booking.');
       }
-      if (resolvedLinesWithSchedule.length !== 1) {
+      if (dailyLabourLines.length !== resolvedLinesWithSchedule.length) {
         throw new BadRequestError('Daily Labour must be booked as a separate booking.');
       }
-      const dailyLine = dailyLabourLines[0];
-      const schedule = dailyLine.schedule;
-      const startMinutes = schedule
-        ? parseSlotMinutes(schedule.scheduledTimeStart || '')
-        : null;
-      const endMinutes = schedule
-        ? parseSlotMinutes(schedule.scheduledTimeEnd || '')
-        : null;
-      const option = DAILY_LABOUR_OPTIONS.find((item) => item.slug === dailyLine.packageSlug);
-      const computedDuration =
-        startMinutes !== null && endMinutes !== null
-          ? (endMinutes - startMinutes + 1440) % 1440
-          : null;
+      const sharedDailyLabourDate = dailyLabourLines[0].schedule?.scheduledDate;
+      const sharedDailyLabourStart = dailyLabourLines[0].schedule?.scheduledTimeStart;
       if (
-        !schedule ||
-        startMinutes === null ||
-        endMinutes === null ||
-        !option ||
-        schedule.durationMinutes !== option.durationMinutes ||
-        computedDuration !== option.durationMinutes
+        dailyLabourLines.some(
+          (line) =>
+            line.schedule?.scheduledDate !== sharedDailyLabourDate ||
+            line.schedule?.scheduledTimeStart !== sharedDailyLabourStart,
+        )
       ) {
-        throw new BadRequestError('Daily Labour booking duration is invalid.');
+        throw new BadRequestError(
+          'All Daily Labour shifts in a booking must share the same date and start time.',
+        );
+      }
+      for (const dailyLine of dailyLabourLines) {
+        const schedule = dailyLine.schedule;
+        const startMinutes = schedule
+          ? parseSlotMinutes(schedule.scheduledTimeStart || '')
+          : null;
+        const endMinutes = schedule
+          ? parseSlotMinutes(schedule.scheduledTimeEnd || '')
+          : null;
+        const option = DAILY_LABOUR_OPTIONS.find((item) => item.slug === dailyLine.packageSlug);
+        const computedDuration =
+          startMinutes !== null && endMinutes !== null
+            ? (endMinutes - startMinutes + 1440) % 1440
+            : null;
+        if (
+          !schedule ||
+          startMinutes === null ||
+          endMinutes === null ||
+          !option ||
+          schedule.durationMinutes !== option.durationMinutes ||
+          computedDuration !== option.durationMinutes
+        ) {
+          throw new BadRequestError('Daily Labour booking duration is invalid.');
+        }
       }
     }
+    const serviceCount =
+      dailyLabourLines.length > 0 ? 1 : resolvedLinesWithSchedule.length;
 
     if (!skipSlotChecks) {
       for (const line of resolvedLinesWithSchedule) {
@@ -1417,6 +1479,14 @@ export class BookingService {
     const primaryScheduleLine = resolvedLinesWithSchedule[0];
     const orderSchedule = orderScheduleFromLine(primaryScheduleLine);
 
+    if (hasBookNowServices) {
+      await assertBookNowLocationAvailable(
+        address,
+        resolvedLinesWithSchedule
+          .filter((line) => !isHourlyResolvedLine(line))
+          .map((line) => line.categorySlug),
+      );
+    }
     const order = await BookingOrder.create({
       orderId,
       customerUid,
@@ -1473,7 +1543,9 @@ export class BookingService {
       const combinedTitle =
         resolvedLinesWithSchedule.length === 1
           ? primaryLine.title
-          : `Book Now (${resolvedLinesWithSchedule.length} services)`;
+          : dailyLabourLines.length > 0
+            ? 'Daily Labour'
+            : `Book Now (${serviceCount} services)`;
       const placeholderTaskId = pendingBookNowTaskId(orderId);
       const applyCoins = useExtraCoins === true;
       const coinDiscountRequest = applyCoins
@@ -1498,7 +1570,7 @@ export class BookingService {
           bookingKind: normalizedOrderBookingKind,
           ...(normalizedOrderServiceType ? { serviceType: normalizedOrderServiceType } : {}),
           ...(normalizedOrderGstExempt ? { gstExempt: true } : {}),
-          itemCount: resolvedLinesWithSchedule.length,
+          itemCount: serviceCount,
           skuSlugs: resolvedLinesWithSchedule.map((l) => l.packageSlug),
           couponServiceIds: Array.from(
             new Set(
@@ -1506,13 +1578,14 @@ export class BookingService {
             )
           ),
           couponLineItems: (() => {
-            const byKey = new Map<string, { serviceId: string; amount: number; skuSlug?: string; categorySlug?: string }>();
+            const byKey = new Map<string, { serviceId: string; amount: number; skuSlug?: string; categorySlug?: string; lineKey?: string }>();
             for (const line of resolvedLinesWithSchedule) {
               const serviceId = String(line.categorySlug || line.packageSlug || '').trim();
               if (!serviceId) continue;
               const skuSlug = line.packageSlug ? String(line.packageSlug).trim() : undefined;
               const categorySlug = line.categorySlug ? String(line.categorySlug).trim() : undefined;
-              const key = `${serviceId}:${skuSlug || ''}:${categorySlug || ''}`;
+              const lineKey = categorySlug && skuSlug ? `${categorySlug}::${skuSlug}` : serviceId;
+              const key = lineKey;
               const existing = byKey.get(key);
               const amount = Number(line.lineTotal) || 0;
               if (existing) {
@@ -1523,6 +1596,7 @@ export class BookingService {
                   amount,
                   ...(skuSlug ? { skuSlug } : {}),
                   ...(categorySlug ? { categorySlug } : {}),
+                  lineKey,
                 });
               }
             }
@@ -1670,6 +1744,7 @@ export class BookingService {
           total: order.total,
           couponCode: order.couponCode || undefined,
           itemCount: resolvedLinesWithSchedule.length,
+          serviceCount,
           taskCount: materializedTasks.length,
           status: order.status,
         });
@@ -1681,6 +1756,7 @@ export class BookingService {
           totalBeforeCoupon: order.totalBeforeCoupon ?? pricing.total,
           couponCode: order.couponCode || undefined,
           itemCount: resolvedLinesWithSchedule.length,
+          serviceCount,
         });
       }
 
@@ -1852,6 +1928,10 @@ export class BookingService {
           : undefined,
     };
 
+    await assertBookNowLocationAvailable(
+      address,
+      [String(consultationTask.categorySlug || '').trim()].filter(Boolean),
+    );
     const order = await BookingOrder.create({
       orderId,
       customerUid,
@@ -2286,18 +2366,19 @@ export class BookingService {
       ]
         .filter(Boolean)
         .join('\n\n') || `Book Now: ${line.title}. Address: ${address.line1}, ${address.city} ${address.pinCode}.`;
+      const partnerCategoryId = line.partnerCategoryId || resolvePartnerCategoryId(
+        line.categorySlug ||
+        (String(line.serviceType || order.serviceType || '').trim().toLowerCase() === 'painting'
+          ? 'painting'
+          : ''),
+      );
       const taskPayload =
         isConsultationProjectOrder && sourceConsultationTask && sourceQuotation
           ? null
           : {
               title: line.title,
               description,
-              category: resolvePartnerCategoryId(
-                line.categorySlug ||
-                (String(line.serviceType || order.serviceType || '').trim().toLowerCase() === 'painting'
-                  ? 'painting'
-                  : ''),
-              ) || normalizeBookNowTaskCategory(line.taskCategory),
+              category: partnerCategoryId || normalizeBookNowTaskCategory(line.taskCategory),
               categorySlug:
                 line.categorySlug ||
                 (String(line.serviceType || order.serviceType || '')
@@ -2306,12 +2387,7 @@ export class BookingService {
                   ? 'painting'
                   : undefined),
               categoryLabel: line.categoryLabel,
-              partnerCategoryId: resolvePartnerCategoryId(
-                line.categorySlug ||
-                (String(line.serviceType || order.serviceType || '').trim().toLowerCase() === 'painting'
-                  ? 'painting'
-                  : ''),
-              ) || undefined,
+              partnerCategoryId: partnerCategoryId || undefined,
               subcategory: line.packageSlug,
               budget: { amount: line.lineTotal, currency: 'INR', type: line.pricingUnit },
               isNegotiable: false,
