@@ -3,6 +3,9 @@ import mongoose from 'mongoose';
 import { BookNowAvailabilityService } from '../services/BookNowAvailabilityService';
 import { LocationPricingService } from '../services/LocationPricingService';
 import BookNowLocationAvailability from '../models/BookNowLocationAvailability';
+import LocationArea from '../models/LocationArea';
+import LocationCity from '../models/LocationCity';
+import LocationState from '../models/LocationState';
 import BookNowServiceLocationAvailability from '../models/BookNowServiceLocationAvailability';
 
 async function runTests() {
@@ -104,6 +107,13 @@ async function runTests() {
     BookNowLocationAvailability,
     'findOneAndUpdate',
   );
+  const originalAvailabilityFindOneDescriptor = Object.getOwnPropertyDescriptor(
+    BookNowLocationAvailability,
+    'findOne',
+  );
+  const originalStateExistsDescriptor = Object.getOwnPropertyDescriptor(LocationState, 'exists');
+  const originalCityFindOneDescriptor = Object.getOwnPropertyDescriptor(LocationCity, 'findOne');
+  const originalAreaFindOneDescriptor = Object.getOwnPropertyDescriptor(LocationArea, 'findOne');
   const originalDeleteManyDescriptor = Object.getOwnPropertyDescriptor(
     BookNowServiceLocationAvailability,
     'deleteMany',
@@ -111,6 +121,29 @@ async function runTests() {
   const locationId = new mongoose.Types.ObjectId();
   let savedAvailabilityUpdate: Record<string, any> | undefined;
   let removedServiceRules: Record<string, any> | undefined;
+  const stateId = new mongoose.Types.ObjectId();
+  const existingCity = {
+    _id: locationId,
+    canonicalName: 'Mahbubnagar',
+    displayName: 'Mahbubnagar',
+    normalizedKey: 'mahbubnagar',
+    aliases: ['Mahbubnagar', 'Mahbub Nagar'],
+    isActive: true,
+    async save() {
+      return this;
+    },
+  };
+  const existingArea = {
+    _id: locationId,
+    canonicalName: 'Siddipet',
+    displayName: 'Siddipet',
+    normalizedKey: 'siddipet',
+    aliases: ['Siddipet'],
+    isActive: true,
+    async save() {
+      return this;
+    },
+  };
 
   try {
     Object.defineProperty(LocationPricingService, 'listLocations', {
@@ -119,9 +152,12 @@ async function runTests() {
     });
     Object.defineProperty(BookNowLocationAvailability, 'findOneAndUpdate', {
       configurable: true,
-      value: async (_query: unknown, update: Record<string, any>) => {
+      value: (_query: unknown, update: Record<string, any>) => {
         savedAvailabilityUpdate = update;
-        return { isEnabled: false, isHidden: true };
+        const result = { isEnabled: false, isHidden: true };
+        return Object.assign(Promise.resolve(result), {
+          lean: async () => result,
+        });
       },
     });
     Object.defineProperty(BookNowServiceLocationAvailability, 'deleteMany', {
@@ -148,6 +184,55 @@ async function runTests() {
       locationType: 'area',
       locationId,
     });
+
+    await BookNowAvailabilityService.setLocationAvailability({
+      locationType: 'area',
+      locationId: String(locationId),
+      isEnabled: false,
+      updatedBy: 'admin',
+    });
+    assert.deepEqual(savedAvailabilityUpdate?.$set, {
+      isEnabled: false,
+      isHidden: false,
+      updatedBy: 'admin',
+    });
+
+    Object.defineProperty(LocationState, 'exists', {
+      configurable: true,
+      value: async () => ({ _id: stateId }),
+    });
+    Object.defineProperty(LocationCity, 'findOne', {
+      configurable: true,
+      value: () => existingCity,
+    });
+    Object.defineProperty(BookNowLocationAvailability, 'findOne', {
+      configurable: true,
+      value: () => ({ lean: async () => ({ isHidden: true }) }),
+    });
+
+    const restoredCity = await LocationPricingService.createLocation('city', {
+      stateId: String(stateId),
+      canonicalName: 'Mahabubnagar',
+      displayName: 'Mahabubnagar',
+      aliases: ['Mahabubnagar', 'Mahabub Nagar', 'Mahbubnagar'],
+    });
+    assert.equal(restoredCity, existingCity);
+    assert.equal(existingCity.isActive, true);
+    assert.equal(existingCity.normalizedKey, 'mahabubnagar');
+    assert.ok(existingCity.aliases.includes('Mahbubnagar'));
+
+    Object.defineProperty(LocationArea, 'findOne', {
+      configurable: true,
+      value: async () => existingArea,
+    });
+    const restoredArea = await LocationPricingService.createLocation('area', {
+      canonicalName: 'Siddipet',
+      displayName: 'Siddipet',
+      aliases: ['Siddipet', 'Siddipet, Telangana'],
+    });
+    assert.equal(restoredArea, existingArea);
+    assert.equal(existingArea.isActive, true);
+    assert.ok(existingArea.aliases.includes('Siddipet, Telangana'));
   } finally {
     if (originalListLocationsDescriptor) {
       Object.defineProperty(
@@ -166,6 +251,30 @@ async function runTests() {
       );
     } else {
       Reflect.deleteProperty(BookNowLocationAvailability, 'findOneAndUpdate');
+    }
+    if (originalAvailabilityFindOneDescriptor) {
+      Object.defineProperty(
+        BookNowLocationAvailability,
+        'findOne',
+        originalAvailabilityFindOneDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(BookNowLocationAvailability, 'findOne');
+    }
+    if (originalStateExistsDescriptor) {
+      Object.defineProperty(LocationState, 'exists', originalStateExistsDescriptor);
+    } else {
+      Reflect.deleteProperty(LocationState, 'exists');
+    }
+    if (originalCityFindOneDescriptor) {
+      Object.defineProperty(LocationCity, 'findOne', originalCityFindOneDescriptor);
+    } else {
+      Reflect.deleteProperty(LocationCity, 'findOne');
+    }
+    if (originalAreaFindOneDescriptor) {
+      Object.defineProperty(LocationArea, 'findOne', originalAreaFindOneDescriptor);
+    } else {
+      Reflect.deleteProperty(LocationArea, 'findOne');
     }
     if (originalDeleteManyDescriptor) {
       Object.defineProperty(

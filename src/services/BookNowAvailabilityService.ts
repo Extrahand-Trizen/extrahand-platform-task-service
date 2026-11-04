@@ -440,7 +440,13 @@ export class BookNowAvailabilityService {
         ).lean()
       : await BookNowLocationAvailability.findOneAndUpdate(
           { locationType: params.locationType, locationId },
-          { $set: { isEnabled: params.isEnabled, updatedBy: params.updatedBy } },
+          {
+            $set: {
+              isEnabled: params.isEnabled,
+              isHidden: false,
+              updatedBy: params.updatedBy,
+            },
+          },
           { new: true, upsert: true, setDefaultsOnInsert: true },
         ).lean();
     return {

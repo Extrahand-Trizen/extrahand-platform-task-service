@@ -7,6 +7,7 @@ import LocationArea from '../models/LocationArea';
 import LocationCityPincodeMap from '../models/LocationCityPincodeMap';
 import LocationPincodeAreaMap from '../models/LocationPincodeAreaMap';
 import HourlySkuLocationPrice, { HourlyLocationType } from '../models/HourlySkuLocationPrice';
+import BookNowLocationAvailability from '../models/BookNowLocationAvailability';
 import ServiceSku from '../models/ServiceSku';
 import ServiceCategory from '../models/ServiceCategory';
 import BookNowHubSection from '../models/BookNowHubSection';
@@ -323,9 +324,32 @@ export class LocationPricingService {
     if (type === 'city') {
       const stateId = objectId(body.stateId, 'stateId');
       const normalizedKey = normalizeLocationName(body.canonicalName);
+      if (!normalizedKey) throw new BadRequestError('canonicalName is required');
       if (!await LocationState.exists({ _id: stateId })) throw new NotFoundError('State not found');
-      if (await LocationCity.exists({ stateId, normalizedKey })) throw new ConflictError('City already exists under this state');
-      return LocationCity.create({ ...body, stateId, normalizedKey, displayName: String(body.displayName || body.canonicalName).trim(), aliases: body.aliases || [] });
+      const aliases = Array.isArray(body.aliases) ? body.aliases.map(String) : [];
+      const existingCity = await LocationCity.findOne({
+        stateId,
+        $or: [
+          { normalizedKey },
+          ...(aliases.length ? [{ aliases: { $in: aliases } }] : []),
+        ],
+      });
+      if (existingCity) {
+        const availability = await BookNowLocationAvailability.findOne({
+          locationType: 'city',
+          locationId: existingCity._id,
+        }).lean();
+        if (existingCity.isActive && !availability?.isHidden) {
+          throw new ConflictError('City already exists under this state');
+        }
+        existingCity.canonicalName = String(body.canonicalName).trim();
+        existingCity.displayName = String(body.displayName || body.canonicalName).trim();
+        existingCity.normalizedKey = normalizedKey;
+        existingCity.aliases = Array.from(new Set([...existingCity.aliases, ...aliases]));
+        existingCity.isActive = true;
+        return existingCity.save();
+      }
+      return LocationCity.create({ ...body, stateId, normalizedKey, displayName: String(body.displayName || body.canonicalName).trim(), aliases });
     }
     if (type === 'pincode') {
       const value = pincode(body.pincode);
@@ -341,11 +365,27 @@ export class LocationPricingService {
     if (type === 'area') {
       const normalizedKey = normalizeLocationName(body.canonicalName);
       if (!normalizedKey) throw new BadRequestError('canonicalName is required');
-      if (await LocationArea.exists({ normalizedKey })) throw new ConflictError('Area already exists');
+      const aliases = Array.isArray(body.aliases) ? body.aliases.map(String) : [];
+      const existingArea = await LocationArea.findOne({ normalizedKey });
+      if (existingArea) {
+        const availability = await BookNowLocationAvailability.findOne({
+          locationType: 'area',
+          locationId: existingArea._id,
+        }).lean();
+        if (existingArea.isActive && !availability?.isHidden) {
+          throw new ConflictError('Area already exists');
+        }
+        existingArea.canonicalName = String(body.canonicalName).trim();
+        existingArea.displayName = String(body.displayName || body.canonicalName).trim();
+        existingArea.normalizedKey = normalizedKey;
+        existingArea.aliases = Array.from(new Set([...existingArea.aliases, ...aliases]));
+        existingArea.isActive = true;
+        return existingArea.save();
+      }
       const pincodeIds = Array.isArray(body.pincodeIds) ? body.pincodeIds.map((id: string) => objectId(id, 'pincodeId')) : [];
       const existing = await LocationPincode.countDocuments({ _id: { $in: pincodeIds }, isActive: true });
       if (existing !== pincodeIds.length) throw new BadRequestError('One or more pincodes are invalid or inactive');
-      const created = await LocationArea.create({ ...body, normalizedKey, displayName: String(body.displayName || body.canonicalName).trim(), aliases: body.aliases || [] });
+      const created = await LocationArea.create({ ...body, normalizedKey, displayName: String(body.displayName || body.canonicalName).trim(), aliases });
       if (pincodeIds.length) await LocationPincodeAreaMap.insertMany(pincodeIds.map((pincodeId: mongoose.Types.ObjectId, index: number) => ({ pincodeId, areaId: created._id, isPrimary: index === 0 })), { ordered: true });
       return created;
     }
