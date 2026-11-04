@@ -2,6 +2,16 @@ import { z } from 'zod';
 
 const nonEmptyString = z.string().trim().min(1);
 const optionalImageUrl = z.string().trim().url().or(z.literal('')).optional();
+const categoryScopeSchema = z.object({
+  includedTitle: z.string().trim().min(1).max(120),
+  notIncludedTitle: z.string().trim().min(1).max(120),
+  sections: z.array(z.object({
+    id: nonEmptyString.max(100),
+    label: nonEmptyString.max(120),
+    includedItems: z.array(z.string().trim().min(1).max(500)).max(50),
+    notIncludedItems: z.array(z.string().trim().min(1).max(500)).max(50),
+  })).max(50),
+});
 const partnerCategoryIdSchema = z.enum([
   'cleaning',
   'electrician',
@@ -200,6 +210,7 @@ export const upsertCategoryContentSchema = z.object({
   description: z.string().optional(),
   heroImageUrl: z.string().optional(),
   iconUrl: z.string().optional(),
+  scope: categoryScopeSchema.optional(),
   faqCategoryKeys: z.array(z.string()).optional(),
   sortOrder: z.number().optional(),
   isActive: z.boolean().optional(),
@@ -214,6 +225,7 @@ export const patchCategoryContentSchema = z
     description: z.string().optional(),
     heroImageUrl: z.string().optional(),
     iconUrl: z.string().optional(),
+    scope: categoryScopeSchema.optional(),
     faqCategoryKeys: z.array(z.string()).optional(),
     sortOrder: z.number().optional(),
     isActive: z.boolean().optional(),

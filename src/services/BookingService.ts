@@ -58,7 +58,6 @@ import {
   assertBookNowFixedPriceMinimumCheckout,
   type CategoryMinimumConfig,
 } from '../utils/bookNowFixedPriceMinimum';
-import { BookNowCatalogBootstrap } from './BookNowCatalogBootstrap';
 import { BookNowAvailabilityService } from './BookNowAvailabilityService';
 import { abandonUnpaidBookingOrder } from './bookingAbandonUnpaid';
 import { cancelHourlyBooking } from './cancellation/cancellationOrchestrator';
@@ -891,23 +890,7 @@ export class BookingService {
   /** Legacy path: resolve from MongoDB catalog (e.g. API-only checkout). */
   private static async resolveLineFromCatalog(line: BookingLineInput, address?: BookingAddress): Promise<ResolvedLine> {
     const normalized = this.normalizeLineInput(line);
-    try {
-      return await this.resolveLineFromCatalogOnce(normalized, address);
-    } catch (err) {
-      // Hourly always uses catalog pricing; auto-seed if SKUs were never bootstrapped.
-      if (err instanceof NotFoundError && isHourlyCatalogLineInput(normalized)) {
-        logger.warn(
-          'Hourly SKU missing in catalog — seeding Hourly Helper then retrying',
-          {
-            skuSlug: normalized.skuSlug,
-            categorySlug: normalized.categorySlug,
-          },
-        );
-        await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
-        return this.resolveLineFromCatalogOnce(normalized, address);
-      }
-      throw err;
-    }
+    return this.resolveLineFromCatalogOnce(normalized, address);
   }
 
   private static async resolveLineFromCatalogOnce(normalized: BookingLineInput, address?: BookingAddress): Promise<ResolvedLine> {

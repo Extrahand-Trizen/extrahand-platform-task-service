@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   createCatalogServiceSchema,
+  upsertCategoryContentSchema,
   updateCatalogServiceStatusSchema,
   updateCatalogServiceSchema,
 } from '../schemas/catalogContent';
@@ -107,6 +108,42 @@ assert.equal(
   updateCatalogServiceStatusSchema.safeParse({ isActive: 'false' }).success,
   false,
   'Service status updates require a boolean',
+);
+assert.equal(
+  upsertCategoryContentSchema.safeParse({
+    categorySlug: 'hourly-helper',
+    title: 'Hourly Helper',
+    scope: {
+      includedTitle: 'The partner is trained to',
+      notIncludedTitle: 'Not included',
+      sections: [{
+        id: 'house-cleaning',
+        label: 'House Cleaning',
+        includedItems: ['Sweeping'],
+        notIncludedItems: ['Electrical work'],
+      }],
+    },
+  }).success,
+  true,
+  'Category scope content accepts headings, tabs, and item lists',
+);
+assert.equal(
+  upsertCategoryContentSchema.safeParse({
+    categorySlug: 'hourly-helper',
+    title: 'Hourly Helper',
+    scope: {
+      includedTitle: 'Included',
+      notIncludedTitle: 'Not included',
+      sections: [{
+        id: 'house-cleaning',
+        label: 'House Cleaning',
+        includedItems: [''],
+        notIncludedItems: [],
+      }],
+    },
+  }).success,
+  false,
+  'Category scope content rejects blank list entries',
 );
 assert.equal(
   createCatalogServiceSchema.safeParse({

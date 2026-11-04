@@ -624,20 +624,29 @@ async function seedBookNowCategoryContent(): Promise<number> {
   let count = 0;
 
   for (const item of BOOK_NOW_CATEGORY_CONTENT_SEED) {
+    if (item.scope) {
+      await BookNowCategoryContent.updateOne(
+        { categorySlug: item.categorySlug, scope: { $exists: false } },
+        { $set: { scope: item.scope } },
+      );
+    }
     await BookNowCategoryContent.findOneAndUpdate(
       { categorySlug: item.categorySlug },
       {
-        categorySlug: item.categorySlug,
-        title: item.title,
-        subtitle: item.subtitle,
-        description: item.description,
-        heroImageUrl:
-          item.heroImageUrl ||
-          BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG[item.categorySlug] ||
-          '',
-        faqCategoryKeys: [],
-        sortOrder: item.sortOrder,
-        isActive: true,
+        $set: {
+          categorySlug: item.categorySlug,
+          title: item.title,
+          subtitle: item.subtitle,
+          description: item.description,
+          heroImageUrl:
+            item.heroImageUrl ||
+            BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG[item.categorySlug] ||
+            '',
+          faqCategoryKeys: [],
+          sortOrder: item.sortOrder,
+          isActive: true,
+        },
+        ...(item.scope ? { $setOnInsert: { scope: item.scope } } : {}),
       },
       { upsert: true, new: true },
     );

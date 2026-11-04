@@ -163,6 +163,7 @@ export class HourlyHelperAvailabilityService {
     const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
       areaName: input.area || undefined,
       cityName: input.city || undefined,
+      address: input.address || undefined,
     });
     if (!isEnabled) {
       return {

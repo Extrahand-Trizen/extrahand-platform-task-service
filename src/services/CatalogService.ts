@@ -1258,20 +1258,35 @@ export class CatalogService {
   }
 
   static async upsertCategoryContent(input: UpsertCategoryContentInput) {
+    const categorySlug = normalizeCatalogLookup(resolveCategoryAlias(input.categorySlug));
+    const set: Record<string, unknown> = {
+      categorySlug,
+      title: input.title.trim(),
+    };
+    if (input.subtitle !== undefined) set.subtitle = input.subtitle.trim();
+    if (input.description !== undefined) set.description = input.description.trim();
+    if (input.heroImageUrl !== undefined) set.heroImageUrl = input.heroImageUrl.trim();
+    if (input.iconUrl !== undefined) set.iconUrl = input.iconUrl.trim();
+    if (input.scope !== undefined) set.scope = input.scope;
+    if (input.faqCategoryKeys !== undefined) set.faqCategoryKeys = input.faqCategoryKeys;
+    if (input.sortOrder !== undefined) set.sortOrder = input.sortOrder;
+    if (input.isActive !== undefined) set.isActive = input.isActive;
+
     return BookNowCategoryContent.findOneAndUpdate(
       {
-        categorySlug: normalizeCatalogLookup(resolveCategoryAlias(input.categorySlug)),
+        categorySlug,
       },
       {
-        categorySlug: normalizeCatalogLookup(resolveCategoryAlias(input.categorySlug)),
-        title: input.title.trim(),
-        subtitle: input.subtitle?.trim() || '',
-        description: input.description?.trim() || '',
-        heroImageUrl: input.heroImageUrl?.trim() || '',
-        iconUrl: input.iconUrl?.trim() || '',
-        faqCategoryKeys: Array.isArray(input.faqCategoryKeys) ? input.faqCategoryKeys : [],
-        sortOrder: typeof input.sortOrder === 'number' ? input.sortOrder : 0,
-        isActive: typeof input.isActive === 'boolean' ? input.isActive : true,
+        $set: set,
+        $setOnInsert: {
+          subtitle: '',
+          description: '',
+          heroImageUrl: '',
+          iconUrl: '',
+          faqCategoryKeys: [],
+          sortOrder: 0,
+          isActive: true,
+        },
       },
       { upsert: true, new: true },
     ).lean();
@@ -1289,6 +1304,7 @@ export class CatalogService {
     if (input.description !== undefined) update.description = input.description.trim();
     if (input.heroImageUrl !== undefined) update.heroImageUrl = input.heroImageUrl.trim();
     if (input.iconUrl !== undefined) update.iconUrl = input.iconUrl.trim();
+    if (input.scope !== undefined) update.scope = input.scope;
     if (input.faqCategoryKeys !== undefined) update.faqCategoryKeys = input.faqCategoryKeys;
     if (input.sortOrder !== undefined) update.sortOrder = input.sortOrder;
     if (input.isActive !== undefined) update.isActive = input.isActive;
@@ -1709,6 +1725,7 @@ export class CatalogService {
               description: categoryContent.description || '',
               heroImageUrl: categoryContent.heroImageUrl || '',
               iconUrl: categoryContent.iconUrl || '',
+              scope: categoryContent.scope || null,
             }
           : null,
       },

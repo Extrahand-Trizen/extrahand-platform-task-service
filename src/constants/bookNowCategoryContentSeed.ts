@@ -1,3 +1,5 @@
+import { HOURLY_HELPER_SCOPE } from './hourlyHelperScope';
+
 /**
  * Seed rows for BookNowCategoryContent — Book Now catalog parent categories.
  * Labels aligned with mobile / coupon-portal Book Now category slugs.
@@ -9,9 +11,18 @@ export type BookNowCategoryContentSeed = {
   description: string;
   heroImageUrl?: string;
   sortOrder: number;
+  scope?: typeof HOURLY_HELPER_SCOPE;
 };
 
 export const BOOK_NOW_CATEGORY_CONTENT_SEED: BookNowCategoryContentSeed[] = [
+  {
+    categorySlug: 'hourly-helper',
+    title: 'Hourly Helper',
+    subtitle: 'Household help by the hour',
+    description: 'Choose a duration and tell your helper what household tasks you need.',
+    sortOrder: 90,
+    scope: HOURLY_HELPER_SCOPE,
+  },
   {
     categorySlug: 'full-house',
     title: 'Full House Cleaning',

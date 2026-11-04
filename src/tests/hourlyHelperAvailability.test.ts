@@ -92,6 +92,12 @@ assert.deepEqual(
   ['brigade citadel', 'moti nagar'],
 );
 assert.deepEqual(buildHourlyServiceAreaCandidates({ city: 'Hyderabad' }), []);
+assert.deepEqual(
+  buildHourlyServiceAreaCandidates({
+    address: 'Siddipet, Telangana, India',
+  }),
+  ['siddipet'],
+);
 assert.equal(
   matchEligibleHourlyHelperArea(
     withPartnerProfile({ workAreas: ['Central Hyderabad', 'Hyderabad'] }),
