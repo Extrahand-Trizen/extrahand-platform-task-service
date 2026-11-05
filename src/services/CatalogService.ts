@@ -370,6 +370,8 @@ function filterPersonalAssistantFromHubResponse(
 
 export class CatalogService {
   static async getBookNowHomeCategories(customerUid?: string | null) {
+    const requestStartedAt = Date.now();
+    const catalogReadsStartedAt = Date.now();
     const [categories, categoryContents, hubSectionDocs] = await Promise.all([
       ServiceCategory.find({ isActive: true })
         .select({ slug: 1, name: 1, sortOrder: 1 })
@@ -384,14 +386,26 @@ export class CatalogService {
         .sort({ sortOrder: 1, title: 1 })
         .lean(),
     ]);
+    const catalogReadsMs = Date.now() - catalogReadsStartedAt;
     const visibleCategories = filterPersonalAssistantCategories(categories, customerUid);
-    if (visibleCategories.length === 0) return [];
+    if (visibleCategories.length === 0) {
+      logger.info('Book Now home category query timings', {
+        catalogReadsMs,
+        activeSkuQueryMs: 0,
+        totalMs: Date.now() - requestStartedAt,
+        categoryCount: 0,
+        hubSectionCount: hubSectionDocs.length,
+      });
+      return [];
+    }
 
     const categoryIds = visibleCategories.map((category) => category._id);
+    const activeSkuQueryStartedAt = Date.now();
     const activeCategoryIds = await ServiceSku.distinct('categoryId', {
       categoryId: { $in: categoryIds },
       isActive: true,
     });
+    const activeSkuQueryMs = Date.now() - activeSkuQueryStartedAt;
     const activeCategoryIdSet = new Set(activeCategoryIds.map(String));
     const categoryBySlug = new Map(
       visibleCategories.map((category) => [
@@ -527,12 +541,22 @@ export class CatalogService {
         };
       });
 
-    return filterPersonalAssistantFromHubResponse(
+    const result = filterPersonalAssistantFromHubResponse(
       [...groupedSections, ...fallbackSections].sort(
         (a, b) => a.sortOrder - b.sortOrder,
       ),
       customerUid,
     );
+    logger.info('Book Now home category query timings', {
+      catalogReadsMs,
+      activeSkuQueryMs,
+      totalMs: Date.now() - requestStartedAt,
+      categoryCount: visibleCategories.length,
+      activeCategoryCount: activeCategoryIds.length,
+      hubSectionCount: hubSectionDocs.length,
+      responseSectionCount: result.length,
+    });
+    return result;
   }
 
   static async listAdminServices(): Promise<AdminCatalogCategory[]> {

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { HOURLY_HELPER_PARTNER_CATEGORIES } from '../constants/hourlyBooking';
 import {
   buildHourlyServiceAreaCandidates,
   canonicalServiceAreaName,
@@ -11,7 +12,7 @@ import { HourlyHelperLocationAvailabilityService } from './HourlyHelperLocationA
 
 export type HourlyHelperAvailabilityResult = {
   available: boolean;
-  eligibleHelperCount: number;
+  eligibleHelperCount?: number;
   area: string;
   candidates: string[];
   matchedAreas: string[];
@@ -66,7 +67,95 @@ export function isEligibleHourlyHelperProfile(
   return matchEligibleHourlyHelperArea(profile, candidates) !== null;
 }
 
+const AVAILABILITY_CACHE_MS = 10_000;
+const availabilityCache = new Map<string, { available: boolean; expiresAt: number }>();
+const pendingAvailability = new Map<string, Promise<boolean>>();
+
+export function buildHourlyHelperAreaQueryRegex(area: string): RegExp {
+  const canonical = canonicalServiceAreaName(area);
+  const escaped = canonical
+    .split('')
+    .map((character) => /[a-z0-9]/.test(character) ? character : '[\\s._-]*')
+    .join('');
+  const spellingVariant = escaped.replace(/pally$/, 'pall[eyi]');
+  return new RegExp(`^${spellingVariant}(?:\\s*\\([^)]*\\))?$`, 'i');
+}
+
 export class HourlyHelperAvailabilityService {
+  static async hasEligibleHelper(areaCandidates: readonly string[]): Promise<boolean> {
+    const candidates = Array.from(
+      new Set(areaCandidates.map((area) => canonicalServiceAreaName(area)).filter(Boolean)),
+    );
+    if (candidates.length === 0) return false;
+
+    const cacheKey = candidates.slice().sort().join('|');
+    const cached = availabilityCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.available;
+    const pending = pendingAvailability.get(cacheKey);
+    if (pending) return pending;
+
+    const areaPatterns = candidates.map(buildHourlyHelperAreaQueryRegex);
+    const categoryFilters = HOURLY_HELPER_PARTNER_CATEGORIES.flatMap((category) => [
+      { 'partnerProfile.categories': category },
+      { 'partnerProfile.categories.id': category },
+      { 'partnerProfile.categories.slug': category },
+      { 'partnerProfile.categories.category': category },
+      { 'partnerProfile.categories.value': category },
+    ]);
+
+    const check = (async () => {
+      const cursor = mongoose.connection.collection('profiles').find(
+        {
+        isActive: true,
+        'partnerProfile.status': 'approved',
+        'partnerProfile.onLeave': { $ne: true },
+        isAvailable: { $ne: false },
+        $and: [
+          {
+            $or: [
+              { 'partnerProfile.workAreas': { $in: areaPatterns } },
+              { helperWorkAreas: { $in: areaPatterns } },
+            ],
+          },
+          { $or: categoryFilters },
+        ],
+      },
+      {
+        projection: {
+          uid: 1,
+          roles: 1,
+          isActive: 1,
+          isAvailable: 1,
+          partnerProfile: 1,
+          helperWorkAreas: 1,
+        },
+      },
+      );
+      let available = false;
+      try {
+        for await (const profile of cursor) {
+          if (matchEligibleHourlyHelperArea(profile as Record<string, unknown>, candidates)) {
+            available = true;
+            break;
+          }
+        }
+      } finally {
+        await cursor.close();
+      }
+
+      availabilityCache.set(cacheKey, {
+        available,
+        expiresAt: Date.now() + AVAILABILITY_CACHE_MS,
+      });
+      return available;
+    })().finally(() => {
+      pendingAvailability.delete(cacheKey);
+    });
+
+    pendingAvailability.set(cacheKey, check);
+    return check;
+  }
+
   static async countEligibleHelpersByArea(
     areaNames: readonly string[],
   ): Promise<Map<string, number>> {
@@ -159,12 +248,22 @@ export class HourlyHelperAvailabilityService {
   /** Availability for the customer's own address (named areas only, no radius). */
   static async getAvailabilityForAddress(
     input: HourlyServiceAddressInput,
+    options: { fastAvailabilityCheck?: boolean } = {},
   ): Promise<HourlyHelperAvailabilityResult> {
-    const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
-      areaName: input.area || undefined,
-      cityName: input.city || undefined,
-      address: input.address || undefined,
-    });
+    const [isEnabled, slotSettings] = await Promise.all([
+      HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
+        areaName: input.area || undefined,
+        cityName: input.city || undefined,
+        stateName: input.state || undefined,
+        address: input.address || undefined,
+      }),
+      HourlyHelperLocationAvailabilityService.getSlotSettingsForAddress({
+        areaName: input.area || undefined,
+        cityName: input.city || undefined,
+        stateName: input.state || undefined,
+        address: input.address || undefined,
+      }),
+    ]);
     if (!isEnabled) {
       return {
         available: false,
@@ -175,6 +274,24 @@ export class HourlyHelperAvailabilityService {
       };
     }
     const candidates = buildHourlyServiceAreaCandidates(input);
+    if (slotSettings.mode === 'managed_schedule') {
+      return {
+        available: true,
+        eligibleHelperCount: 0,
+        area: input.area || input.address || candidates[0] || '',
+        candidates,
+        matchedAreas: [],
+      };
+    }
+    if (options.fastAvailabilityCheck) {
+      const available = await HourlyHelperAvailabilityService.hasEligibleHelper(candidates);
+      return {
+        available,
+        area: candidates[0] || input.area || input.address || '',
+        candidates,
+        matchedAreas: available ? [candidates[0]] : [],
+      };
+    }
     const helpers = await HourlyHelperAvailabilityService.findEligibleHelpers(candidates);
     const matchedAreas = Array.from(new Set(helpers.map((helper) => helper.matchedArea)));
     return {

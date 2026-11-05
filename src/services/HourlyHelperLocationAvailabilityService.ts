@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import HourlyHelperLocationAvailability, {
   LocationType,
 } from '../models/HourlyHelperLocationAvailability';
+import HourlyHelperSlotSettings from '../models/HourlyHelperSlotSettings';
 import LocationState from '../models/LocationState';
 import LocationCity from '../models/LocationCity';
 import LocationPincode from '../models/LocationPincode';
@@ -15,6 +16,11 @@ import {
   buildHourlyServiceAreaCandidates,
 } from '../utils/hourlyHelperServiceArea';
 import { HourlyHelperAvailabilityService } from './HourlyHelperAvailabilityService';
+import {
+  DEFAULT_HOURLY_SLOT_SETTINGS,
+  validateHourlySlotSettings,
+  type HourlySlotSettings,
+} from '../utils/hourlySlotPolicy';
 
 export type LocationAvailabilityItem = {
   _id: string;
@@ -26,11 +32,133 @@ export type LocationAvailabilityItem = {
   isEnabled: boolean;
   isExplicit: boolean;
   eligibleHelperCount: number;
+  slotSettings: HourlySlotSettings;
   updatedAt?: Date;
   updatedBy?: string;
 };
 
 export class HourlyHelperLocationAvailabilityService {
+  static async setLocationSlotSettings(params: {
+    locationType: LocationType;
+    locationId: string;
+    settings: HourlySlotSettings;
+    updatedBy?: string;
+  }): Promise<HourlySlotSettings> {
+    const locIdStr = String(params.locationId || '').trim();
+    if (!locIdStr) throw new BadRequestError('locationId is required');
+    let settings: HourlySlotSettings;
+    try {
+      settings = validateHourlySlotSettings(params.settings);
+    } catch (error) {
+      throw new BadRequestError(error instanceof Error ? error.message : 'Invalid slot settings');
+    }
+
+    const ids: Array<string | mongoose.Types.ObjectId> = [];
+    const targetId = mongoose.Types.ObjectId.isValid(locIdStr)
+      ? new mongoose.Types.ObjectId(locIdStr)
+      : locIdStr;
+    ids.push(targetId);
+    if (targetId instanceof mongoose.Types.ObjectId) ids.push(locIdStr);
+    if (params.locationType === 'area') {
+      let displayName = locIdStr;
+      if (targetId instanceof mongoose.Types.ObjectId) {
+        const area = await LocationArea.findById(targetId).select('displayName canonicalName').lean();
+        displayName = area?.displayName || area?.canonicalName || displayName;
+        if (area?._id) ids.push(area._id);
+      }
+      const canonicalName = canonicalServiceAreaName(displayName) || displayName.toLowerCase();
+      for (const alias of [displayName, displayName.toLowerCase(), canonicalName]) {
+        if (alias) ids.push(alias);
+      }
+    }
+
+    const uniqueIds = Array.from(new Map(ids.map((id) => [String(id), id])).values());
+    const update = {
+      mode: settings.mode,
+      startTime: settings.startTime,
+      endTime: settings.endTime,
+      blockedHours: settings.blockedHours,
+      updatedBy: params.updatedBy ? String(params.updatedBy).trim() : 'admin',
+    };
+    for (const locationId of uniqueIds) {
+      await HourlyHelperSlotSettings.findOneAndUpdate(
+        { locationType: params.locationType, locationId },
+        { $set: update },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+    }
+    return settings;
+  }
+
+  static async getSlotSettingsForAddress(input: {
+    areaName?: string;
+    cityName?: string;
+    stateName?: string;
+    address?: string;
+  }): Promise<HourlySlotSettings> {
+    const areaNames = buildHourlyServiceAreaCandidates({
+      area: input.areaName,
+      city: input.cityName,
+      address: input.address,
+    });
+    const pincode = String(input.address || '').match(/\b\d{6}\b/)?.[0];
+    const locationCandidates: Array<{ type: LocationType; name: string }> = [
+      ...areaNames.map((name) => ({ type: 'area' as const, name })),
+      ...(pincode ? [{ type: 'pincode' as const, name: pincode }] : []),
+      ...(input.cityName ? [{ type: 'city' as const, name: input.cityName }] : []),
+      ...(input.stateName ? [{ type: 'state' as const, name: input.stateName }] : []),
+    ];
+
+    for (const candidate of locationCandidates) {
+      const ids: Array<string | mongoose.Types.ObjectId> = [];
+      const name = candidate.name.trim();
+      const canonical = canonicalServiceAreaName(name);
+      ids.push(name, name.toLowerCase());
+      if (canonical) ids.push(canonical);
+      if (mongoose.Types.ObjectId.isValid(name)) ids.push(new mongoose.Types.ObjectId(name));
+
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const masterLocation =
+        candidate.type === 'area'
+          ? await LocationArea.findOne({
+              $or: [
+                { displayName: new RegExp(`^${escaped}$`, 'i') },
+                { canonicalName: new RegExp(`^${escaped}$`, 'i') },
+              ],
+            }).select('_id').lean()
+          : candidate.type === 'pincode'
+            ? await LocationPincode.findOne({ pincode: name }).select('_id').lean()
+            : candidate.type === 'city'
+              ? await LocationCity.findOne({
+                  $or: [
+                    { displayName: new RegExp(`^${escaped}$`, 'i') },
+                    { canonicalName: new RegExp(`^${escaped}$`, 'i') },
+                  ],
+                }).select('_id').lean()
+              : await LocationState.findOne({
+                  $or: [
+                    { displayName: new RegExp(`^${escaped}$`, 'i') },
+                    { canonicalName: new RegExp(`^${escaped}$`, 'i') },
+                  ],
+                }).select('_id').lean();
+      if (masterLocation?._id) ids.push(masterLocation._id);
+
+      const record = await HourlyHelperSlotSettings.findOne({
+        locationType: candidate.type,
+        locationId: { $in: Array.from(new Map(ids.map((id) => [String(id), id])).values()) },
+      }).lean();
+      if (record) {
+        return validateHourlySlotSettings({
+          mode: record.mode,
+          startTime: record.startTime,
+          endTime: record.endTime,
+          blockedHours: record.blockedHours,
+        });
+      }
+    }
+    return DEFAULT_HOURLY_SLOT_SETTINGS;
+  }
+
   /**
    * Toggle or set Hourly Helper availability for a location.
    */
@@ -137,6 +265,10 @@ export class HourlyHelperLocationAvailabilityService {
     }
 
     const helpers = await HourlyHelperAvailabilityService.findEligibleHelpers([canonicalName]);
+    const storedSlotSettings = await HourlyHelperSlotSettings.findOne({
+      locationType: type,
+      locationId: { $in: [targetLocId, locIdStr, displayName, canonicalName] },
+    }).lean();
 
     return {
       _id: String(updated._id),
@@ -148,6 +280,14 @@ export class HourlyHelperLocationAvailabilityService {
       isEnabled: updated.isEnabled,
       isExplicit: true,
       eligibleHelperCount: helpers.length,
+      slotSettings: storedSlotSettings
+        ? {
+            mode: storedSlotSettings.mode,
+            startTime: storedSlotSettings.startTime,
+            endTime: storedSlotSettings.endTime,
+            blockedHours: storedSlotSettings.blockedHours,
+          }
+        : DEFAULT_HOURLY_SLOT_SETTINGS,
       updatedAt: updated.updatedAt,
       updatedBy: updated.updatedBy,
     };
@@ -277,6 +417,21 @@ export class HourlyHelperLocationAvailabilityService {
 
     // 2. Gather all explicit overrides in HourlyHelperLocationAvailability
     const allExplicitRecords = await HourlyHelperLocationAvailability.find({}).lean();
+    const allSlotSettings = await HourlyHelperSlotSettings.find({}).lean();
+    const slotSettingsMap = new Map<string, HourlySlotSettings>();
+    for (const setting of allSlotSettings) {
+      const id = String(setting.locationId);
+      const canonical = canonicalServiceAreaName(id);
+      const normalized = {
+        mode: setting.mode,
+        startTime: setting.startTime,
+        endTime: setting.endTime,
+        blockedHours: setting.blockedHours,
+      };
+      slotSettingsMap.set(`${setting.locationType}:${id}`, normalized);
+      slotSettingsMap.set(`${setting.locationType}:${id.toLowerCase()}`, normalized);
+      if (canonical) slotSettingsMap.set(`${setting.locationType}:${canonical}`, normalized);
+    }
     const explicitMap = new Map<string, typeof allExplicitRecords[0]>();
 
     for (const rec of allExplicitRecords) {
@@ -445,6 +600,11 @@ export class HourlyHelperLocationAvailabilityService {
         isEnabled,
         isExplicit: Boolean(rec),
         eligibleHelperCount: helperCounts.get(canonicalServiceAreaName(loc.canonicalName)) || 0,
+        slotSettings:
+          slotSettingsMap.get(`${loc.type}:${loc.idStr}`) ||
+          slotSettingsMap.get(`${loc.type}:${loc.idStr.toLowerCase()}`) ||
+          slotSettingsMap.get(`${loc.type}:${loc.canonicalName}`) ||
+          DEFAULT_HOURLY_SLOT_SETTINGS,
         updatedAt: rec?.updatedAt,
         updatedBy: rec?.updatedBy,
       });
@@ -475,6 +635,7 @@ export class HourlyHelperLocationAvailabilityService {
     stateId?: unknown;
     areaName?: string;
     cityName?: string;
+    stateName?: string;
     address?: string;
   }): Promise<boolean> {
     const candidates: Array<{ locationType: LocationType; locationId: string | mongoose.Types.ObjectId }> = [];
@@ -507,42 +668,55 @@ export class HourlyHelperLocationAvailabilityService {
       }
     }
 
-    for (const aName of areaNameCandidates) {
+    const areaLookups = Array.from(areaNameCandidates, async (aName) => {
       push('area', aName);
       const canon = canonicalServiceAreaName(aName);
       if (canon && canon !== aName) push('area', canon);
 
-      // Also look up master LocationArea to find corresponding ObjectIds
       try {
-        const areaDocs = await LocationArea.find({
+        return await LocationArea.find({
           $or: [
             { displayName: new RegExp(`^${aName.trim()}$`, 'i') },
             { canonicalName: new RegExp(`^${(canon || aName).trim()}$`, 'i') },
           ],
         }).select('_id').lean();
-        for (const doc of areaDocs) {
-          push('area', doc._id);
-        }
-      } catch (e) {}
-    }
+      } catch {
+        return [];
+      }
+    });
 
     push('pincode', input.pincodeId);
     push('city', input.cityId);
+    let cityLookup: Promise<Array<{ _id: mongoose.Types.ObjectId }>> = Promise.resolve([]);
     if (input.cityName) {
       push('city', input.cityName);
-      try {
-        const cityDocs = await LocationCity.find({
+      cityLookup = LocationCity.find({
           $or: [
             { displayName: new RegExp(`^${input.cityName.trim()}$`, 'i') },
             { canonicalName: new RegExp(`^${input.cityName.toLowerCase().trim()}$`, 'i') },
           ],
-        }).select('_id').lean();
-        for (const doc of cityDocs) {
-          push('city', doc._id);
-        }
-      } catch (e) {}
+        }).select('_id').lean().catch(() => []);
     }
     push('state', input.stateId);
+    let stateLookup: Promise<Array<{ _id: mongoose.Types.ObjectId }>> = Promise.resolve([]);
+    if (input.stateName) {
+      push('state', input.stateName);
+      stateLookup = LocationState.find({
+          $or: [
+            { displayName: new RegExp(`^${input.stateName.trim()}$`, 'i') },
+            { canonicalName: new RegExp(`^${input.stateName.toLowerCase().trim()}$`, 'i') },
+          ],
+        }).select('_id').lean().catch(() => []);
+    }
+
+    const [areaDocs, cityDocs, stateDocs] = await Promise.all([
+      Promise.all(areaLookups),
+      cityLookup,
+      stateLookup,
+    ]);
+    for (const doc of areaDocs.flat()) push('area', doc._id);
+    for (const doc of cityDocs) push('city', doc._id);
+    for (const doc of stateDocs) push('state', doc._id);
 
     if (candidates.length === 0) return false; // Enable-only: no location candidates = Coming Soon
 

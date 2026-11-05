@@ -2,6 +2,7 @@ import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
 export interface IBookingItem extends Document {
   orderId: string;
+  checkoutLineIndex?: number;
   /** Optional when checkout uses mobile app catalog (skuSnapshot only). */
   skuId?: Types.ObjectId;
   variantId?: Types.ObjectId;
@@ -48,6 +49,7 @@ export interface IBookingItem extends Document {
 const BookingItemSchema = new Schema<IBookingItem>(
   {
     orderId: { type: String, required: true, index: true },
+    checkoutLineIndex: { type: Number, min: 0 },
     skuId: { type: Schema.Types.ObjectId, ref: 'ServiceSku' },
     variantId: { type: Schema.Types.ObjectId, ref: 'ServiceVariant' },
     addonIds: [{ type: Schema.Types.ObjectId, ref: 'ServiceAddon' }],
@@ -107,6 +109,15 @@ const BookingItemSchema = new Schema<IBookingItem>(
     durationMinutes: { type: Number, min: 1 },
   },
   { timestamps: true }
+);
+
+BookingItemSchema.index(
+  { orderId: 1, checkoutLineIndex: 1 },
+  {
+    unique: true,
+    name: 'booking_order_line_unique',
+    partialFilterExpression: { checkoutLineIndex: { $type: 'number' } },
+  },
 );
 
 const BookingItem: Model<IBookingItem> =

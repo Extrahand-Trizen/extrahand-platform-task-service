@@ -40,6 +40,9 @@ export class BookingController {
       preferredHelperGender,
       serviceRecipient,
     } = req.body;
+    const idempotencyKey = String(
+      req.get('Idempotency-Key') || req.body?.checkoutAttemptId || '',
+    ).trim();
 
     const hasItems = Array.isArray(items) && items.length > 0;
     if ((!skuSlug && !hasItems) || !address?.line1 || !address?.city || !address?.pinCode) {
@@ -75,6 +78,7 @@ export class BookingController {
       gstExempt: gstExempt === true,
       preferredHelperGender,
       serviceRecipient,
+      checkoutAttemptId: idempotencyKey || undefined,
     });
 
     res.status(201).json({
@@ -104,6 +108,7 @@ export class BookingController {
       area: String(req.query.area || '').trim() || undefined,
       serviceArea: String(req.query.serviceArea || '').trim() || undefined,
       serviceAddress: String(req.query.serviceAddress || '').trim() || undefined,
+      state: String(req.query.state || '').trim() || undefined,
       lat: Number(req.query.lat),
       lng: Number(req.query.lng),
       preferredHelperGender: ['male', 'female', 'any'].includes(String(req.query.preferredHelperGender || '').trim().toLowerCase())
@@ -127,7 +132,10 @@ export class BookingController {
     }
 
     const data = address || city
-      ? await HourlyHelperAvailabilityService.getAvailabilityForAddress({ area, address, city, state })
+      ? await HourlyHelperAvailabilityService.getAvailabilityForAddress(
+          { area, address, city, state },
+          { fastAvailabilityCheck: true },
+        )
       : await HourlyHelperAvailabilityService.getExactAreaAvailability(area);
     res.json({ success: true, data });
   }

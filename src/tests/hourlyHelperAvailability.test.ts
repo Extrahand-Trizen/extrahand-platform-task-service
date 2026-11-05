@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  buildHourlyHelperAreaQueryRegex,
   isEligibleHourlyHelperProfile,
   matchEligibleHourlyHelperArea,
   workAreasMatchExactArea,
@@ -66,6 +67,8 @@ assert.equal(canonicalServiceAreaName('Serilingampalli'), 'serilingampally');
 assert.equal(canonicalServiceAreaName('Hi-Tech City'), 'hitec city');
 assert.equal(canonicalServiceAreaName('L.B. Nagar'), 'lb nagar');
 assert.equal(canonicalServiceAreaName('lb-nagar'), 'lb nagar');
+assert.equal(buildHourlyHelperAreaQueryRegex('moti nagar').test('Moti-Nagar'), true);
+assert.equal(buildHourlyHelperAreaQueryRegex('serilingampally').test('Serilingampalle (M)'), true);
 
 // Real Serilingampalle booking address: named areas only, no snapping to Gachibowli.
 const serilingampalleCandidates = buildHourlyServiceAreaCandidates({

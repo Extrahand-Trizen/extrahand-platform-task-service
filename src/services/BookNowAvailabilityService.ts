@@ -4,11 +4,13 @@ import BookNowLocationAvailability, {
   type BookNowLocationType,
 } from '../models/BookNowLocationAvailability';
 import BookNowServiceLocationAvailability from '../models/BookNowServiceLocationAvailability';
+import LocationArea from '../models/LocationArea';
 import LocationCity from '../models/LocationCity';
 import LocationPincode from '../models/LocationPincode';
 import LocationPincodeAreaMap from '../models/LocationPincodeAreaMap';
 import ServiceCategory from '../models/ServiceCategory';
 import { LocationPricingService } from './LocationPricingService';
+import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
 
 type LocationAddress = {
   area?: string;
@@ -27,7 +29,57 @@ type LocationCandidate = {
   id: mongoose.Types.ObjectId;
 };
 
+type ResolvedAddress = Awaited<ReturnType<typeof LocationPricingService.resolveAddress>>;
+
 const LOCATION_TYPES: BookNowLocationType[] = ['area', 'pincode', 'city', 'state'];
+const LOCATION_RESOLUTION_CACHE_MS = 60_000;
+const LOCATION_RESOLUTION_CACHE_LIMIT = 200;
+const resolvedAddressCache = new Map<
+  string,
+  { value: ResolvedAddress; expiresAt: number }
+>();
+const resolvingAddresses = new Map<string, Promise<ResolvedAddress>>();
+
+function resolveAddressForAvailability(address: LocationAddress): Promise<ResolvedAddress> {
+  const cacheKey = JSON.stringify({
+    area: address.area || '',
+    city: address.city || '',
+    state: address.state || '',
+    pinCode: address.pinCode || address.pincode || '',
+    rawAddress: address.rawAddress || address.line1 || '',
+    line2: address.line2 || '',
+    coordinates: address.coordinates || null,
+  });
+  const cached = resolvedAddressCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return Promise.resolve(cached.value);
+  }
+
+  const pending = resolvingAddresses.get(cacheKey);
+  if (pending) return pending;
+
+  const request = LocationPricingService.resolveAddress({
+    ...address,
+    pincode: address.pinCode || address.pincode,
+    rawAddress: address.rawAddress || address.line1,
+  })
+    .then((value) => {
+      if (resolvedAddressCache.size >= LOCATION_RESOLUTION_CACHE_LIMIT) {
+        const oldestKey = resolvedAddressCache.keys().next().value;
+        if (oldestKey) resolvedAddressCache.delete(oldestKey);
+      }
+      resolvedAddressCache.set(cacheKey, {
+        value,
+        expiresAt: Date.now() + LOCATION_RESOLUTION_CACHE_MS,
+      });
+      return value;
+    })
+    .finally(() => {
+      resolvingAddresses.delete(cacheKey);
+    });
+  resolvingAddresses.set(cacheKey, request);
+  return request;
+}
 
 function isLocationType(value: unknown): value is BookNowLocationType {
   return LOCATION_TYPES.includes(value as BookNowLocationType);
@@ -56,14 +108,30 @@ export class BookNowAvailabilityService {
     if (catalogId !== undefined && (!selectedCatalogId || selectedCatalogId.length > 120)) {
       throw new BadRequestError('Invalid catalogId');
     }
-    const resolved = await LocationPricingService.resolveAddress({
-      ...address,
-      pincode: address.pinCode || address.pincode,
-      rawAddress: address.rawAddress || address.line1,
-    });
+    const resolved = await resolveAddressForAvailability(address);
+    let areaId = resolved.areaId;
+    if (!areaId && resolved.pincodeId) {
+      const areaMappings = await LocationPincodeAreaMap.find({
+        pincodeId: resolved.pincodeId,
+      })
+        .select({ areaId: 1, isPrimary: 1 })
+        .lean();
+      const mappedArea =
+        areaMappings.find((mapping) => mapping.isPrimary) ||
+        (areaMappings.length === 1 ? areaMappings[0] : undefined);
+      if (mappedArea) {
+        const activeArea = await LocationArea.findOne({
+          _id: mappedArea.areaId,
+          isActive: true,
+        })
+          .select({ _id: 1 })
+          .lean();
+        areaId = activeArea?._id || null;
+      }
+    }
     const candidates: LocationCandidate[] = [];
     for (const [type, id] of [
-      ['area', resolved.areaId],
+      ['area', areaId],
       ['pincode', resolved.pincodeId],
       ['city', resolved.cityId],
       ['state', resolved.stateId],
@@ -83,7 +151,14 @@ export class BookNowAvailabilityService {
     const globalRule = matched
       ? ruleByLocation.get(`${matched.type}:${String(matched.id)}`)
       : undefined;
-    const globalEnabled = globalRule?.isEnabled ?? false;
+    const globalEnabled = matched
+      ? Boolean(globalRule?.isEnabled)
+      : isHardcodedSupportedLocation({
+          area: address.area,
+          city: address.city,
+          state: address.state,
+          address: address.rawAddress || address.line1,
+        });
     if (selectedCatalogId && globalEnabled) {
       const serviceRules = await BookNowServiceLocationAvailability.find({
         catalogId: selectedCatalogId,

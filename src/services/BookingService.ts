@@ -17,7 +17,7 @@ import {
   resolveParentCategory,
   resolvePartnerCategoryId,
 } from '../utils/bookNowClientCatalog';
-import { BadRequestError, NotFoundError, ForbiddenError } from '../errors/AppError';
+import { BadRequestError, NotFoundError, ForbiddenError, ConflictError } from '../errors/AppError';
 import logger from '../config/logger';
 import {
   assertBookNowSlotAvailable,
@@ -105,6 +105,10 @@ import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import { NotificationClient } from './NotificationClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { resolveRescheduleEndTime } from '../utils/rescheduleSchedule';
+import {
+  buildHourlyScheduleCapacity,
+  isHourlySlotAllowedBySettings,
+} from '../utils/hourlySlotPolicy';
 
 
 export type BookingAddress = {
@@ -140,7 +144,10 @@ function resolveHourlyBookingAreaForCapacity(address: BookingAddress): string | 
  * Hourly Helper is bookable only when an eligible helper works in the
  * customer's exact named area. Returns the eligible helper uids.
  */
-async function assertHourlyHelperAvailableForAddress(address: BookingAddress): Promise<string[]> {
+async function assertHourlyHelperAvailableForAddress(
+  address: BookingAddress,
+  allowNoEligibleHelpers = false,
+): Promise<string[]> {
   const resolvedArea = resolveHourlyBookingAreaForCapacity(address);
   const isEnabled = await HourlyHelperLocationAvailabilityService.isHourlyHelperEnabledForAddress({
     areaName: resolvedArea || address.area,
@@ -165,7 +172,7 @@ async function assertHourlyHelperAvailableForAddress(address: BookingAddress): P
     address: address.line1,
   });
   const helpers = await HourlyHelperAvailabilityService.findEligibleHelpers(candidates);
-  if (helpers.length === 0) {
+  if (helpers.length === 0 && !allowNoEligibleHelpers) {
     logger.info('Hourly Helper booking rejected: no eligible helper in exact area', {
       candidates,
       city: address.city,
@@ -976,6 +983,7 @@ export class BookingService {
   static async createBooking(params: {
     customerUid: string;
     customerProfileId: mongoose.Types.ObjectId;
+    checkoutAttemptId?: string;
     skuSlug?: string;
     categorySlug?: string;
     variantSlug?: string;
@@ -1021,6 +1029,16 @@ export class BookingService {
       couponCode,
       consultationMeta,
     } = params;
+    const checkoutAttemptId = String(params.checkoutAttemptId || '').trim();
+    if (checkoutAttemptId && !/^[a-zA-Z0-9_-]{8,128}$/.test(checkoutAttemptId)) {
+      throw new BadRequestError('Invalid checkout attempt identifier');
+    }
+    const checkoutRequestFingerprint = checkoutAttemptId
+      ? crypto
+          .createHash('sha256')
+          .update(JSON.stringify({ ...params, customerProfileId: String(customerProfileId) }))
+          .digest('hex')
+      : undefined;
 
     const preferredPartnerUid = String(params.preferredPartnerUid || '').trim() || undefined;
 
@@ -1246,9 +1264,21 @@ export class BookingService {
       );
     }
 
+    const hourlySlotSettings =
+      looksHourlyInput || isHourlyOrder
+        ? await HourlyHelperLocationAvailabilityService.getSlotSettingsForAddress({
+            areaName: resolveHourlyBookingAreaForCapacity(address),
+            cityName: address.city,
+            stateName: address.state,
+            address: address.line1,
+          })
+        : undefined;
     const hourlyEligiblePartnerUids =
       looksHourlyInput || isHourlyOrder
-        ? await assertHourlyHelperAvailableForAddress(address)
+        ? await assertHourlyHelperAvailableForAddress(
+            address,
+            fulfillmentType === 'scheduled' && hourlySlotSettings?.mode === 'managed_schedule',
+          )
         : undefined;
 
     // After resolve: Instant Hourly still skips slot lead-time checks.
@@ -1367,6 +1397,20 @@ export class BookingService {
             scheduledTimeStart: line.schedule.scheduledTimeStart,
             durationMinutes: line.schedule.durationMinutes,
           });
+          if (
+            hourlySlotSettings?.mode === 'managed_schedule' &&
+            !isHourlySlotAllowedBySettings({
+              date: String(line.schedule.scheduledDate || '').slice(0, 10),
+              slot: String(line.schedule.scheduledTimeStart || ''),
+              durationMinutes: line.schedule.durationMinutes,
+              settings: hourlySlotSettings,
+            })
+          ) {
+            throw new BadRequestError(
+              'This Hourly Helper slot is outside the configured booking range or block period. Please choose another slot.',
+            );
+          }
+          if (hourlySlotSettings?.mode === 'managed_schedule') continue;
           try {
             await assertBookNowSlotAvailable({
               date: line.schedule.scheduledDate,
@@ -1458,7 +1502,16 @@ export class BookingService {
         })();
     const addonsTotal = pricing.addonsTotal ?? 0;
 
-    const orderId = crypto.randomUUID();
+    const existingAttemptOrder = checkoutAttemptId
+      ? await BookingOrder.findOne({ customerUid, checkoutAttemptId })
+      : null;
+    if (
+      existingAttemptOrder?.checkoutRequestFingerprint &&
+      existingAttemptOrder.checkoutRequestFingerprint !== checkoutRequestFingerprint
+    ) {
+      throw new ConflictError('Checkout attempt was already used for a different booking');
+    }
+    const candidateOrderId = existingAttemptOrder?.orderId || crypto.randomUUID();
     const primaryScheduleLine = resolvedLinesWithSchedule[0];
     const orderSchedule = orderScheduleFromLine(primaryScheduleLine);
 
@@ -1470,55 +1523,97 @@ export class BookingService {
           .map((line) => line.categorySlug),
       );
     }
-    const order = await BookingOrder.create({
-      orderId,
-      customerUid,
-      customerProfileId,
-      status: 'awaiting_payment',
-      address,
-      ...(fulfillmentType ? { fulfillmentType } : {}),
-      ...orderSchedule,
-      subtotal: pricing.subtotal,
-      addonsTotal,
-      platformFee: pricing.platformFee,
-      gst: pricing.gst,
-      total: pricing.total,
-      pendingLines: resolvedLinesWithSchedule.map(serializePendingLine),
-      bookingNotes: notes?.trim() || undefined,
-      ...(preferredHelperGender ? { preferredHelperGender } : {}),
-      ...(serviceRecipient ? { serviceRecipient } : {}),
-      serviceFlowType: normalizedOrderServiceFlowType,
-      bookingKind: normalizedOrderBookingKind,
-      serviceType: normalizedOrderServiceType,
-      pricingProfile: normalizedOrderGstExempt ? { gstExempt: true } : undefined,
-      consultationMeta: consultationMeta || resolvedLinesWithSchedule[0]?.consultationMeta,
-      ...(preferredPartnerUid ? { preferredPartnerUid } : {}),
-    });
+    let order = existingAttemptOrder;
+    if (!order) {
+      try {
+        order = await BookingOrder.create({
+          orderId: candidateOrderId,
+          customerUid,
+          customerProfileId,
+          ...(checkoutAttemptId ? { checkoutAttemptId, checkoutRequestFingerprint } : {}),
+          status: 'awaiting_payment',
+          address,
+          ...(fulfillmentType ? { fulfillmentType } : {}),
+          ...orderSchedule,
+          subtotal: pricing.subtotal,
+          addonsTotal,
+          platformFee: pricing.platformFee,
+          gst: pricing.gst,
+          total: pricing.total,
+          pendingLines: resolvedLinesWithSchedule.map(serializePendingLine),
+          bookingNotes: notes?.trim() || undefined,
+          ...(preferredHelperGender ? { preferredHelperGender } : {}),
+          ...(serviceRecipient ? { serviceRecipient } : {}),
+          serviceFlowType: normalizedOrderServiceFlowType,
+          bookingKind: normalizedOrderBookingKind,
+          serviceType: normalizedOrderServiceType,
+          pricingProfile: normalizedOrderGstExempt ? { gstExempt: true } : undefined,
+          consultationMeta: consultationMeta || resolvedLinesWithSchedule[0]?.consultationMeta,
+          ...(preferredPartnerUid ? { preferredPartnerUid } : {}),
+        });
+      } catch (error) {
+        const duplicateAttempt =
+          checkoutAttemptId &&
+          typeof error === 'object' &&
+          error !== null &&
+          'code' in error &&
+          (error as { code?: unknown }).code === 11000;
+        if (!duplicateAttempt) throw error;
+        order = await BookingOrder.findOne({ customerUid, checkoutAttemptId });
+        if (!order) throw error;
+        if (
+          order.checkoutRequestFingerprint &&
+          order.checkoutRequestFingerprint !== checkoutRequestFingerprint
+        ) {
+          throw new ConflictError('Checkout attempt was already used for a different booking');
+        }
+      }
+    }
+    if (!order) {
+      throw new Error('Booking order could not be created or recovered');
+    }
+    const orderId = order.orderId;
 
     const createdItems: InstanceType<typeof BookingItem>[] = [];
 
     try {
-      for (const line of resolvedLinesWithSchedule) {
-        const item = await BookingItem.create({
-          orderId,
-          ...(line.skuId ? { skuId: line.skuId } : {}),
-          ...(line.variantId ? { variantId: line.variantId } : {}),
-          addonIds: line.addonIds,
-          quantity: line.quantity,
-          unitPrice: line.lineTotal / line.quantity,
-          lineTotal: line.lineTotal,
-          durationMinutes: line.durationMinutes,
-          skuSnapshot: {
-            name: line.snapshotName,
-            slug: line.packageSlug,
-            categorySlug: line.categorySlug,
-          },
-          serviceFlowType: line.serviceFlowType || normalizedOrderServiceFlowType,
-          bookingKind: line.bookingKind || normalizedOrderBookingKind,
-          serviceType: line.serviceType || normalizedOrderServiceType,
-          consultationMeta: line.consultationMeta || consultationMeta,
-          ...bookingItemScheduleFields(line),
-        });
+      for (let index = 0; index < resolvedLinesWithSchedule.length; index += 1) {
+        const line = resolvedLinesWithSchedule[index];
+        let item = await BookingItem.findOne({ orderId, checkoutLineIndex: index });
+        if (!item) {
+          try {
+            item = await BookingItem.create({
+              orderId,
+              checkoutLineIndex: index,
+              ...(line.skuId ? { skuId: line.skuId } : {}),
+              ...(line.variantId ? { variantId: line.variantId } : {}),
+              addonIds: line.addonIds,
+              quantity: line.quantity,
+              unitPrice: line.lineTotal / line.quantity,
+              lineTotal: line.lineTotal,
+              durationMinutes: line.durationMinutes,
+              skuSnapshot: {
+                name: line.snapshotName,
+                slug: line.packageSlug,
+                categorySlug: line.categorySlug,
+              },
+              serviceFlowType: line.serviceFlowType || normalizedOrderServiceFlowType,
+              bookingKind: line.bookingKind || normalizedOrderBookingKind,
+              serviceType: line.serviceType || normalizedOrderServiceType,
+              consultationMeta: line.consultationMeta || consultationMeta,
+              ...bookingItemScheduleFields(line),
+            });
+          } catch (error) {
+            const duplicateLine =
+              typeof error === 'object' &&
+              error !== null &&
+              'code' in error &&
+              (error as { code?: unknown }).code === 11000;
+            if (!duplicateLine) throw error;
+            item = await BookingItem.findOne({ orderId, checkoutLineIndex: index });
+            if (!item) throw error;
+          }
+        }
         createdItems.push(item);
       }
 
@@ -1539,6 +1634,7 @@ export class BookingService {
       const escrowResult = await PaymentClient.createBookingEscrow({
         taskId: placeholderTaskId,
         bookingOrderId: orderId,
+        idempotencyKey: `booknow_${orderId}`,
         posterUid: customerUid,
         amount: pricing.total,
         taskAmount: pricing.subtotal,
@@ -1778,10 +1874,11 @@ export class BookingService {
         isFree: isFreeBooking,
       };
     } catch (error) {
-      await BookingOrder.findByIdAndDelete(order._id);
-      for (const item of createdItems) {
-        await BookingItem.findByIdAndDelete(item._id);
-      }
+      logger.error('Book Now checkout remains persisted for idempotent recovery', {
+        orderId,
+        checkoutAttemptId: checkoutAttemptId || undefined,
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }
@@ -1962,6 +2059,7 @@ export class BookingService {
       const escrowResult = await PaymentClient.createBookingEscrow({
         taskId: placeholderTaskId,
         bookingOrderId: orderId,
+        idempotencyKey: `consultation_project_${orderId}`,
         posterUid: customerUid,
         amount: paymentTotals.total,
         taskAmount: paymentTotals.subtotal,
@@ -2251,7 +2349,20 @@ export class BookingService {
   private static async materializeBookingTasks(
     order: InstanceType<typeof BookingOrder>,
   ): Promise<InstanceType<typeof Task>[]> {
-    const items = await BookingItem.find({ orderId: order.orderId }).sort({ createdAt: 1 });
+    const items = await BookingItem.find({ orderId: order.orderId }).sort({
+      checkoutLineIndex: 1,
+      createdAt: 1,
+    });
+    for (const item of items) {
+      if (item.taskId || !item._id) continue;
+      const linkedTask = await Task.findOne({ bookingItemId: String(item._id) })
+        .select('_id')
+        .lean();
+      if (linkedTask?._id) {
+        item.taskId = linkedTask._id as mongoose.Types.ObjectId;
+        await item.save();
+      }
+    }
     const existingTaskIds = items.map((item) => item.taskId).filter(Boolean);
 
     const rawPending = (order.pendingLines || []) as PendingBookingLine[];
@@ -2272,7 +2383,7 @@ export class BookingService {
       throw new BadRequestError('Consultation project order is missing its source quotation data');
     }
 
-    if (existingTaskIds.length > 0) {
+    if (existingTaskIds.length > 0 && existingTaskIds.length >= rawPending.length) {
       const existingTasks = await Task.find({ _id: { $in: existingTaskIds } }).sort({ createdAt: 1 });
       if (
         isConsultationProjectOrder &&
@@ -2341,6 +2452,14 @@ export class BookingService {
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
+      const item = items[index];
+      if (item?.taskId) {
+        const linkedTask = await Task.findById(item.taskId);
+        if (linkedTask) {
+          createdTasks.push(linkedTask);
+          continue;
+        }
+      }
       const description = [
         line.taskDescription?.trim(),
         order.bookingNotes?.trim() && order.bookingNotes.trim() !== line.taskDescription?.trim()
@@ -2401,6 +2520,7 @@ export class BookingService {
               recurring: { enabled: false },
               bookingSource: 'book_now' as const,
               bookingOrderId: order.orderId,
+              ...(item?._id ? { bookingItemId: String(item._id) } : {}),
               assignmentStatus: 'pending' as const,
               ...(order.preferredHelperGender
                 ? { preferredHelperGender: order.preferredHelperGender }
@@ -2426,8 +2546,6 @@ export class BookingService {
                     })
                   : undefined,
             };
-
-      const item = items[index];
 
       if (isConsultationProjectOrder && sourceConsultationTask && sourceQuotation) {
         if (item) {
@@ -2504,13 +2622,31 @@ export class BookingService {
         continue;
       }
 
-      const task = await Task.create(taskPayload);
+      let task: InstanceType<typeof Task>;
+      try {
+        task = await Task.create(taskPayload);
+      } catch (error) {
+        const duplicateBookingItem =
+          item?._id &&
+          typeof error === 'object' &&
+          error !== null &&
+          'code' in error &&
+          (error as { code?: unknown }).code === 11000;
+        if (!duplicateBookingItem) throw error;
+        const existingTask = await Task.findOne({ bookingItemId: String(item._id) });
+        if (!existingTask) throw error;
+        task = existingTask;
+      }
       createdTasks.push(task);
 
       if (item) {
-        item.taskId = task._id;
-        await item.save();
-        await Task.findByIdAndUpdate(task._id, { bookingItemId: String(item._id) });
+        if (!item.taskId || !item.taskId.equals(task._id)) {
+          item.taskId = task._id;
+          await item.save();
+        }
+        if (task.bookingItemId !== String(item._id)) {
+          await Task.findByIdAndUpdate(task._id, { bookingItemId: String(item._id) });
+        }
       } else {
         const createdItem = await BookingItem.create({
           orderId: order.orderId,
@@ -2578,6 +2714,7 @@ export class BookingService {
       /** Hourly: the booked address's own area / formatted address (no snapping). */
       serviceArea?: string;
       serviceAddress?: string;
+      state?: string;
       lat?: number;
       lng?: number;
       preferredHelperGender?: 'any' | 'male' | 'female';
@@ -2590,6 +2727,31 @@ export class BookingService {
         : 30;
     const lat = Number(opts?.lat);
     const lng = Number(opts?.lng);
+    const hourlySlotSettings =
+      opts?.availabilityMode === 'hourly'
+        ? await HourlyHelperLocationAvailabilityService.getSlotSettingsForAddress({
+            areaName: opts.serviceArea || opts.area,
+            cityName: city,
+            stateName: opts.state,
+            address: opts.serviceAddress,
+          })
+        : undefined;
+    if (hourlySlotSettings?.mode === 'managed_schedule') {
+      const occupied = await getOccupiedBookNowSlots(date, city, undefined, {
+        lat: Number.isFinite(lat) ? lat : undefined,
+        lng: Number.isFinite(lng) ? lng : undefined,
+      });
+      return {
+        date: String(date || '').trim(),
+        city: String(city || '').trim(),
+        ...occupied,
+        partnerCapacityBySlot: buildHourlyScheduleCapacity({
+          date: String(date || '').trim(),
+          durationMinutes,
+          settings: hourlySlotSettings,
+        }),
+      };
+    }
     const hourlyEligiblePartnerUids =
       opts?.availabilityMode === 'hourly' && (opts.serviceAddress || opts.serviceArea)
         ? (
@@ -2830,6 +2992,14 @@ export class BookingService {
     const currentBookingDateKey = formatScheduleDateKey(order.scheduledDate);
     const normalizedCurrentBookingSlot = normalizeBookNowSlotLabel(String(order.scheduledTimeStart || ''));
     const slotStarts = hourly ? HOURLY_RESCHEDULE_SLOT_STARTS : RESCHEDULE_SLOT_STARTS;
+    const hourlySlotSettings = hourly
+      ? await HourlyHelperLocationAvailabilityService.getSlotSettingsForAddress({
+          areaName: resolveHourlyBookingAreaForCapacity(order.address),
+          cityName: order.address.city,
+          stateName: order.address.state,
+          address: order.address.line1,
+        })
+      : undefined;
 
     // No partner capacity check for rescheduling — show all time slots so
     // the customer can pick any time. Partner assignment happens separately.
@@ -2840,9 +3010,18 @@ export class BookingService {
         dateKey === currentBookingDateKey &&
         normalizedCurrentBookingSlot !== '' &&
         normalized === normalizedCurrentBookingSlot;
+      const managedScheduleUnavailable =
+        hourlySlotSettings?.mode === 'managed_schedule' &&
+        !isHourlySlotAllowedBySettings({
+          date: dateKey,
+          slot: normalized,
+          durationMinutes,
+          settings: hourlySlotSettings,
+        });
       const unavailable =
         isBookNowSlotWithinLeadTime(normalized, dateKey) ||
         isSameDateAndSlot ||
+        managedScheduleUnavailable ||
         (hourly && (() => {
           try {
             assertHourlyScheduledSlotWithinOperatingHours({
@@ -2914,27 +3093,50 @@ export class BookingService {
       ? resolveRescheduleEndTime(scheduledTimeStart, durationMinutes) || ''
       : String(params.scheduledTimeEnd || '').trim() || defaultSlotEnd(scheduledTimeStart);
     if (!scheduledTimeEnd) throw new BadRequestError('Could not resolve the new end time');
+    const hourlySlotSettings = hourly
+      ? await HourlyHelperLocationAvailabilityService.getSlotSettingsForAddress({
+          areaName: resolveHourlyBookingAreaForCapacity(initialOrder.address),
+          cityName: initialOrder.address.city,
+          stateName: initialOrder.address.state,
+          address: initialOrder.address.line1,
+        })
+      : undefined;
     if (hourly) {
       assertHourlyScheduledSlotWithinOperatingHours({ scheduledTimeStart, durationMinutes });
+      if (
+        hourlySlotSettings?.mode === 'managed_schedule' &&
+        !isHourlySlotAllowedBySettings({
+          date: dateKey,
+          slot: scheduledTimeStart,
+          durationMinutes,
+          settings: hourlySlotSettings,
+        })
+      ) {
+        throw new BadRequestError(
+          'This Hourly Helper slot is outside the configured booking range or block period. Please choose another slot.',
+        );
+      }
     }
 
     const lat = Number(initialOrder.address?.coordinates?.[1]);
     const lng = Number(initialOrder.address?.coordinates?.[0]);
-    await assertBookNowSlotAvailable({
-      date: dateKey,
-      city: initialOrder.address.city,
-      scheduledTimeStart,
-      timeSlot,
-      durationMinutes,
-      availabilityMode: hourly ? 'hourly' : 'standard',
-      area: resolveBookingAreaForCapacity(initialOrder.address),
-      lat: Number.isFinite(lat) ? lat : undefined,
-      lng: Number.isFinite(lng) ? lng : undefined,
-      requiredPartnerUid: assignedUids[0],
-      excludeOrderId: orderId,
-      excludeTaskIds: initialTaskIds.map(String),
-      preferredHelperGender: initialOrder.preferredHelperGender,
-    });
+    if (hourlySlotSettings?.mode !== 'managed_schedule') {
+      await assertBookNowSlotAvailable({
+        date: dateKey,
+        city: initialOrder.address.city,
+        scheduledTimeStart,
+        timeSlot,
+        durationMinutes,
+        availabilityMode: hourly ? 'hourly' : 'standard',
+        area: resolveBookingAreaForCapacity(initialOrder.address),
+        lat: Number.isFinite(lat) ? lat : undefined,
+        lng: Number.isFinite(lng) ? lng : undefined,
+        requiredPartnerUid: assignedUids[0],
+        excludeOrderId: orderId,
+        excludeTaskIds: initialTaskIds.map(String),
+        preferredHelperGender: initialOrder.preferredHelperGender,
+      });
+    }
 
     if (
       formatScheduleDateKey(initialOrder.scheduledDate) === dateKey &&
@@ -3193,6 +3395,15 @@ export class BookingService {
     if (!order) throw new NotFoundError('Booking not found');
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
 
+    if (order.status === 'payment_processing') {
+      return this.onPaymentCaptured({
+        bookingOrderId: order.orderId,
+        escrowId: String(order.paymentEscrowId || ''),
+        razorpayOrderId: String(order.razorpayOrderId || ''),
+        taskId: pendingBookNowTaskId(order.orderId),
+      });
+    }
+
     if (order.status !== 'awaiting_payment') {
       if (order.pendingLines?.length) {
         await this.materializeBookingTasks(order);
@@ -3329,7 +3540,12 @@ export class BookingService {
       return { success: false, error: 'Booking not found' };
     }
 
-    if (order.status === 'paid' || order.status === 'assigning' || order.status === 'assigned') {
+    if (
+      order.status === 'payment_processing' ||
+      order.status === 'paid' ||
+      order.status === 'assigning' ||
+      order.status === 'assigned'
+    ) {
       // Heal capture races: status may flip before Task.create succeeds (e.g. invalid category).
       const items = await BookingItem.find({ orderId: order.orderId }).select('taskId').lean();
       const missingTasks =
@@ -3350,13 +3566,19 @@ export class BookingService {
         order.paidAt = new Date();
         changed = true;
       }
-      if (changed) {
-        await order.save();
-      }
-
       const existingItems = await BookingItem.find({ orderId: order.orderId }).select('taskId skuSnapshot').lean();
       const taskIds = existingItems.map((i) => i.taskId).filter(Boolean);
       const existingTasks = taskIds.length ? await Task.find({ _id: { $in: taskIds } }).lean() : [];
+      if (order.status === 'payment_processing' && existingTasks.length === existingItems.length) {
+        order.status =
+          existingTasks.length > 0 && existingTasks.every((task) => Boolean(task.assigneeUid))
+            ? 'assigned'
+            : 'assigning';
+        changed = true;
+      }
+      if (changed) {
+        await order.save();
+      }
       const primaryTaskId = existingTasks[0] ? String(existingTasks[0]._id) : params.taskId;
       const targetEscrowId = params.escrowId || order.paymentEscrowId;
 
@@ -3422,10 +3644,16 @@ export class BookingService {
     order.paymentEscrowId = params.escrowId;
     order.razorpayOrderId = params.razorpayOrderId;
     order.paidAt = new Date();
+    order.status = 'payment_processing';
+    await order.save();
     const tasks = await this.materializeBookingTasks(order);
 
-    const autoAssigned = tasks.length > 0 && tasks.every((task) => Boolean(task.assigneeUid));
-    order.status = autoAssigned ? 'assigned' : 'assigning';
+    const expectedTaskCount = await BookingItem.countDocuments({ orderId: order.orderId });
+    const allTasksMaterialized = expectedTaskCount > 0 && tasks.length === expectedTaskCount;
+    const autoAssigned = allTasksMaterialized && tasks.every((task) => Boolean(task.assigneeUid));
+    if (allTasksMaterialized) {
+      order.status = autoAssigned ? 'assigned' : 'assigning';
+    }
     await order.save();
 
     const primaryTaskId = tasks[0] ? String(tasks[0]._id) : params.taskId;

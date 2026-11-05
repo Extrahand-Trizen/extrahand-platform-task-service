@@ -4,6 +4,7 @@ import { RescheduleHistoryEntrySchema, type IRescheduleHistoryEntry } from './re
 export type BookingOrderStatus =
   | 'draft'
   | 'awaiting_payment'
+  | 'payment_processing'
   | 'paid'
   | 'assigning'
   | 'assigned'
@@ -31,6 +32,8 @@ export interface IBookingAddress {
 
 export interface IBookingOrder extends Document {
   orderId: string;
+  checkoutAttemptId?: string;
+  checkoutRequestFingerprint?: string;
   customerUid: string;
   customerProfileId: Types.ObjectId;
   status: BookingOrderStatus;
@@ -119,11 +122,13 @@ export interface IBookingOrder extends Document {
 const BookingOrderSchema = new Schema<IBookingOrder>(
   {
     orderId: { type: String, required: true, unique: true, index: true },
+    checkoutAttemptId: { type: String, trim: true },
+    checkoutRequestFingerprint: { type: String },
     customerUid: { type: String, required: true, index: true },
     customerProfileId: { type: Schema.Types.ObjectId, required: true, index: true },
     status: {
       type: String,
-      enum: ['draft', 'awaiting_payment', 'paid', 'assigning', 'assigned', 'cancelled', 'refunded'],
+      enum: ['draft', 'awaiting_payment', 'payment_processing', 'paid', 'assigning', 'assigned', 'cancelled', 'refunded'],
       default: 'awaiting_payment',
       index: true,
     },
@@ -228,6 +233,15 @@ const BookingOrderSchema = new Schema<IBookingOrder>(
     rescheduleHistory: { type: [RescheduleHistoryEntrySchema], default: undefined },
   },
   { timestamps: true }
+);
+
+BookingOrderSchema.index(
+  { customerUid: 1, checkoutAttemptId: 1 },
+  {
+    unique: true,
+    name: 'customer_checkout_attempt_unique',
+    partialFilterExpression: { checkoutAttemptId: { $type: 'string' } },
+  },
 );
 
 BookingOrderSchema.index(

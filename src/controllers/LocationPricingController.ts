@@ -4,6 +4,7 @@ import { HourlyHelperLocationAvailabilityService } from '../services/HourlyHelpe
 import { LocationType } from '../models/HourlyHelperLocationAvailability';
 import { BadRequestError } from '../errors/AppError';
 import { PostCompareLocationAvailabilityService } from '../services/PostCompareLocationAvailabilityService';
+import type { HourlySlotSettings } from '../utils/hourlySlotPolicy';
 
 export class LocationPricingController {
   static async ensureCanonicalLocation(req: Request, res: Response): Promise<void> {
@@ -112,6 +113,21 @@ export class LocationPricingController {
       locationType: type as LocationType,
       locationId: id,
       isEnabled,
+      updatedBy,
+    });
+    res.json({ success: true, data });
+  }
+
+  static async setHourlyHelperSlotSettings(req: Request, res: Response): Promise<void> {
+    const { type, id } = req.params;
+    const updatedBy = req.body?.updatedBy
+      ? String(req.body.updatedBy)
+      : (req as any).user?.email || (req as any).user?.uid || 'admin';
+    const settings = req.body?.settings as HourlySlotSettings;
+    const data = await HourlyHelperLocationAvailabilityService.setLocationSlotSettings({
+      locationType: type as LocationType,
+      locationId: id,
+      settings,
       updatedBy,
     });
     res.json({ success: true, data });

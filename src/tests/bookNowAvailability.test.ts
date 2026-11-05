@@ -7,12 +7,18 @@ import LocationArea from '../models/LocationArea';
 import LocationCity from '../models/LocationCity';
 import LocationState from '../models/LocationState';
 import BookNowServiceLocationAvailability from '../models/BookNowServiceLocationAvailability';
+import LocationPincodeAreaMap from '../models/LocationPincodeAreaMap';
 
 async function runTests() {
   const originalResolveAddress = LocationPricingService.resolveAddress;
   const originalFindDescriptor = Object.getOwnPropertyDescriptor(BookNowLocationAvailability, 'find');
   const originalServiceFindDescriptor = Object.getOwnPropertyDescriptor(
     BookNowServiceLocationAvailability,
+    'find',
+  );
+  const originalAreaFindOneDescriptor = Object.getOwnPropertyDescriptor(LocationArea, 'findOne');
+  const originalPincodeAreaMapFindDescriptor = Object.getOwnPropertyDescriptor(
+    LocationPincodeAreaMap,
     'find',
   );
   const resolvedAddress: Awaited<ReturnType<typeof LocationPricingService.resolveAddress>> = {
@@ -44,6 +50,11 @@ async function runTests() {
     assert.equal(unconfiguredAvailability.isEnabled, false);
     assert.equal(unconfiguredAvailability.isExplicit, false);
     assert.match(unconfiguredAvailability.message || '', /not available at this location/i);
+
+    const supportedCityAvailability =
+      await BookNowAvailabilityService.getAvailabilityForAddress({ city: 'Siddipet' });
+    assert.equal(supportedCityAvailability.isEnabled, true);
+    assert.equal(supportedCityAvailability.isExplicit, false);
 
     Object.defineProperty(BookNowLocationAvailability, 'find', {
       configurable: true,
@@ -85,6 +96,45 @@ async function runTests() {
       await BookNowAvailabilityService.getAvailabilityForAddress({}, 'bathroom');
     assert.equal(masterAvailability.isEnabled, false);
     assert.match(masterAvailability.message || '', /book now services are not available/i);
+
+    const explicitlyDisabledSupportedCity =
+      await BookNowAvailabilityService.getAvailabilityForAddress({ city: 'Siddipet' });
+    assert.equal(explicitlyDisabledSupportedCity.isEnabled, false);
+    assert.equal(explicitlyDisabledSupportedCity.isExplicit, true);
+
+    const mappedAreaId = new mongoose.Types.ObjectId();
+    resolvedAddress.areaId = null;
+    resolvedAddress.pincodeId = new mongoose.Types.ObjectId();
+    Object.defineProperty(LocationPincodeAreaMap, 'find', {
+      configurable: true,
+      value: () => ({
+        select: () => ({
+          lean: async () => [{ areaId: mappedAreaId, isPrimary: true }],
+        }),
+      }),
+    });
+    Object.defineProperty(LocationArea, 'findOne', {
+      configurable: true,
+      value: () => ({
+        select: () => ({
+          lean: async () => ({ _id: mappedAreaId }),
+        }),
+      }),
+    });
+    Object.defineProperty(BookNowLocationAvailability, 'find', {
+      configurable: true,
+      value: () => ({
+        lean: async () => [{
+          locationType: 'area',
+          locationId: mappedAreaId,
+          isEnabled: true,
+        }],
+      }),
+    });
+    const pincodeMappedAreaAvailability =
+      await BookNowAvailabilityService.getAvailabilityForAddress({});
+    assert.equal(pincodeMappedAreaAvailability.isEnabled, true);
+    assert.equal(pincodeMappedAreaAvailability.locationType, 'area');
   } finally {
     LocationPricingService.resolveAddress = originalResolveAddress;
     if (originalFindDescriptor) {
@@ -95,6 +145,16 @@ async function runTests() {
         BookNowServiceLocationAvailability,
         'find',
         originalServiceFindDescriptor,
+      );
+    }
+    if (originalAreaFindOneDescriptor) {
+      Object.defineProperty(LocationArea, 'findOne', originalAreaFindOneDescriptor);
+    }
+    if (originalPincodeAreaMapFindDescriptor) {
+      Object.defineProperty(
+        LocationPincodeAreaMap,
+        'find',
+        originalPincodeAreaMapFindDescriptor,
       );
     }
   }
@@ -113,7 +173,6 @@ async function runTests() {
   );
   const originalStateExistsDescriptor = Object.getOwnPropertyDescriptor(LocationState, 'exists');
   const originalCityFindOneDescriptor = Object.getOwnPropertyDescriptor(LocationCity, 'findOne');
-  const originalAreaFindOneDescriptor = Object.getOwnPropertyDescriptor(LocationArea, 'findOne');
   const originalDeleteManyDescriptor = Object.getOwnPropertyDescriptor(
     BookNowServiceLocationAvailability,
     'deleteMany',

@@ -374,3 +374,54 @@ export async function updateQcOrderById(
     return null;
   }
 }
+
+export async function incrementQcStartOtpAttempts(
+  orderId: string | mongoose.Types.ObjectId,
+  maxAttempts: number,
+): Promise<number | null> {
+  const { CustomerOrders } = await getQcCollections();
+  const query = mongoose.Types.ObjectId.isValid(String(orderId))
+    ? { _id: new mongoose.Types.ObjectId(String(orderId)) }
+    : { orderNumber: orderId };
+  const result = await CustomerOrders.updateOne(
+    {
+      ...query,
+      'startOtp.attempts': { $lt: maxAttempts },
+      'startOtp.codeHash': { $exists: true },
+      'startOtp.verifiedAt': { $exists: false },
+    },
+    { $inc: { 'startOtp.attempts': 1 } },
+  );
+  if (result.modifiedCount !== 1) return null;
+  const updated = await CustomerOrders.findOne(query);
+  return Number(updated?.startOtp?.attempts || 0);
+}
+
+export async function claimQcStartOtpVerification(
+  orderId: string | mongoose.Types.ObjectId,
+  otp: string,
+  verifiedAt: Date,
+): Promise<boolean> {
+  const { CustomerOrders } = await getQcCollections();
+  const query = mongoose.Types.ObjectId.isValid(String(orderId))
+    ? { _id: new mongoose.Types.ObjectId(String(orderId)) }
+    : { orderNumber: orderId };
+  const result = await CustomerOrders.updateOne(
+    {
+      ...query,
+      'startOtp.codeHash': otp,
+      'startOtp.verifiedAt': { $exists: false },
+      status: { $ne: 'started' },
+    },
+    {
+      $set: {
+        'startOtp.verifiedAt': verifiedAt,
+        status: 'started',
+        startedAt: verifiedAt,
+        executionPhase: 'on_the_way',
+        updatedAt: verifiedAt,
+      },
+    },
+  );
+  return result.modifiedCount === 1;
+}
