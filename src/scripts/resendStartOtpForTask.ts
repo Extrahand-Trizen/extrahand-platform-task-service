@@ -51,7 +51,6 @@ async function main() {
       TASK_ID,
       new mongoose.Types.ObjectId(HELPER_PROFILE_ID),
       HELPER_UID,
-      { isResend: true },
     );
 
     const after = await Task.findById(TASK_ID).select('status executionPhase startOtp').lean();

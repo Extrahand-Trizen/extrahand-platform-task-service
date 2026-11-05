@@ -13,6 +13,7 @@ export interface IServiceSku extends Document {
   pricingUnit: 'fixed' | 'hourly';
   durationMinutes: number;
   taskCategory: string;
+  partnerCategoryId?: string;
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -32,6 +33,7 @@ const ServiceSkuSchema = new Schema<IServiceSku>(
     pricingUnit: { type: String, enum: ['fixed', 'hourly'], default: 'fixed' },
     durationMinutes: { type: Number, required: true, min: 15 },
     taskCategory: { type: String, required: true, trim: true },
+    partnerCategoryId: { type: String, trim: true, lowercase: true },
     isActive: { type: Boolean, default: true, index: true },
   },
   { timestamps: true }

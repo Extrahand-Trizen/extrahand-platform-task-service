@@ -1271,6 +1271,14 @@ TaskSchema.index({ partnerId: 1, status: 1 });
 TaskSchema.index({ partnerUid: 1, status: 1 });
 TaskSchema.index({ partnerId: 1, bookingSource: 1, status: 1 });
 TaskSchema.index({ bookingOrderId: 1 });
+TaskSchema.index(
+  { bookingItemId: 1 },
+  {
+    unique: true,
+    name: 'book_now_task_booking_item_unique',
+    partialFilterExpression: { bookingItemId: { $type: 'string' } },
+  },
+);
 TaskSchema.index({ serviceFlowType: 1, bookingKind: 1, status: 1 });
 TaskSchema.index({ serviceType: 1, bookingKind: 1, status: 1 });
 TaskSchema.index({ 'consultationState.projectTaskId': 1 });

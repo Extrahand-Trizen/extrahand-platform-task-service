@@ -30,6 +30,7 @@ export interface NotificationEvent {
   body: string; // Main message
 
   data?: Record<string, any>; // Extra info for frontend navigation (taskId, etc.)
+  eventId?: string;
   skipWhatsApp?: boolean;
   createdAt?: Date;
 }
@@ -275,7 +276,7 @@ export class NotificationClient {
       }
 
       // Generate idempotency key
-      const eventId = this.generateEventId(payload.eventKey, payload.entity.id);
+      const eventId = payload.eventId || this.generateEventId(payload.eventKey, payload.entity.id);
 
       const sendPayload = {
         ...payload,
@@ -435,7 +436,7 @@ export class NotificationClient {
       }
 
       // Generate idempotency key
-      const eventId = this.generateEventId(payload.eventKey, payload.entity.id);
+      const eventId = payload.eventId || this.generateEventId(payload.eventKey, payload.entity.id);
 
       const sendPayload = {
         ...payload,
@@ -558,7 +559,6 @@ export class NotificationClient {
     );
   }
 }
-
 
 
 

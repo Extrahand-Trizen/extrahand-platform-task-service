@@ -1,9 +1,4 @@
 import {
-  HOURLY_DURATION_SKUS,
-  HOURLY_HELPER_CATEGORY,
-  HOURLY_HELPER_CATEGORY_SLUG,
-} from '../constants/hourlyBooking';
-import {
   PERSONAL_ASSISTANT_CATEGORY,
   PERSONAL_ASSISTANT_CATEGORY_SLUG,
   PERSONAL_ASSISTANT_DURATION_SKUS,
@@ -164,83 +159,57 @@ export class BookNowCatalogBootstrap {
     return result;
   }
 
-  /** Seed Hourly Helper category + duration SKUs (pricingUnit=hourly). Idempotent. */
-  static async seedHourlyHelperCatalog(): Promise<{ categoryId: string; skus: number }> {
-    const category = await ServiceCategory.findOneAndUpdate(
-      { slug: HOURLY_HELPER_CATEGORY.slug },
-      {
-        slug: HOURLY_HELPER_CATEGORY.slug,
-        name: HOURLY_HELPER_CATEGORY.name,
-        description: HOURLY_HELPER_CATEGORY.description,
-        sortOrder: HOURLY_HELPER_CATEGORY.sortOrder,
-        isActive: true,
-      },
-      { upsert: true, new: true },
-    );
+  static async deactivateFullHomeDeepClean(): Promise<{
+    active: false;
+    skus: number;
+    variants: number;
+  }> {
+    const skuSlugs = ['full-home-deep', 'full-home-deep-clean'];
+    const category = await ServiceCategory.findOne({ slug: 'full-house' })
+      .select('_id')
+      .lean();
+    const skuIds = category
+      ? await ServiceSku.find({
+          categoryId: category._id,
+          $or: [
+            { slug: { $in: skuSlugs } },
+            { name: /^full home deep clean$/i },
+          ],
+        }).distinct('_id')
+      : [];
 
-    await ServiceSku.updateMany(
-      { categoryId: category._id, offerPrice: { $exists: false } },
-      { $set: { offerPrice: 0 } },
-    );
+    const [skuResult, variantResult] = await Promise.all([
+      category
+        ? ServiceSku.updateMany(
+            {
+              categoryId: category._id,
+              $or: [
+                { slug: { $in: skuSlugs } },
+                { name: /^full home deep clean$/i },
+              ],
+            },
+            { $set: { isActive: false } },
+          )
+        : Promise.resolve({ modifiedCount: 0 }),
+      skuIds.length > 0
+        ? ServiceVariant.updateMany(
+            { skuId: { $in: skuIds } },
+            { $set: { isActive: false } },
+          )
+        : Promise.resolve({ modifiedCount: 0 }),
+    ]);
 
-    // Retire the temporary one-minute test SKU if it was seeded by an older build.
-    const retiredOneMinuteSku = await ServiceSku.findOneAndUpdate(
-      { categoryId: category._id, slug: 'hourly-1m' },
-      { $set: { isActive: false } },
-      { new: true },
-    );
-    if (retiredOneMinuteSku) {
-      await ServiceVariant.updateMany(
-        { skuId: retiredOneMinuteSku._id },
-        { $set: { isActive: false } },
-      );
-    }
-
-    let skus = 0;
-    for (const def of HOURLY_DURATION_SKUS) {
-      const sku = await ServiceSku.findOneAndUpdate(
-        { categoryId: category._id, slug: def.slug },
-        {
-          $set: {
-            categoryId: category._id,
-            name: def.name,
-            description: def.description,
-            pricingUnit: 'hourly',
-            taskCategory: 'other',
-            isActive: true,
-            durationMinutes: def.durationMinutes,
-          },
-          $setOnInsert: {
-            slug: def.slug,
-            basePrice: def.basePrice,
-            offerPrice: def.offerPrice,
-          },
-        },
-        { upsert: true, new: true },
-      );
-      skus += 1;
-
-      await ServiceVariant.findOneAndUpdate(
-        { skuId: sku._id, slug: 'default' },
-        {
-          skuId: sku._id,
-          slug: 'default',
-          name: 'Standard',
-          priceDelta: 0,
-          durationDeltaMinutes: 0,
-          isDefault: true,
-          isActive: true,
-        },
-        { upsert: true, new: true },
-      );
-    }
-
-    logger.info('Hourly Helper catalog seed complete', {
-      categorySlug: HOURLY_HELPER_CATEGORY_SLUG,
-      skus,
+    const result = {
+      active: false as const,
+      skus: skuResult.modifiedCount,
+      variants: variantResult.modifiedCount,
+    };
+    logger.info('Full Home Deep Clean catalog item deactivated', {
+      categorySlug: 'full-house',
+      skuSlugs,
+      ...result,
     });
-
-    return { categoryId: String(category._id), skus };
+    return result;
   }
 
   /** Seed Personal Assistant category + duration SKUs. Idempotent. */
@@ -399,6 +368,8 @@ export class BookNowCatalogBootstrap {
       }
     }
 
+    await BookNowCatalogBootstrap.deactivateFullHomeDeepClean();
+
     for (const city of SERVICE_CITIES) {
       await ServiceArea.findOneAndUpdate(
         { city },
@@ -417,15 +388,12 @@ export class BookNowCatalogBootstrap {
       { upsert: true, new: true },
     );
 
-    const hourly = await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
-
     logger.info('Book Now catalog bootstrap complete', {
       categories: categories.length,
-      skus: skuCount + hourly.skus,
-      hourlyHelperSkus: hourly.skus,
+      skus: skuCount,
       serviceCities: SERVICE_CITIES.length,
     });
 
-    return { categories: categories.length, skus: skuCount + hourly.skus };
+    return { categories: categories.length, skus: skuCount };
   }
 }

@@ -2,6 +2,11 @@ import axios, { AxiosError } from 'axios';
 import logger from '../config/logger';
 import { config } from '../config/env';
 
+export type Fast2SMSDeliveryResult = {
+  status: 'sent' | 'failed' | 'unknown' | 'unconfigured' | 'invalid';
+  messageId?: string;
+};
+
 /**
  * Fast2SMSClient – HTTP client for Fast2SMS API.
  * Used for sending OTP SMS messages before task start.
@@ -65,7 +70,7 @@ export class Fast2SMSClient {
       }
     }
 
-    logger.warn('Fast2SMSClient: Invalid phone number format', { phone, digits });
+    logger.warn('Fast2SMSClient: Invalid phone number format');
     return null;
   }
 
@@ -74,7 +79,7 @@ export class Fast2SMSClient {
    * @param phone - Recipient phone number (10 digits or with +91)
    * @param message - SMS message content
    * @param options - Additional options like sender_id, route, etc.
-   * @returns Promise<boolean> - true if sent successfully, false otherwise
+   * @returns Delivery status and provider message ID when available
    */
   static async sendSMS(
     phone: string,
@@ -83,29 +88,27 @@ export class Fast2SMSClient {
       route?: 'q' | 'dlt' | 'v3'; // q = quick transactional (default), dlt = DLT template, v3 = promotional
       sender_id?: string;
     }
-  ): Promise<boolean> {
+  ): Promise<Fast2SMSDeliveryResult> {
     this.ensureInitialized();
 
     if (!this.apiKey) {
       logger.warn('Fast2SMSClient: Cannot send SMS - API key not configured');
-      return false;
+      return { status: 'unconfigured' };
     }
 
     const normalizedPhone = this.validateAndNormalizePhone(phone);
     if (!normalizedPhone) {
-      logger.warn('Fast2SMSClient: Invalid phone number', { phone });
-      return false;
+      logger.warn('Fast2SMSClient: Invalid phone number');
+      return { status: 'invalid' };
     }
 
     if (!message || message.trim().length === 0) {
-      logger.warn('Fast2SMSClient: Empty message', { phone: normalizedPhone });
-      return false;
+      logger.warn('Fast2SMSClient: Empty message');
+      return { status: 'invalid' };
     }
 
     try {
-      logger.info('Fast2SMSClient: Sending SMS', {
-        phone: normalizedPhone,
-        messageLength: message.length,
+      logger.info('Fast2SMSClient: Sending task notification SMS', {
         route: options?.route || 'q',
       });
 
@@ -128,33 +131,34 @@ export class Fast2SMSClient {
 
       if (response.data?.return === true || response.data?.status_code === 200) {
         logger.info('Fast2SMSClient: SMS sent successfully', {
-          phone: normalizedPhone,
           messageId: response.data?.request_id,
         });
-        return true;
+        return {
+          status: 'sent',
+          ...(typeof response.data?.request_id === 'string'
+            ? { messageId: response.data.request_id }
+            : {}),
+        };
       } else {
         logger.error('Fast2SMSClient: SMS send failed - API returned error', {
-          phone: normalizedPhone,
-          response: response.data,
+          statusCode: response.data?.status_code,
         });
-        return false;
+        return { status: 'failed' };
       }
     } catch (error) {
       const axiosError = error as AxiosError;
       logger.error('Fast2SMSClient: SMS send failed - network or API error', {
-        phone: normalizedPhone,
         status: axiosError.response?.status,
-        message: axiosError.message,
-        responseData: axiosError.response?.data,
+        code: axiosError.code,
       });
-      return false;
+      return { status: 'unknown' };
     }
   }
 
   /**
    * Send task start OTP via SMS.
    * @param phone - Recipient phone number
-   * @param otp - 6-digit OTP code
+   * @param otp - 4-digit OTP code
    * @param taskTitle - Task title for context
    * @returns Promise<boolean> - true if sent successfully
    */
@@ -162,7 +166,7 @@ export class Fast2SMSClient {
     phone: string,
     otp: string,
     taskTitle: string
-  ): Promise<boolean> {
+  ): Promise<Fast2SMSDeliveryResult> {
     const message = `Task start OTP for "${taskTitle}": ${otp}. - ExtraHand`;
     return this.sendSMS(phone, message, { route: 'q' });
   }

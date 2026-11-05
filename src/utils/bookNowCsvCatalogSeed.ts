@@ -1130,8 +1130,11 @@ function buildHomeCleaningServices(
 
   mainSection.items.forEach((item) => {
     const name = item.name.toLowerCase();
+    if (/^full home deep clean/i.test(item.name)) {
+      return;
+    }
     if (
-      /^(\d+\s*bhk|1 bedroom combo|2 bedroom combo|full home deep clean)/i.test(item.name)
+      /^(\d+\s*bhk|1 bedroom combo|2 bedroom combo)/i.test(item.name)
     ) {
       buckets['full-house'].packages.push(item);
       return;

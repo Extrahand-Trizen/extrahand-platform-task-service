@@ -89,6 +89,7 @@ export class PaymentClient {
   static async createBookingEscrow(params: {
     taskId: string;
     bookingOrderId: string;
+    idempotencyKey: string;
     posterUid: string;
     amount: number;
     taskAmount?: number;
@@ -1247,5 +1248,4 @@ export class PaymentClient {
     };
   }
 }
-
 

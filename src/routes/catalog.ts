@@ -11,9 +11,23 @@ const router = Router();
 router.use(serviceAuthMiddleware);
 router.use(optionalAuthMiddleware);
 
+router.get('/internal/book-now/location-availability', asyncHandler(CatalogController.listBookNowLocationAvailability));
+router.post('/internal/book-now/location-availability/:type/:id', asyncHandler(CatalogController.updateBookNowLocationAvailability));
+router.delete('/internal/book-now/location-availability/:type/:id', asyncHandler(CatalogController.removeBookNowLocation));
+router.get('/internal/services', asyncHandler(CatalogController.listAdminServices));
+router.post('/internal/services', asyncHandler(CatalogController.createAdminService));
+router.patch('/internal/services/:id/status', asyncHandler(CatalogController.updateAdminServiceStatus));
+router.patch('/internal/services/:id', asyncHandler(CatalogController.updateAdminService));
+router.patch('/internal/services/:id/image', asyncHandler(CatalogController.updateAdminServiceImage));
+router.patch('/internal/services/:id/offer', asyncHandler(CatalogController.updateAdminServiceOffer));
 router.get('/internal/skus/content', asyncHandler(CatalogController.listSkuContent));
 router.post('/internal/skus/content', asyncHandler(CatalogController.upsertSkuContent));
 router.patch('/internal/skus/content/:id', asyncHandler(CatalogController.patchSkuContent));
+router.get('/internal/home-promotions', asyncHandler(CatalogController.listCustomerHomePromotions));
+router.post('/internal/home-promotions', asyncHandler(CatalogController.createCustomerHomePromotion));
+router.patch('/internal/home-promotions/:id', asyncHandler(CatalogController.patchCustomerHomePromotion));
+router.get('/home-promotions', asyncHandler(CatalogController.listPublicCustomerHomePromotions));
+router.get('/home-categories', asyncHandler(CatalogController.getBookNowHomeCategories));
 router.get('/internal/skus/operational', asyncHandler(CatalogController.listOperationalSkus));
 router.patch(
   '/internal/skus/operational/:id/offer',
@@ -57,10 +71,12 @@ router.post('/internal/location-pricing/hourly-prices/resolve', asyncHandler(Loc
 router.post('/internal/location-pricing/resolve-address', asyncHandler(LocationPricingController.resolveAddress));
 router.get('/internal/location-pricing/hourly-availability', asyncHandler(LocationPricingController.listHourlyHelperAvailabilities));
 router.post('/internal/location-pricing/hourly-availability/:type/:id/toggle', asyncHandler(LocationPricingController.toggleHourlyHelperAvailability));
+router.patch('/internal/location-pricing/hourly-availability/:type/:id/slot-settings', asyncHandler(LocationPricingController.setHourlyHelperSlotSettings));
 router.get('/internal/location-pricing/post-compare-availability/areas', asyncHandler(LocationPricingController.listPostCompareAreaAvailabilities));
 router.post('/internal/location-pricing/post-compare-availability/areas/:areaId/toggle', asyncHandler(LocationPricingController.togglePostCompareAreaAvailability));
 
 router.get('/categories', asyncHandler(CatalogController.listCategories));
+router.get('/book-now/availability', asyncHandler(CatalogController.getBookNowAvailability));
 router.get('/book-now/hub', asyncHandler(CatalogController.getBookNowHubCatalog));
 router.post('/book-now/location-quote', asyncHandler(CatalogController.getBookNowLocationQuote));
 router.get('/categories/hourly-helper/diagnostic', asyncHandler(CatalogController.getHourlyHelperSkusByCategoryId));

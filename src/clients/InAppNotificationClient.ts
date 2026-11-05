@@ -152,7 +152,13 @@ export class InAppNotificationClient {
     this.ensureInitialized();
 
     if (!payload.userId || !payload.title || !payload.body) {
-      logger.warn('InAppNotificationClient: Invalid payload', { payload });
+      logger.warn('InAppNotificationClient: Invalid payload', {
+        hasUserId: Boolean(payload.userId),
+        hasTitle: Boolean(payload.title),
+        hasBody: Boolean(payload.body),
+        taskId: payload.data?.taskId,
+        action: payload.data?.action,
+      });
       return false;
     }
 
@@ -218,7 +224,13 @@ export class InAppNotificationClient {
 
     if (!Array.isArray(payload.userIds) || payload.userIds.length === 0 ||
         !payload.title || !payload.body) {
-      logger.warn('InAppNotificationClient: Invalid batch payload', { payload });
+      logger.warn('InAppNotificationClient: Invalid batch payload', {
+        recipientCount: Array.isArray(payload.userIds) ? payload.userIds.length : 0,
+        hasTitle: Boolean(payload.title),
+        hasBody: Boolean(payload.body),
+        taskId: payload.data?.taskId,
+        action: payload.data?.action,
+      });
       return false;
     }
 

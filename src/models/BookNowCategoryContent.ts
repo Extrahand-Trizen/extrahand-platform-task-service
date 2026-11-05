@@ -7,6 +7,16 @@ export interface IBookNowCategoryContent extends Document {
   description?: string;
   heroImageUrl?: string;
   iconUrl?: string;
+  scope?: {
+    includedTitle: string;
+    notIncludedTitle: string;
+    sections: Array<{
+      id: string;
+      label: string;
+      includedItems: string[];
+      notIncludedItems: string[];
+    }>;
+  };
   faqCategoryKeys: string[];
   sortOrder: number;
   isActive: boolean;
@@ -22,6 +32,18 @@ const BookNowCategoryContentSchema = new Schema<IBookNowCategoryContent>(
     description: { type: String, trim: true, default: '' },
     heroImageUrl: { type: String, trim: true, default: '' },
     iconUrl: { type: String, trim: true, default: '' },
+    scope: {
+      includedTitle: { type: String, trim: true, default: '' },
+      notIncludedTitle: { type: String, trim: true, default: '' },
+      sections: [
+        {
+          id: { type: String, required: true, trim: true },
+          label: { type: String, required: true, trim: true },
+          includedItems: [{ type: String, trim: true }],
+          notIncludedItems: [{ type: String, trim: true }],
+        },
+      ],
+    },
     faqCategoryKeys: [{ type: String, trim: true }],
     sortOrder: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true, index: true },

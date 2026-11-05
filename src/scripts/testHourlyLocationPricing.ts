@@ -81,7 +81,7 @@ async function main() {
   console.log(`📦 Hourly SKUs in database: ${allHourlySkus.length}`);
   if (allHourlySkus.length === 0) {
     console.error('❌ No hourly SKUs found! The duration strip will be empty.');
-    console.error('   The seed may not have run. Restart the task-service to trigger seedHourlyHelperCatalog().');
+    console.error('   Provision Hourly Helper durations through the catalog management workflow.');
     process.exit(1);
   }
 

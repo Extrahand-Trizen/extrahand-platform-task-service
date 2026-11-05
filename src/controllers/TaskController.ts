@@ -633,8 +633,7 @@ export class TaskController {
     const result = await TaskService.requestStartOtp(
       req.params.id,
       req.user!.profileId,
-      req.user!.uid,
-      { isResend: false }
+      req.user!.uid
     );
 
     ApiResponse.success(res, result, 'Task start OTP sent to requester');
@@ -644,19 +643,12 @@ export class TaskController {
    * POST /api/v1/tasks/:id/start-otp/resend
    * Resend a fresh task start OTP to requester
    */
-  static async resendStartOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+  static async resendStartOtp(req: AuthenticatedRequest, _res: Response): Promise<void> {
     if (!req.user!.profileId) {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
-    const result = await TaskService.requestStartOtp(
-      req.params.id,
-      req.user!.profileId,
-      req.user!.uid,
-      { isResend: true }
-    );
-
-    ApiResponse.success(res, result, 'Task start OTP resent to requester');
+    throw new BadRequestError('Start OTP resend is disabled for this task');
   }
 
   /**

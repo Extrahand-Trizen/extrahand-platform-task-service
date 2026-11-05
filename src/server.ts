@@ -13,10 +13,10 @@ import { WorkStartSoonScheduler } from './schedulers/WorkStartSoonScheduler';
 import { ApplicationFollowUpScheduler } from './schedulers/ApplicationFollowUpScheduler';
 import { RecurringVisitScheduler } from './schedulers/RecurringVisitScheduler';
 import { BookNowOfferScheduler } from './schedulers/BookNowOfferScheduler';
+import { TaskStartOtpNotificationQueue } from './services/TaskStartOtpNotificationQueue';
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
 import { initRedis, disconnectRedis } from './config/redis';
-import { BookNowCatalogBootstrap } from './services/BookNowCatalogBootstrap';
 async function startServer() {
   try {
     // Connect to MongoDB
@@ -24,10 +24,6 @@ async function startServer() {
       await Database.connectToDb();
     } else {
       logger.warn('⚠️ MONGODB_URI not provided, some features may not work');
-    }
-
-    if (config.MONGODB_URI) {
-      await BookNowCatalogBootstrap.seedHourlyHelperCatalog();
     }
 
     // Initialize clients
@@ -44,6 +40,7 @@ async function startServer() {
     await ApplicationFollowUpScheduler.initialize('task-service');
     await RecurringVisitScheduler.initialize('task-service');
     await BookNowOfferScheduler.initialize('task-service');
+    TaskStartOtpNotificationQueue.start();
 
     // Initialize Redis (optional, best-effort)
     await initRedis();
@@ -67,6 +64,7 @@ async function startServer() {
     // Graceful shutdown
     const gracefulShutdown = async (signal: string) => {
       logger.info(`${signal} signal received: closing HTTP server`);
+      TaskStartOtpNotificationQueue.stop();
       
       // Close Socket.IO connections
       io.close(() => {

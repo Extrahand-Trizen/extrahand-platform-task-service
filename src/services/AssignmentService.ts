@@ -456,6 +456,7 @@ export class AssignmentService {
         const createRes = await PaymentClient.createBookingEscrow({
           taskId: String(task._id),
           bookingOrderId: order.orderId,
+          idempotencyKey: `booknow_${order.orderId}`,
           posterUid: order.customerUid,
           amount: order.total,
           taskAmount: order.subtotal,

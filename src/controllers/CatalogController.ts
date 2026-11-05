@@ -6,17 +6,26 @@ import logger from '../config/logger';
 import { BadRequestError, ValidationError } from '../errors/AppError';
 import {
   helpSupportVariantSchema,
+  createCatalogServiceSchema,
   patchCategoryContentSchema,
   patchHelpSupportCategorySchema,
   patchHubSectionSchema,
   patchOperationalSkuOfferSchema,
   patchSkuContentSchema,
+  updateCatalogServiceImageSchema,
+  updateCatalogServiceOfferSchema,
+  updateCatalogServiceStatusSchema,
+  updateCatalogServiceSchema,
   upsertCategoryContentSchema,
   upsertHelpSupportCategorySchema,
   upsertHubSectionSchema,
   upsertSkuContentSchema,
+  createCustomerHomePromotionSchema,
+  patchCustomerHomePromotionSchema,
 } from '../schemas/catalogContent';
 import { parseWithZod } from '../utils/parseWithZod';
+import { BookNowAvailabilityService } from '../services/BookNowAvailabilityService';
+import type { BookNowLocationType } from '../models/BookNowLocationAvailability';
 
 function parseIncludeInactive(value: unknown): boolean {
   if (value === true || value === 'true' || value === '1') return true;
@@ -44,6 +53,108 @@ function parseCatalogLocation(query: Request['query']): CatalogLocationInput {
 }
 
 export class CatalogController {
+  static async getBookNowHomeCategories(req: Request, res: Response): Promise<void> {
+    const categories = await CatalogService.getBookNowHomeCategories(
+      getCatalogCustomerUid(req),
+    );
+    res.json({ success: true, data: categories });
+  }
+
+  static async getBookNowAvailability(req: Request, res: Response): Promise<void> {
+    const availability = await BookNowAvailabilityService.getAvailabilityForAddress(
+      parseCatalogLocation(req.query),
+      typeof req.query.catalogId === 'string' ? req.query.catalogId : undefined,
+    );
+    res.json({ success: true, data: availability });
+  }
+
+  static async listBookNowLocationAvailability(req: Request, res: Response): Promise<void> {
+    const isEnabled = req.query.isEnabled === undefined
+      ? undefined
+      : req.query.isEnabled === 'true';
+    const data = await BookNowAvailabilityService.listLocationAvailabilities({
+      search: typeof req.query.search === 'string' ? req.query.search : undefined,
+      type: typeof req.query.type === 'string' ? req.query.type : undefined,
+      isEnabled,
+      catalogId: typeof req.query.catalogId === 'string'
+        ? req.query.catalogId
+        : undefined,
+    });
+    res.json({ success: true, data });
+  }
+
+  static async updateBookNowLocationAvailability(req: Request, res: Response): Promise<void> {
+    if (typeof req.body?.isEnabled !== 'boolean') {
+      throw new ValidationError('isEnabled must be a boolean');
+    }
+    const updatedBy = typeof req.headers['x-user-id'] === 'string'
+      ? req.headers['x-user-id']
+      : 'operations-admin';
+    const data = await BookNowAvailabilityService.setLocationAvailability({
+      locationType: String(req.params.type) as BookNowLocationType,
+      locationId: String(req.params.id),
+      isEnabled: req.body.isEnabled,
+      updatedBy,
+      catalogId: typeof req.body.catalogId === 'string'
+        ? req.body.catalogId
+        : undefined,
+    });
+    res.json({ success: true, data });
+  }
+
+  static async removeBookNowLocation(req: Request, res: Response): Promise<void> {
+    const updatedBy = typeof req.headers['x-user-id'] === 'string'
+      ? req.headers['x-user-id']
+      : 'operations-admin';
+    const data = await BookNowAvailabilityService.removeLocationFromBookNow({
+      locationType: String(req.params.type) as BookNowLocationType,
+      locationId: String(req.params.id),
+      updatedBy,
+    });
+    res.json({ success: true, data });
+  }
+
+  static async listAdminServices(_req: Request, res: Response): Promise<void> {
+    const services = await CatalogService.listAdminServices();
+    res.json({ success: true, data: services });
+  }
+
+  static async createAdminService(req: Request, res: Response): Promise<void> {
+    const input = parseWithZod(createCatalogServiceSchema, req.body || {});
+    const service = await CatalogService.createAdminService(input);
+    res.status(201).json({ success: true, data: service });
+  }
+
+  static async updateAdminServiceImage(req: Request, res: Response): Promise<void> {
+    const input = parseWithZod(updateCatalogServiceImageSchema, req.body || {});
+    const content = await CatalogService.updateAdminServiceImage(
+      req.params.id,
+      input.imageUrl || '',
+    );
+    res.json({ success: true, data: content });
+  }
+
+  static async updateAdminServiceOffer(req: Request, res: Response): Promise<void> {
+    const input = parseWithZod(updateCatalogServiceOfferSchema, req.body || {});
+    const service = await CatalogService.updateAdminServiceOffer(
+      req.params.id,
+      input.offerPrice,
+    );
+    res.json({ success: true, data: service });
+  }
+
+  static async updateAdminServiceStatus(req: Request, res: Response): Promise<void> {
+    const input = parseWithZod(updateCatalogServiceStatusSchema, req.body || {});
+    const service = await CatalogService.updateAdminServiceStatus(req.params.id, input.isActive);
+    res.json({ success: true, data: service });
+  }
+
+  static async updateAdminService(req: Request, res: Response): Promise<void> {
+    const input = parseWithZod(updateCatalogServiceSchema, req.body || {});
+    const service = await CatalogService.updateAdminService(req.params.id, input);
+    res.json({ success: true, data: service });
+  }
+
   static async listCategories(req: Request, res: Response): Promise<void> {
     const categories = await CatalogService.listCategories(getCatalogCustomerUid(req));
     res.json({ success: true, data: categories });
@@ -77,6 +188,8 @@ export class CatalogController {
       previewLimit,
       getCatalogCustomerUid(req),
       parseCatalogLocation(req.query),
+      req.query.featuredOnly === 'true',
+      req.query.includeLocationPricing !== 'false',
     );
     res.json({ success: true, data: sections });
   }
@@ -198,6 +311,29 @@ export class CatalogController {
     const input = parseWithZod(patchSkuContentSchema, req.body || {});
     const content = await CatalogService.patchSkuContent(req.params.id, input);
     res.json({ success: true, data: content });
+  }
+
+  static async listCustomerHomePromotions(req: Request, res: Response): Promise<void> {
+    const includeInactive = req.path.startsWith('/internal/');
+    const promotions = await CatalogService.listCustomerHomePromotions(includeInactive);
+    res.json({ success: true, data: promotions });
+  }
+
+  static async listPublicCustomerHomePromotions(_req: Request, res: Response): Promise<void> {
+    const promotions = await CatalogService.listCustomerHomePromotions(false);
+    res.json({ success: true, data: promotions });
+  }
+
+  static async createCustomerHomePromotion(req: Request, res: Response): Promise<void> {
+    const input = parseWithZod(createCustomerHomePromotionSchema, req.body || {});
+    const promotion = await CatalogService.createCustomerHomePromotion(input);
+    res.status(201).json({ success: true, data: promotion });
+  }
+
+  static async patchCustomerHomePromotion(req: Request, res: Response): Promise<void> {
+    const input = parseWithZod(patchCustomerHomePromotionSchema, req.body || {});
+    const promotion = await CatalogService.patchCustomerHomePromotion(req.params.id, input);
+    res.json({ success: true, data: promotion });
   }
 
   static async listOperationalSkus(req: Request, res: Response): Promise<void> {

@@ -47,8 +47,18 @@ import { applyTaskAreaToLocation } from '../utils/resolveTaskArea';
 import { enforcesOneTimePosterBudgetFormEdit, taskHasPickDropDetails } from '../utils/posterBudgetEditRules';
 import { sanitizeRequesterTaskUpdate } from '../utils/taskUpdateAllowlist';
 import { parseIncomingCalendarDate } from '../utils/recurringVisitScheduleBuilder';
-import { normalizeQcOrderToTask, findQcOrderById, updateQcOrderById } from '../utils/qcOrderTaskAdapter';
+import {
+  normalizeQcOrderToTask,
+  findQcOrderById,
+  updateQcOrderById,
+  incrementQcStartOtpAttempts,
+  claimQcStartOtpVerification,
+} from '../utils/qcOrderTaskAdapter';
 import { invalidatePartnerLocationSubject } from './PartnerLocationService';
+import {
+  createStartOtpNotificationJobKey,
+  enqueueStartOtpNotifications,
+} from './TaskStartOtpNotificationQueue';
 import {
   isRecurringVisitPlanTask,
   RECURRING_META_TAG_PREFIX,
@@ -3799,8 +3809,7 @@ export class TaskService {
     taskId: string,
     profileId: mongoose.Types.ObjectId,
     _uid: string,
-    options?: { isResend?: boolean }
-  ): Promise<{ sentTo: string }> {
+  ): Promise<{ sentTo: string; expiresAt: null; resendAvailable: false; deliveryStatus: 'queued' }> {
     const task = await Task.findById(taskId);
     if (!task) {
       const qcOrder = await findQcOrderById(taskId);
@@ -3814,28 +3823,64 @@ export class TaskService {
           throw new ForbiddenError("Only assigned performer can request start OTP");
         }
 
-        const otp = (Math.floor(1000 + Math.random() * 9000)).toString();
+        if (qcOrder.status === 'started' || qcOrder.startOtp?.verifiedAt) {
+          throw new BadRequestError('Start OTP has already been used');
+        }
         const now = new Date();
-        const nextResendCount = options?.isResend ? (qcOrder.startOtp?.resendCount || 0) + 1 : 0;
-
-        await updateQcOrderById(qcOrder._id, {
-          startOtp: {
-            codeHash: otp,
-            codePlain: otp,
-            requestedAt: now,
-            attempts: 0,
-            resendCount: nextResendCount,
-            requestedById: profileId,
+        let otp = String(qcOrder.startOtp?.codeHash || '');
+        let requestedAt = qcOrder.startOtp?.requestedAt
+          ? new Date(qcOrder.startOtp.requestedAt)
+          : now;
+        if (!otp) {
+          otp = String(Math.floor(1000 + Math.random() * 9000));
+          await updateQcOrderById(qcOrder._id, {
+            startOtp: {
+              codeHash: otp,
+              codePlain: otp,
+              requestedAt,
+              attempts: 0,
+              resendCount: 0,
+              requestedById: profileId,
+            },
+            executionPhase: 'on_the_way',
+            onTheWayAt: now,
+            updatedAt: now,
+          });
+        }
+        const requesterUid = String(qcOrder.requesterUid || qcOrder.userId || '');
+        const requesterName = String(qcOrder.customerName || qcOrder.address?.name || 'Customer');
+        await enqueueStartOtpNotifications({
+          jobKey: createStartOtpNotificationJobKey(String(qcOrder._id), requestedAt),
+          taskId: String(qcOrder._id),
+          requesterUid,
+          requesterPhone: String(qcOrder.address?.phone || ''),
+          requesterName,
+          taskerName: 'Your helper',
+          taskTitle: String(qcOrder.title || 'Quick Commerce order'),
+          otp,
+          notificationData: {
+            taskId: String(qcOrder._id),
+            taskTitle: String(qcOrder.title || 'Quick Commerce order'),
+            otp,
+            otpType: 'task_start',
+            eventKey: 'HELPER_ON_THE_WAY',
+            executionPhase: 'on_the_way',
           },
-          executionPhase: 'on_the_way',
-          onTheWayAt: now,
-          updatedAt: now,
+          journeyTitle: 'Helper on the way',
+          journeyBody: 'Your helper has started from their location.',
         });
         invalidatePartnerLocationSubject(String(qcOrder._id));
         invalidatePartnerLocationSubject(taskId);
 
-        logger.info(`[OTP] Generated 4-digit start OTP: ${otp} for QC order: ${qcOrder._id}`);
-        return { sentTo: qcOrder.address?.phone || qcOrder.requesterUid || 'Customer' };
+        logger.info('[OTP] Queued start OTP notification for Quick Commerce order', {
+          orderId: String(qcOrder._id),
+        });
+        return {
+          sentTo: requesterName,
+          expiresAt: null,
+          resendAvailable: false,
+          deliveryStatus: 'queued',
+        };
       }
 
       throw new NotFoundError("Task not found");
@@ -3867,39 +3912,58 @@ export class TaskService {
       throw new BadRequestError("Requester notification channel unavailable");
     }
 
-    const otp = generateStartOtpCode();
-    logger.info(`[OTP] Generated 4-digit start OTP: ${otp} for task: ${effectiveTaskId}`);
+    if (workTask.startOtp?.verifiedAt) {
+      throw new BadRequestError('Start OTP has already been used');
+    }
+
     const now = new Date();
-
-    const nextResendCount = options?.isResend
-      ? (workTask.startOtp?.resendCount || 0) + 1
-      : workTask.startOtp?.resendCount || 0;
-
-    workTask.startOtp = {
-      codeHash: otp,
-      codePlain: otp,
-      requestedAt: now,
-      attempts: 0,
-      resendCount: nextResendCount,
-      requestedById: profileId,
-    };
-    workTask.executionPhase = "on_the_way";
-
-    await workTask.save();
-    TaskService.invalidateTaskCache(effectiveTaskId);
-    if (effectiveTaskId !== taskId) {
-      TaskService.invalidateTaskCache(taskId);
+    let otp = String(workTask.startOtp?.codeHash || '');
+    let requestedAt = workTask.startOtp?.requestedAt
+      ? new Date(workTask.startOtp.requestedAt)
+      : now;
+    if (!otp) {
+      otp = generateStartOtpCode();
+      const updatedTask = await Task.findOneAndUpdate(
+        {
+          _id: workTask._id,
+          status: 'assigned',
+          $or: [
+            { 'startOtp.codeHash': { $exists: false } },
+            { 'startOtp.codeHash': null },
+          ],
+        },
+        {
+          $set: {
+            startOtp: {
+              codeHash: otp,
+              codePlain: otp,
+              requestedAt,
+              attempts: 0,
+              resendCount: 0,
+              requestedById: profileId,
+            },
+            executionPhase: 'on_the_way',
+          },
+        },
+        { new: true },
+      );
+      const activeTask = updatedTask || (await Task.findById(workTask._id));
+      if (!activeTask?.startOtp?.codeHash) {
+        throw new BadRequestError('Could not issue task start OTP');
+      }
+      otp = activeTask.startOtp.codeHash;
+      requestedAt = activeTask.startOtp.requestedAt || requestedAt;
+      workTask.startOtp = activeTask.startOtp;
+      workTask.executionPhase = activeTask.executionPhase;
+      TaskService.invalidateTaskCache(effectiveTaskId);
+      if (effectiveTaskId !== taskId) TaskService.invalidateTaskCache(taskId);
     }
 
     const { workTitle: workTitleForOtp, visitNumber } =
       await RecurringVisitService.resolveStartOtpWorkTitle(workTask);
 
-    const journeyTitle = options?.isResend
-      ? 'Helper is on the way'
-      : 'Helper on the way';
-    const journeyBody = options?.isResend
-      ? `Your helper is heading to your location for \"${workTitleForOtp}\".`
-      : `Your helper has started from their location for \"${workTitleForOtp}\".`;
+    const journeyTitle = 'Helper on the way';
+    const journeyBody = `Your helper has started from their location for "${workTitleForOtp}".`;
     const notificationData = {
       taskId: effectiveTaskId,
       taskTitle: workTitleForOtp,
@@ -3935,53 +3999,28 @@ export class TaskService {
       requesterProfile && typeof requesterProfile === "object" && "email" in requesterProfile
         ? (requesterProfile as { email?: unknown }).email
         : undefined;
-
-    // Send email
-    try {
-      if (typeof requesterEmail === "string" && requesterEmail.trim().length > 0) {
-        await EmailServiceClient.sendTaskStartOtp(requesterEmail, {
-          requesterName,
-          taskerName,
-          taskTitle: workTitleForOtp,
-          otp,
-          userId: requesterUid,
-        });
-      } else {
-        logger.warn("Skipping task start OTP email: requester email missing", { taskId, requesterUid });
-      }
-    } catch (emailError) {
-      logger.warn("Failed to send task start OTP via email", { taskId, error: emailError });
-    }
-
-    // Push notification (FCM) to poster — journey update (OTP stays in data + Work Progress)
-    try {
-      await NotificationClient.send({
-        eventKey: 'HELPER_ON_THE_WAY',
-        category: 'taskUpdates',
-        actorId: _uid,
-        recipients: [requesterUid],
-        entity: { type: 'task', id: taskId },
-        title: journeyTitle,
-        body: journeyBody,
-        data: notificationData,
-      });
-    } catch (pushError) {
-      logger.warn("Failed to send task start OTP via push notification", { taskId, error: pushError });
-    }
-
-    // Send in-app notification for immediate visibility
-    try {
-      await InAppNotificationClient.send({
-        userId: requesterUid,
-        title: journeyTitle,
-        body: journeyBody,
-        type: "info",
-        category: "taskUpdates",
-        data: notificationData,
-      });
-    } catch (inAppError) {
-      logger.warn("Failed to send task start OTP via in-app notification", { taskId, error: inAppError });
-    }
+    const requesterPhone = [
+      requesterProfile?.phone,
+      requesterProfile?.phoneNumber,
+      requesterProfile?.mobile,
+    ].find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    await enqueueStartOtpNotifications({
+      jobKey: createStartOtpNotificationJobKey(effectiveTaskId, requestedAt),
+      taskId: effectiveTaskId,
+      requesterUid,
+      requesterEmail:
+        typeof requesterEmail === 'string' && requesterEmail.trim()
+          ? requesterEmail.trim()
+          : undefined,
+      requesterPhone,
+      requesterName,
+      taskerName,
+      taskTitle: workTitleForOtp,
+      otp,
+      notificationData,
+      journeyTitle,
+      journeyBody,
+    });
 
     // WhatsApp — Meta template extrahand_work_starting_soon (Dialog + legacy)
     const waMinute = Math.floor(Date.now() / 60000);
@@ -4019,10 +4058,15 @@ export class TaskService {
       },
     });
 
-    logger.info(`[OTP SUCCESS] Generated and successfully dispatched 4-digit start OTP: ${otp} for task: ${effectiveTaskId} to poster: ${requesterName}`);
+    logger.info('[OTP] Start OTP notification job accepted', {
+      taskId: effectiveTaskId,
+    });
 
     return {
       sentTo: requesterName,
+      expiresAt: null,
+      resendAvailable: false,
+      deliveryStatus: 'queued',
     };
   }
 
@@ -4046,6 +4090,9 @@ export class TaskService {
         if (!isPerformer) {
           throw new ForbiddenError("Only assigned performer can verify start OTP");
         }
+        if (qcOrder.status === 'started' || qcOrder.startOtp?.verifiedAt) {
+          throw new BadRequestError('Start OTP has already been used');
+        }
 
         const sanitizedOtp = (otp || "").replace(/\D/g, "").slice(0, 4);
         if (sanitizedOtp.length !== 4) {
@@ -4059,19 +4106,31 @@ export class TaskService {
           if (!qcOrder.startOtp?.codeHash) {
             throw new BadRequestError("Start OTP not requested. Please request OTP first");
           }
+          if ((qcOrder.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
+            throw new BadRequestError('Too many invalid OTP attempts. Contact support to continue.');
+          }
           if (qcOrder.startOtp.codeHash !== sanitizedOtp) {
+            const attempts = await incrementQcStartOtpAttempts(qcOrder._id, START_OTP_MAX_ATTEMPTS);
+            if (attempts === null || attempts >= START_OTP_MAX_ATTEMPTS) {
+              throw new BadRequestError('OTP mismatch. Maximum attempts reached.');
+            }
             throw new BadRequestError("OTP mismatch");
           }
         }
 
         const now = new Date();
-        await updateQcOrderById(qcOrder._id, {
-          'startOtp.verifiedAt': now,
-          status: 'started',
-          startedAt: now,
-          executionPhase: 'on_the_way',
-          updatedAt: now,
-        });
+        if (!acceptsPosterDummyStartOtp(posterUid, sanitizedOtp)) {
+          const claimed = await claimQcStartOtpVerification(qcOrder._id, sanitizedOtp, now);
+          if (!claimed) throw new BadRequestError('Start OTP has already been used or is invalid');
+        } else {
+          await updateQcOrderById(qcOrder._id, {
+            'startOtp.verifiedAt': now,
+            status: 'started',
+            startedAt: now,
+            executionPhase: 'on_the_way',
+            updatedAt: now,
+          });
+        }
         const updated = await findQcOrderById(qcOrder._id);
         return normalizeQcOrderToTask(updated) as unknown as ITask;
       }
@@ -4126,22 +4185,40 @@ export class TaskService {
     }
 
     if ((workTask.startOtp.attempts || 0) >= START_OTP_MAX_ATTEMPTS) {
-      throw new BadRequestError("Too many invalid attempts. Please resend OTP");
+      throw new BadRequestError("Too many invalid OTP attempts. Contact support to continue.");
     }
 
     if (workTask.startOtp.codeHash !== sanitizedOtp) {
-      workTask.startOtp.attempts = (workTask.startOtp.attempts || 0) + 1;
-      await workTask.save();
-
-      if (workTask.startOtp.attempts >= START_OTP_MAX_ATTEMPTS) {
-        throw new BadRequestError("OTP mismatch. Max attempts reached. Please resend OTP");
+      const updateResult = await Task.updateOne(
+        {
+          _id: workTask._id,
+          status: 'assigned',
+          'startOtp.codeHash': workTask.startOtp.codeHash,
+          'startOtp.attempts': { $lt: START_OTP_MAX_ATTEMPTS },
+          'startOtp.verifiedAt': { $exists: false },
+        },
+        { $inc: { 'startOtp.attempts': 1 } },
+      );
+      if (updateResult.modifiedCount !== 1) {
+        throw new BadRequestError('Too many invalid OTP attempts. Contact support to continue.');
       }
 
       throw new BadRequestError("OTP mismatch");
     }
 
-    workTask.startOtp.verifiedAt = new Date();
-    await workTask.save();
+    const now = new Date();
+    const claimResult = await Task.updateOne(
+      {
+        _id: workTask._id,
+        status: 'assigned',
+        'startOtp.codeHash': sanitizedOtp,
+        'startOtp.verifiedAt': { $exists: false },
+      },
+      { $set: { 'startOtp.verifiedAt': now } },
+    );
+    if (claimResult.modifiedCount !== 1) {
+      throw new BadRequestError('Start OTP has already been used or is invalid');
+    }
 
     return TaskService.updateTaskStatus(effectiveTaskId, profileId, "started", {
       skipStartOtpValidation: true,

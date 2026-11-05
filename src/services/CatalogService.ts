@@ -5,13 +5,14 @@ import ServiceVariant from '../models/ServiceVariant';
 import ServiceAddon from '../models/ServiceAddon';
 import ServiceArea from '../models/ServiceArea';
 import { UserServiceClient } from '../clients/UserServiceClient';
-import { BadRequestError, NotFoundError } from '../errors/AppError';
+import { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
 import { isHardcodedSupportedLocation } from '../constants/locations/isHardcodedSupportedLocation';
 import BookNowSkuContent from '../models/BookNowSkuContent';
 import BookNowCategoryContent from '../models/BookNowCategoryContent';
 import HelpSupportContent from '../models/HelpSupportContent';
 import BookNowHubSection from '../models/BookNowHubSection';
+import CustomerHomePromotion from '../models/CustomerHomePromotion';
 import {
   BOOK_NOW_HUB_SECTION_SEED,
 } from '../constants/bookNowHubCatalog';
@@ -21,10 +22,14 @@ import type {
   PatchHelpSupportCategoryInput,
   PatchHubSectionInput,
   PatchSkuContentInput,
+  CreateCustomerHomePromotionInput,
+  PatchCustomerHomePromotionInput,
   UpsertCategoryContentInput,
   UpsertHelpSupportCategoryInput,
   UpsertHubSectionInput,
   UpsertSkuContentInput,
+  CreateCatalogServiceInput,
+  UpdateCatalogServiceInput,
 } from '../schemas/catalogContent';
 import type { IServiceSku } from '../models/ServiceSku';
 import type { PatchOperationalSkuOfferInput } from '../schemas/catalogContent';
@@ -51,6 +56,15 @@ const BOOK_NOW_CATEGORY_ALIASES: Record<string, string> = {
 
 function normalizeCatalogLookup(value: string): string {
   return value.toLowerCase().replace(/[-_\s]+/g, '-').trim();
+}
+
+function slugifyCatalogValue(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 function normalizeContentIdentity(value: string): string {
@@ -127,6 +141,8 @@ type BookNowPackageListItem = {
   name: string;
   description: string;
   durationMinutes: number;
+  filterId?: string;
+  filterLabel?: string;
   pricing: PricingView;
   content: {
     displayName: string;
@@ -136,6 +152,8 @@ type BookNowPackageListItem = {
     excludes: string[];
     imageUrls: string[];
     sortOrder: number;
+    isFeaturedOnHome: boolean;
+    featuredSortOrder: number;
   } | null;
   primaryImageUrl: string;
   serviceFlow: {
@@ -145,6 +163,54 @@ type BookNowPackageListItem = {
     consultationEnabled: boolean;
     gstExempt: boolean;
   };
+};
+
+function getHubPreviewPackages(packages: BookNowPackageListItem[], limit: number) {
+  return [...packages]
+    .sort((a, b) => {
+      const aFeatured = a.content?.isFeaturedOnHome === true;
+      const bFeatured = b.content?.isFeaturedOnHome === true;
+      if (aFeatured !== bFeatured) return aFeatured ? -1 : 1;
+      if (aFeatured && bFeatured) {
+        return (a.content?.featuredSortOrder ?? 0) - (b.content?.featuredSortOrder ?? 0);
+      }
+      if (a.pricing.isOfferActive !== b.pricing.isOfferActive) {
+        return a.pricing.isOfferActive ? -1 : 1;
+      }
+      return 0;
+    })
+    .slice(0, limit);
+}
+
+type AdminCatalogService = {
+  _id: string;
+  slug: string;
+  name: string;
+  description: string;
+  imageUrl: string;
+  basePrice: number;
+  offerPrice: number;
+  originalPrice: number;
+  defaultPrice: number;
+  pricingUnit: 'fixed' | 'hourly';
+  durationMinutes: number;
+  taskCategory: string;
+  partnerCategoryId: string;
+  isActive: boolean;
+  filterId?: string;
+  filterLabel?: string;
+};
+
+type AdminCatalogCategory = {
+  _id: string;
+  slug: string;
+  name: string;
+  description: string;
+  iconUrl: string;
+  sortOrder: number;
+  isActive: boolean;
+  isVisibleInApp: boolean;
+  services: AdminCatalogService[];
 };
 
 function normalizeHubSectionServices(services: UpsertHubSectionInput['services'] | PatchHubSectionInput['services']) {
@@ -203,6 +269,12 @@ function comparePackageListItems(a: BookNowPackageListItem, b: BookNowPackageLis
   if (priceA !== priceB) return priceA - priceB;
 
   return a.name.localeCompare(b.name);
+}
+
+function sortBookNowSkus<T extends { _id: unknown; name: string }>(skus: T[]): T[] {
+  return [...skus].sort(
+    (a, b) => a.name.localeCompare(b.name) || String(a._id).localeCompare(String(b._id)),
+  );
 }
 
 function locationPriceRank(source?: string | null): number {
@@ -297,6 +369,720 @@ function filterPersonalAssistantFromHubResponse(
 }
 
 export class CatalogService {
+  static async getBookNowHomeCategories(customerUid?: string | null) {
+    const requestStartedAt = Date.now();
+    const catalogReadsStartedAt = Date.now();
+    const [categories, categoryContents, hubSectionDocs] = await Promise.all([
+      ServiceCategory.find({ isActive: true })
+        .select({ slug: 1, name: 1, sortOrder: 1 })
+        .sort({ sortOrder: 1, name: 1 })
+        .lean(),
+      BookNowCategoryContent.find({})
+        .select({ categorySlug: 1, title: 1, heroImageUrl: 1, isActive: 1, sortOrder: 1 })
+        .sort({ sortOrder: 1, title: 1 })
+        .lean(),
+      BookNowHubSection.find({ isActive: true })
+        .select({ slug: 1, title: 1, iconKey: 1, sortOrder: 1, services: 1 })
+        .sort({ sortOrder: 1, title: 1 })
+        .lean(),
+    ]);
+    const catalogReadsMs = Date.now() - catalogReadsStartedAt;
+    const visibleCategories = filterPersonalAssistantCategories(categories, customerUid);
+    if (visibleCategories.length === 0) {
+      logger.info('Book Now home category query timings', {
+        catalogReadsMs,
+        activeSkuQueryMs: 0,
+        totalMs: Date.now() - requestStartedAt,
+        categoryCount: 0,
+        hubSectionCount: hubSectionDocs.length,
+      });
+      return [];
+    }
+
+    const categoryIds = visibleCategories.map((category) => category._id);
+    const activeSkuQueryStartedAt = Date.now();
+    const activeCategoryIds = await ServiceSku.distinct('categoryId', {
+      categoryId: { $in: categoryIds },
+      isActive: true,
+    });
+    const activeSkuQueryMs = Date.now() - activeSkuQueryStartedAt;
+    const activeCategoryIdSet = new Set(activeCategoryIds.map(String));
+    const categoryBySlug = new Map(
+      visibleCategories.map((category) => [
+        normalizeCatalogLookup(category.slug),
+        category,
+      ] as const),
+    );
+    const categoryContentBySlug = new Map(
+      categoryContents.map((content) => [
+        normalizeCatalogLookup(content.categorySlug),
+        content,
+      ] as const),
+    );
+    const inactiveCategorySlugs = new Set(
+      categoryContents
+        .filter((content) => content.isActive === false)
+        .map((content) => normalizeCatalogLookup(content.categorySlug)),
+    );
+    const sections: Array<{
+      id: string;
+      slug: string;
+      title: string;
+      iconKey: string;
+      sortOrder: number;
+      services: Array<{
+        serviceId: string;
+        label: string;
+        categorySlug: string;
+        sectionId?: string;
+        imageUrl?: string;
+        isActive?: boolean;
+      }>;
+    }> = hubSectionDocs.length > 0
+      ? hubSectionDocs.map((section) => ({
+          id: section.slug,
+          slug: section.slug,
+          title: section.title,
+          iconKey: section.iconKey || 'Broom',
+          sortOrder: Number(section.sortOrder || 0),
+          services: section.services.map((service) => ({
+            serviceId: service.serviceId,
+            label: service.label,
+            categorySlug: service.categorySlug,
+            sectionId: service.sectionId,
+            imageUrl: service.imageUrl,
+            isActive: service.isActive,
+          })),
+        }))
+      : BOOK_NOW_HUB_SECTION_SEED.map((section) => ({
+          id: section.id,
+          slug: section.id,
+          title: section.title,
+          iconKey: section.iconKey,
+          sortOrder: section.sortOrder,
+          services: section.services.map((service) => ({
+            serviceId: service.id,
+            label: service.label,
+            categorySlug: service.categorySlug,
+            sectionId: service.sectionId,
+            imageUrl: service.imageUrl,
+            isActive: true,
+          })),
+        }));
+    const groupedCategorySlugs = new Set(
+      sections.flatMap((section) => [
+        normalizeCatalogLookup(section.id),
+        ...section.services.map((service) => normalizeCatalogLookup(service.categorySlug)),
+      ]),
+    );
+    const toHomeService = (service: (typeof sections)[number]['services'][number]) => {
+      const slug = normalizeCatalogLookup(service.categorySlug);
+      const category = categoryBySlug.get(slug);
+      const content = categoryContentBySlug.get(slug);
+      if (
+        service.isActive === false ||
+        !category ||
+        !activeCategoryIdSet.has(String(category._id)) ||
+        inactiveCategorySlugs.has(slug)
+      ) {
+        return null;
+      }
+      return {
+        id: service.serviceId,
+        label: service.label,
+        categorySlug: service.categorySlug,
+        categoryName: category.name || content?.title || service.label,
+        sectionId: service.sectionId || '',
+        imageUrl: service.imageUrl || content?.heroImageUrl || '',
+        previewPackages: [],
+        totalPackages: 0,
+      };
+    };
+    const groupedSections = sections
+      .map((section) => ({
+        id: section.id,
+        slug: section.slug,
+        title: section.title,
+        iconKey: section.iconKey,
+        sortOrder: section.sortOrder,
+        services: section.services.map(toHomeService).filter(
+          (service): service is NonNullable<typeof service> => service !== null,
+        ),
+      }))
+      .filter((section) => section.services.length > 0);
+    const fallbackSections = visibleCategories
+      .filter((category) => {
+        const slug = normalizeCatalogLookup(category.slug);
+        return (
+          activeCategoryIdSet.has(String(category._id)) &&
+          !groupedCategorySlugs.has(slug) &&
+          !inactiveCategorySlugs.has(slug)
+        );
+      })
+      .map((category) => {
+        const slug = normalizeCatalogLookup(category.slug);
+        const content = categoryContentBySlug.get(slug);
+        return {
+          id: slug,
+          slug,
+          title: content?.title || category.name || slug,
+          iconKey: 'Broom',
+          sortOrder: Number(category.sortOrder || 999),
+          services: [{
+            id: slug,
+            label: content?.title || category.name || slug,
+            categorySlug: slug,
+            categoryName: category.name || slug,
+            sectionId: '',
+            imageUrl: content?.heroImageUrl || '',
+            previewPackages: [],
+            totalPackages: 0,
+          }],
+        };
+      });
+
+    const result = filterPersonalAssistantFromHubResponse(
+      [...groupedSections, ...fallbackSections].sort(
+        (a, b) => a.sortOrder - b.sortOrder,
+      ),
+      customerUid,
+    );
+    logger.info('Book Now home category query timings', {
+      catalogReadsMs,
+      activeSkuQueryMs,
+      totalMs: Date.now() - requestStartedAt,
+      categoryCount: visibleCategories.length,
+      activeCategoryCount: activeCategoryIds.length,
+      hubSectionCount: hubSectionDocs.length,
+      responseSectionCount: result.length,
+    });
+    return result;
+  }
+
+  static async listAdminServices(): Promise<AdminCatalogCategory[]> {
+    const [categories, categoryContents, skuContents, hubSectionDocs] = await Promise.all([
+      ServiceCategory.find({ isActive: true })
+        .sort({ sortOrder: 1, name: 1 })
+        .lean(),
+      BookNowCategoryContent.find({}).select({ categorySlug: 1, isActive: 1 }).lean(),
+      BookNowSkuContent.find({}).lean(),
+      BookNowHubSection.find({ isActive: true }).lean(),
+    ]);
+    const categoryIds = categories.map((category) => category._id);
+    const skus = categoryIds.length > 0
+      ? await ServiceSku.find({ categoryId: { $in: categoryIds } })
+          .sort({ name: 1 })
+          .lean()
+      : [];
+    const categoryContentActiveBySlug = new Map(
+      categoryContents.map((content) => [
+        normalizeCatalogLookup(content.categorySlug),
+        content.isActive,
+      ] as const),
+    );
+    const pricingSkus = await LocationPricingService.listPricingSkus({});
+    const defaultPriceBySkuId = new Map(
+      pricingSkus.map((sku) => [String(sku._id), sku.defaultPrice] as const),
+    );
+    const hubSections = hubSectionDocs.length > 0
+      ? hubSectionDocs.map((section) => ({
+          id: section.slug,
+          services: (Array.isArray(section.services) ? section.services : []).map((service) => ({
+            categorySlug: service.categorySlug,
+            isActive: service.isActive !== false,
+          })),
+        }))
+      : BOOK_NOW_HUB_SECTION_SEED.map((section) => ({
+          id: section.id,
+          services: section.services.map((service) => ({
+            categorySlug: service.categorySlug,
+            isActive: true,
+          })),
+        }));
+    const groupedCategorySlugs = new Set(
+      hubSections.flatMap((section) => [
+        normalizeCatalogLookup(section.id),
+        ...section.services.map((service) => normalizeCatalogLookup(service.categorySlug)),
+      ]),
+    );
+    const activeHubCategorySlugs = new Set(
+      hubSections.flatMap((section) =>
+        section.services
+          .filter((service) =>
+            service.isActive &&
+            categoryContentActiveBySlug.get(normalizeCatalogLookup(service.categorySlug)) !== false,
+          )
+          .map((service) => normalizeCatalogLookup(service.categorySlug)),
+      ),
+    );
+
+    return categories
+      .filter((category) => {
+        const categorySlug = normalizeCatalogLookup(category.slug);
+        const isVisibleInHub = groupedCategorySlugs.has(categorySlug)
+          ? activeHubCategorySlugs.has(categorySlug)
+          : true;
+        return (
+          !isPersonalAssistantCategorySlug(categorySlug) ||
+          canAccessPersonalAssistantCatalog()
+        ) &&
+          categoryContentActiveBySlug.get(categorySlug) !== false &&
+          isVisibleInHub;
+      })
+      .map((category) => {
+        const categorySkus = sortBookNowSkus(
+          skus.filter((sku) => String(sku.categoryId) === String(category._id)),
+        );
+        const categoryContentsForSkus = skuContents.filter(
+          (content) =>
+            normalizeCatalogLookup(content.categorySlug) ===
+            normalizeCatalogLookup(category.slug),
+        );
+        const activeContentBySkuSlug = new Map<string, (typeof skuContents)[number]>();
+        categoryContentsForSkus
+          .filter((content) => content.isActive)
+          .forEach((content) => {
+            [
+              normalizeCatalogLookup(content.skuSlug),
+              normalizeContentIdentity(content.skuSlug),
+              normalizeCatalogLookup(content.displayName),
+              normalizeContentIdentity(content.displayName),
+            ]
+              .filter(Boolean)
+              .forEach((key) => activeContentBySkuSlug.set(key, content));
+          });
+        const activeCategorySkus = categorySkus.filter((sku) => sku.isActive);
+        const appPackages = this.buildPackageListItems({
+          category,
+          skus: activeCategorySkus,
+          contentBySkuSlug: activeContentBySkuSlug,
+        });
+        const appPackageBySkuId = new Map(
+          appPackages.map((item) => [String(item._id), item] as const),
+        );
+        const allContentBySkuSlug = new Map<string, (typeof skuContents)[number]>();
+        categoryContentsForSkus
+          .filter(
+            (content) =>
+              normalizeCatalogLookup(content.categorySlug) ===
+              normalizeCatalogLookup(category.slug),
+          )
+          .forEach((content) => {
+            [
+              normalizeCatalogLookup(content.skuSlug),
+              normalizeContentIdentity(content.skuSlug),
+              normalizeCatalogLookup(content.displayName),
+              normalizeContentIdentity(content.displayName),
+            ]
+              .filter(Boolean)
+              .forEach((key) => allContentBySkuSlug.set(key, content));
+          });
+
+        return {
+          _id: String(category._id),
+          slug: category.slug,
+          name: category.name,
+          description: category.description || '',
+          iconUrl: category.iconUrl || '',
+          sortOrder: Number(category.sortOrder || 0),
+          isActive: category.isActive,
+          isVisibleInApp: true,
+          services: categorySkus
+            .filter(
+              (service) =>
+                !service.isActive || appPackageBySkuId.has(String(service._id)),
+            )
+            .map((service) => {
+              const defaultPrice = defaultPriceBySkuId.get(String(service._id));
+              if (defaultPrice === undefined && service.isActive) {
+                throw new Error(
+                  `Global pricing was not returned for service SKU ${String(service._id)}`,
+                );
+              }
+              const appPackage = appPackageBySkuId.get(String(service._id));
+              const content = allContentBySkuSlug.get(
+                normalizeCatalogLookup(service.slug),
+              );
+              return {
+                _id: String(service._id),
+                slug: service.slug,
+                name: appPackage?.content?.displayName || content?.displayName || service.name,
+                description: service.description || '',
+                imageUrl:
+                  appPackage?.primaryImageUrl ||
+                  content?.imageUrls?.[0] ||
+                  '',
+                basePrice: Number(service.basePrice || 0),
+                offerPrice: Number(service.offerPrice || 0),
+                originalPrice: Number(service.basePrice || 0),
+                defaultPrice: defaultPrice ?? getSkuOfferPrice(service),
+                pricingUnit: service.pricingUnit,
+                durationMinutes: Number(service.durationMinutes || 0),
+                taskCategory: service.taskCategory,
+                partnerCategoryId: service.partnerCategoryId || '',
+                isActive: service.isActive,
+                filterId: service.isActive && content?.isActive ? content.filterId || undefined : undefined,
+                filterLabel: service.isActive && content?.isActive ? content.filterLabel || undefined : undefined,
+              };
+            }),
+        };
+      })
+      .filter((category) => category.services.length > 0)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+  }
+
+  static async createAdminService(input: CreateCatalogServiceInput) {
+    const categorySlug = input.categorySlug
+      ? normalizeCatalogLookup(input.categorySlug)
+      : slugifyCatalogValue(input.categoryName || '');
+    const serviceSlug = slugifyCatalogValue(input.name);
+
+    if (!categorySlug || !serviceSlug) {
+      throw new BadRequestError('Category and service names must include letters or numbers');
+    }
+
+    const session = await mongoose.startSession();
+    let result: { category: AdminCatalogCategory; service: AdminCatalogService } | null = null;
+
+    try {
+      await session.withTransaction(async (transactionSession) => {
+        let category = await ServiceCategory.findOne({ slug: categorySlug }).session(transactionSession);
+        const isNewCategory = !input.categorySlug;
+
+        if (isNewCategory) {
+          if (category) {
+            throw new ConflictError(`A category with slug "${categorySlug}" already exists`);
+          }
+          const createdCategories = await ServiceCategory.create(
+            [{
+              slug: categorySlug,
+              name: input.categoryName?.trim(),
+              description: input.categoryDescription?.trim() || '',
+              iconUrl: input.categoryIconUrl?.trim() || '',
+              sortOrder: input.categorySortOrder ?? 0,
+              isActive: true,
+            }],
+            { session: transactionSession },
+          );
+          category = createdCategories[0];
+        } else if (!category) {
+          throw new NotFoundError('Selected service category was not found');
+        }
+
+        const existingService = await ServiceSku.findOne({
+          categoryId: category._id,
+          slug: serviceSlug,
+        }).session(transactionSession);
+        if (existingService) {
+          throw new ConflictError(`A service named "${input.name.trim()}" already exists in this category`);
+        }
+
+        const createdServices = await ServiceSku.create(
+          [{
+            categoryId: category._id,
+            slug: serviceSlug,
+            name: input.name.trim(),
+            description: input.description?.trim() || '',
+            basePrice: input.basePrice,
+            pricingUnit: input.pricingUnit,
+            durationMinutes: input.durationMinutes,
+            taskCategory: input.partnerCategoryId,
+            partnerCategoryId: input.partnerCategoryId,
+            isActive: true,
+          }],
+          { session: transactionSession },
+        );
+        const service = createdServices[0];
+
+        if (isNewCategory) {
+          await BookNowCategoryContent.findOneAndUpdate(
+            { categorySlug },
+            {
+              categorySlug,
+              title: input.categoryName?.trim(),
+              description: input.categoryDescription?.trim() || '',
+              heroImageUrl: input.categoryIconUrl?.trim() || '',
+              iconUrl: input.categoryIconUrl?.trim() || '',
+              sortOrder: input.categorySortOrder ?? 0,
+              isActive: true,
+            },
+            { upsert: true, new: true, session: transactionSession },
+          );
+        }
+
+        await BookNowSkuContent.findOneAndUpdate(
+          { categorySlug, skuSlug: serviceSlug },
+          {
+            categorySlug,
+            skuSlug: serviceSlug,
+            displayName: input.name.trim(),
+            shortDescription: input.description?.trim() || '',
+            longDescription: input.description?.trim() || '',
+            filterId: input.filterId.trim(),
+            filterLabel: input.filterLabel.trim(),
+            imageUrls: input.imageUrl?.trim() ? [input.imageUrl.trim()] : [],
+            isActive: true,
+          },
+          { upsert: true, new: true, session: transactionSession },
+        );
+
+        result = {
+          category: {
+            _id: String(category._id),
+            slug: category.slug,
+            name: category.name,
+            description: category.description || '',
+            iconUrl: category.iconUrl || '',
+            sortOrder: Number(category.sortOrder || 0),
+            isActive: category.isActive,
+            isVisibleInApp: true,
+            services: [],
+          },
+          service: {
+            _id: String(service._id),
+            slug: service.slug,
+            name: service.name,
+            description: service.description || '',
+            imageUrl: input.imageUrl?.trim() || '',
+            basePrice: Number(service.basePrice || 0),
+            offerPrice: Number(service.offerPrice || 0),
+            originalPrice: Number(service.basePrice || 0),
+            defaultPrice: getSkuOfferPrice(service),
+            pricingUnit: service.pricingUnit,
+            durationMinutes: Number(service.durationMinutes || 0),
+            taskCategory: service.taskCategory,
+            partnerCategoryId: service.partnerCategoryId || '',
+            isActive: service.isActive,
+            filterId: input.filterId.trim(),
+            filterLabel: input.filterLabel.trim(),
+          },
+        };
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!result) {
+      throw new Error('Service creation completed without returning the created records');
+    }
+    return result;
+  }
+
+  static async updateAdminServiceImage(id: string, imageUrl: string) {
+    assertObjectId(id, 'service id');
+    const sku = await ServiceSku.findById(id).lean();
+    if (!sku) throw new NotFoundError('Service not found');
+    const category = await ServiceCategory.findById(sku.categoryId).select({ slug: 1 }).lean();
+    if (!category) throw new NotFoundError('Service category not found');
+
+    return BookNowSkuContent.findOneAndUpdate(
+      {
+        categorySlug: normalizeCatalogLookup(category.slug),
+        skuSlug: normalizeCatalogLookup(sku.slug),
+      },
+      {
+        $set: { imageUrls: imageUrl ? [imageUrl] : [] },
+        $setOnInsert: {
+          categorySlug: normalizeCatalogLookup(category.slug),
+          skuSlug: normalizeCatalogLookup(sku.slug),
+          displayName: sku.name,
+          isActive: true,
+        },
+      },
+      { upsert: true, new: true, runValidators: true },
+    ).lean();
+  }
+
+  static async updateAdminServiceOffer(id: string, offerPrice: number | null) {
+    assertObjectId(id, 'service id');
+    const sku = await ServiceSku.findById(id).select({ basePrice: 1 }).lean();
+    if (!sku) throw new NotFoundError('Service not found');
+
+    if (
+      offerPrice !== null &&
+      (!Number.isFinite(offerPrice) ||
+        offerPrice <= 0 ||
+        offerPrice >= Number(sku.basePrice || 0))
+    ) {
+      throw new BadRequestError('Offer price must be greater than zero and lower than the base price');
+    }
+
+    return this.patchOperationalSkuOffer(id, {
+      offerPrice: offerPrice ?? 0,
+      isOfferActive: offerPrice !== null,
+    });
+  }
+
+  static async updateAdminServiceStatus(id: string, isActive: boolean) {
+    assertObjectId(id, 'service id');
+    const session = await mongoose.startSession();
+    let updatedService: AdminCatalogService | null = null;
+    try {
+      await session.withTransaction(async (transactionSession) => {
+        const service = await ServiceSku.findById(id).session(transactionSession);
+        if (!service) throw new NotFoundError('Service not found');
+        const category = await ServiceCategory.findById(service.categoryId)
+          .select({ slug: 1 })
+          .session(transactionSession);
+        if (!category) throw new NotFoundError('Service category not found');
+
+        service.isActive = isActive;
+        await service.save({ session: transactionSession });
+
+        await BookNowSkuContent.updateMany(
+          {
+            categorySlug: normalizeCatalogLookup(category.slug),
+            skuSlug: normalizeCatalogLookup(service.slug),
+          },
+          { $set: { isActive } },
+          { session: transactionSession },
+        );
+
+        updatedService = {
+          _id: String(service._id),
+          slug: service.slug,
+          name: service.name,
+          description: service.description || '',
+          imageUrl: '',
+          basePrice: Number(service.basePrice || 0),
+          offerPrice: Number(service.offerPrice || 0),
+          originalPrice: Number(service.basePrice || 0),
+          defaultPrice: getSkuOfferPrice(service),
+          pricingUnit: service.pricingUnit,
+          durationMinutes: Number(service.durationMinutes || 0),
+          taskCategory: service.taskCategory,
+          partnerCategoryId: service.partnerCategoryId || '',
+          isActive: service.isActive,
+        };
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!updatedService) {
+      throw new Error('Service status update completed without returning the updated service');
+    }
+    return updatedService;
+  }
+
+  static async updateAdminService(
+    id: string,
+    input: UpdateCatalogServiceInput,
+  ) {
+    assertObjectId(id, 'service id');
+    if (
+      input.offerPrice !== null &&
+      (!Number.isFinite(input.offerPrice) ||
+        input.offerPrice <= 0 ||
+        input.offerPrice >= input.basePrice)
+    ) {
+      throw new BadRequestError('Offer price must be greater than zero and lower than the base price');
+    }
+
+    const categorySlug = normalizeCatalogLookup(input.categorySlug);
+    const session = await mongoose.startSession();
+    let updatedService: AdminCatalogService | null = null;
+    try {
+      await session.withTransaction(async (transactionSession) => {
+        const service = await ServiceSku.findById(id).session(transactionSession);
+        if (!service) throw new NotFoundError('Service not found');
+        const category = await ServiceCategory.findOne({
+          slug: categorySlug,
+          isActive: true,
+        }).session(transactionSession);
+        if (!category) throw new NotFoundError('Selected service category was not found');
+
+        const conflictingSku = await ServiceSku.findOne({
+          _id: { $ne: service._id },
+          categoryId: category._id,
+          slug: service.slug,
+        }).session(transactionSession);
+        if (conflictingSku) {
+          throw new ConflictError('A service with this package slug already exists in the selected category');
+        }
+
+        const previousCategory = await ServiceCategory.findById(service.categoryId)
+          .select({ slug: 1 })
+          .session(transactionSession);
+        if (!previousCategory) throw new NotFoundError('Current service category was not found');
+        const previousCategorySlug = normalizeCatalogLookup(previousCategory.slug);
+        if (previousCategorySlug !== categorySlug) {
+          const targetContent = await BookNowSkuContent.findOne({
+            categorySlug,
+            skuSlug: normalizeCatalogLookup(service.slug),
+          }).session(transactionSession);
+          if (targetContent) {
+            throw new ConflictError('Service content already exists in the selected category');
+          }
+        }
+
+        service.categoryId = category._id;
+        service.name = input.name.trim();
+        service.description = input.description.trim();
+        service.basePrice = input.basePrice;
+        service.offerPrice = input.offerPrice ?? 0;
+        service.offerDiscountType = 'percent';
+        service.offerDiscountValue = 0;
+        service.isOfferActive = input.offerPrice !== null;
+        service.durationMinutes = input.durationMinutes;
+        service.pricingUnit = input.pricingUnit;
+        service.taskCategory = input.partnerCategoryId;
+        service.partnerCategoryId = input.partnerCategoryId;
+        service.isActive = input.isActive;
+        await service.save({ session: transactionSession });
+
+        await BookNowSkuContent.findOneAndUpdate(
+          {
+            categorySlug: previousCategorySlug,
+            skuSlug: normalizeCatalogLookup(service.slug),
+          },
+          {
+            $set: {
+              categorySlug,
+              skuSlug: normalizeCatalogLookup(service.slug),
+              displayName: input.name.trim(),
+              shortDescription: input.description.trim(),
+              longDescription: input.description.trim(),
+              imageUrls: input.imageUrl?.trim() ? [input.imageUrl.trim()] : [],
+              isActive: input.isActive,
+            },
+            $setOnInsert: { sortOrder: 0 },
+          },
+          {
+            upsert: true,
+            new: true,
+            runValidators: true,
+            session: transactionSession,
+          },
+        );
+
+        updatedService = {
+          _id: String(service._id),
+          slug: service.slug,
+          name: service.name,
+          description: service.description || '',
+          imageUrl: input.imageUrl?.trim() || '',
+          basePrice: Number(service.basePrice || 0),
+          offerPrice: Number(service.offerPrice || 0),
+          originalPrice: Number(service.basePrice || 0),
+          defaultPrice: getSkuOfferPrice(service),
+          pricingUnit: service.pricingUnit,
+          durationMinutes: Number(service.durationMinutes || 0),
+          taskCategory: service.taskCategory,
+          partnerCategoryId: service.partnerCategoryId || '',
+          isActive: service.isActive,
+        };
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!updatedService) {
+      throw new Error('Service update completed without returning the updated service');
+    }
+    return updatedService;
+  }
+
   static async listCategories(customerUid?: string | null) {
     const [categories, hubSections] = await Promise.all([
       ServiceCategory.find({ isActive: true })
@@ -496,20 +1282,35 @@ export class CatalogService {
   }
 
   static async upsertCategoryContent(input: UpsertCategoryContentInput) {
+    const categorySlug = normalizeCatalogLookup(resolveCategoryAlias(input.categorySlug));
+    const set: Record<string, unknown> = {
+      categorySlug,
+      title: input.title.trim(),
+    };
+    if (input.subtitle !== undefined) set.subtitle = input.subtitle.trim();
+    if (input.description !== undefined) set.description = input.description.trim();
+    if (input.heroImageUrl !== undefined) set.heroImageUrl = input.heroImageUrl.trim();
+    if (input.iconUrl !== undefined) set.iconUrl = input.iconUrl.trim();
+    if (input.scope !== undefined) set.scope = input.scope;
+    if (input.faqCategoryKeys !== undefined) set.faqCategoryKeys = input.faqCategoryKeys;
+    if (input.sortOrder !== undefined) set.sortOrder = input.sortOrder;
+    if (input.isActive !== undefined) set.isActive = input.isActive;
+
     return BookNowCategoryContent.findOneAndUpdate(
       {
-        categorySlug: normalizeCatalogLookup(resolveCategoryAlias(input.categorySlug)),
+        categorySlug,
       },
       {
-        categorySlug: normalizeCatalogLookup(resolveCategoryAlias(input.categorySlug)),
-        title: input.title.trim(),
-        subtitle: input.subtitle?.trim() || '',
-        description: input.description?.trim() || '',
-        heroImageUrl: input.heroImageUrl?.trim() || '',
-        iconUrl: input.iconUrl?.trim() || '',
-        faqCategoryKeys: Array.isArray(input.faqCategoryKeys) ? input.faqCategoryKeys : [],
-        sortOrder: typeof input.sortOrder === 'number' ? input.sortOrder : 0,
-        isActive: typeof input.isActive === 'boolean' ? input.isActive : true,
+        $set: set,
+        $setOnInsert: {
+          subtitle: '',
+          description: '',
+          heroImageUrl: '',
+          iconUrl: '',
+          faqCategoryKeys: [],
+          sortOrder: 0,
+          isActive: true,
+        },
       },
       { upsert: true, new: true },
     ).lean();
@@ -527,6 +1328,7 @@ export class CatalogService {
     if (input.description !== undefined) update.description = input.description.trim();
     if (input.heroImageUrl !== undefined) update.heroImageUrl = input.heroImageUrl.trim();
     if (input.iconUrl !== undefined) update.iconUrl = input.iconUrl.trim();
+    if (input.scope !== undefined) update.scope = input.scope;
     if (input.faqCategoryKeys !== undefined) update.faqCategoryKeys = input.faqCategoryKeys;
     if (input.sortOrder !== undefined) update.sortOrder = input.sortOrder;
     if (input.isActive !== undefined) update.isActive = input.isActive;
@@ -584,6 +1386,10 @@ export class CatalogService {
       faqItems?: Array<{ question: string; answer: string }>;
       imageUrls?: string[];
       sortOrder?: number;
+      isFeaturedOnHome?: boolean;
+      featuredSortOrder?: number;
+      filterId?: string;
+      filterLabel?: string;
     }>;
     priceBySkuId?: Map<string, ResolvedSkuPrice>;
   }): BookNowPackageListItem[] {
@@ -616,6 +1422,8 @@ export class CatalogService {
           name: String(sku.name || ''),
           description: shortDescription || fallbackDescription || durationLabel,
           durationMinutes: Number(sku.durationMinutes || 0),
+          filterId: content?.filterId || undefined,
+          filterLabel: content?.filterLabel || undefined,
           pricing: resolvedPrice ? withResolvedPricing(enriched.pricing, resolvedPrice) : enriched.pricing,
           content: content
             ? {
@@ -627,6 +1435,8 @@ export class CatalogService {
                 faqItems: Array.isArray(content.faqItems) ? content.faqItems : [],
                 imageUrls: Array.isArray(content.imageUrls) ? content.imageUrls.filter(Boolean) : [],
                 sortOrder: Number(content.sortOrder || 0),
+                isFeaturedOnHome: content.isFeaturedOnHome === true,
+                featuredSortOrder: Number(content.featuredSortOrder || 0),
               }
             : null,
           primaryImageUrl: Array.isArray(content?.imageUrls) ? String(content?.imageUrls?.[0] || '').trim() : '',
@@ -649,7 +1459,13 @@ export class CatalogService {
     return Array.from(dedupedByName.values()).sort(comparePackageListItems);
   }
 
-  static async getBookNowHubCatalog(previewLimit = 5, customerUid?: string | null, location?: CatalogLocationInput) {
+  static async getBookNowHubCatalog(
+    previewLimit = 5,
+    customerUid?: string | null,
+    location?: CatalogLocationInput,
+    featuredOnly = false,
+    includeLocationPricing = true,
+  ) {
     const limit = Math.max(1, Math.min(Number(previewLimit || 5), 8));
     const [categories, skuContents, categoryContents] = await Promise.all([
       ServiceCategory.find({ isActive: true }).sort({ sortOrder: 1, name: 1 }).lean(),
@@ -662,10 +1478,9 @@ export class CatalogService {
 
     const categoriesForHub = visibleCategories;
     const categoryIds = categoriesForHub.map((category) => category._id);
-    const skus = await ServiceSku.find({ categoryId: { $in: categoryIds }, isActive: true }).lean();
-    const priceBySkuId = hasCatalogLocation(location)
-      ? await LocationPricingService.priceSkusForAddress(skus, location)
-      : undefined;
+    const skus = await ServiceSku.find({ categoryId: { $in: categoryIds }, isActive: true })
+      .sort({ name: 1, _id: 1 })
+      .lean();
     const contentBySkuKey = new Map<string, (typeof skuContents)[number]>();
     skuContents.forEach((content) => {
       const normalizedCategory = normalizeCatalogLookup(content.categorySlug);
@@ -680,6 +1495,30 @@ export class CatalogService {
         contentBySkuKey.set(`${normalizedCategory}::${key}`, content);
       });
     });
+    const categorySlugById = new Map(
+      categoriesForHub.map((category) => [String(category._id), normalizeCatalogLookup(category.slug)] as const),
+    );
+    const findSkuContent = (categorySlug: string, sku: (typeof skus)[number]) => {
+      const candidateKeys = [
+        normalizeCatalogLookup(String(sku.slug || '')),
+        normalizeContentIdentity(String(sku.slug || '')),
+        normalizeCatalogLookup(String(sku.name || '')),
+        normalizeContentIdentity(String(sku.name || '')),
+      ].filter(Boolean);
+      return candidateKeys
+        .map((key) => contentBySkuKey.get(`${categorySlug}::${key}`))
+        .find(Boolean);
+    };
+    const skusToPrice = featuredOnly
+      ? skus.filter((sku) => {
+          const categorySlug = categorySlugById.get(String(sku.categoryId));
+          return categorySlug && findSkuContent(categorySlug, sku)?.isFeaturedOnHome === true;
+        })
+      : skus;
+    const priceBySkuId =
+      includeLocationPricing && hasCatalogLocation(location)
+        ? await LocationPricingService.priceSkusForAddress(skusToPrice, location)
+        : undefined;
     const categoryContentBySlug = new Map(
       categoryContents.map((content) => [normalizeCatalogLookup(content.categorySlug), content] as const),
     );
@@ -696,19 +1535,13 @@ export class CatalogService {
 
     categoriesForHub.forEach((category) => {
       const normalizedCategorySlug = normalizeCatalogLookup(category.slug);
-      const categorySkus = skus.filter((sku) => String(sku.categoryId) === String(category._id));
+      let categorySkus = sortBookNowSkus(
+        skus.filter((sku) => String(sku.categoryId) === String(category._id)),
+      );
       const contentBySkuSlug = new Map<string, (typeof skuContents)[number]>();
 
       categorySkus.forEach((sku) => {
-        const candidateKeys = [
-          normalizeCatalogLookup(String(sku.slug || '')),
-          normalizeContentIdentity(String(sku.slug || '')),
-          normalizeCatalogLookup(String(sku.name || '')),
-          normalizeContentIdentity(String(sku.name || '')),
-        ].filter(Boolean);
-        const content = candidateKeys
-          .map((key) => contentBySkuKey.get(`${normalizedCategorySlug}::${key}`))
-          .find(Boolean);
+        const content = findSkuContent(normalizedCategorySlug, sku);
         if (content) {
           contentBySkuSlug.set(normalizeCatalogLookup(String(sku.slug || '')), content);
           contentBySkuSlug.set(normalizeContentIdentity(String(sku.slug || '')), content);
@@ -716,6 +1549,13 @@ export class CatalogService {
           contentBySkuSlug.set(normalizeContentIdentity(String(sku.name || '')), content);
         }
       });
+
+      if (featuredOnly) {
+        categorySkus = categorySkus.filter((sku) => {
+          return contentBySkuSlug.get(normalizeCatalogLookup(String(sku.slug || '')))
+            ?.isFeaturedOnHome === true;
+        });
+      }
 
       const items = this.buildPackageListItems({
         category,
@@ -794,7 +1634,9 @@ export class CatalogService {
                 categoryContent?.heroImageUrl ||
                 packages[0]?.primaryImageUrl ||
                 '',
-              previewPackages: packages.slice(0, limit),
+              previewPackages: featuredOnly
+                ? getHubPreviewPackages(packages, packages.length)
+                : getHubPreviewPackages(packages, limit),
               totalPackages: packages.length,
             };
           })
@@ -831,7 +1673,9 @@ export class CatalogService {
               categoryName: category?.name || categorySlug,
               sectionId: '',
               imageUrl: categoryContent?.heroImageUrl || packages[0]?.primaryImageUrl || '',
-              previewPackages: packages.slice(0, limit),
+              previewPackages: featuredOnly
+                ? getHubPreviewPackages(packages, packages.length)
+                : getHubPreviewPackages(packages, limit),
               totalPackages: packages.length,
             },
           ],
@@ -847,20 +1691,30 @@ export class CatalogService {
   }
 
   static async getBookNowCategoryPackages(categorySlug: string, customerUid?: string | null, location?: CatalogLocationInput) {
-    const category = await this.getCategoryBySlug(categorySlug, customerUid);
+    assertPersonalAssistantAccessible(categorySlug, customerUid);
     const parentSlug = resolveParentCategory(categorySlug).slug;
-    if (category && typeof (category as any).minOrderValue !== 'number') {
-      const hub = await BookNowHubSection.findOne({
+    const [category, hub] = await Promise.all([
+      ServiceCategory.findOne({
+        slug: resolveCategoryAlias(categorySlug),
+        isActive: true,
+      }).lean(),
+      BookNowHubSection.findOne({
         slug: { $in: [categorySlug, parentSlug] },
         isActive: true,
-      }).select({ minOrderValue: 1 }).lean();
+      }).select({ minOrderValue: 1 }).lean(),
+    ]);
+    if (!category) throw new NotFoundError('Category not found');
+
+    if (category && typeof (category as any).minOrderValue !== 'number') {
       if (hub && typeof (hub as any).minOrderValue === 'number') {
         (category as any).minOrderValue = (hub as any).minOrderValue;
       }
     }
     const normalizedCategorySlug = normalizeCatalogLookup(category.slug);
     const [skus, skuContents, categoryContent] = await Promise.all([
-      ServiceSku.find({ categoryId: category._id, isActive: true }).lean(),
+      ServiceSku.find({ categoryId: category._id, isActive: true })
+        .sort({ name: 1, _id: 1 })
+        .lean(),
       BookNowSkuContent.find({ categorySlug: normalizedCategorySlug, isActive: true }).lean(),
       BookNowCategoryContent.findOne({ categorySlug: normalizedCategorySlug }).lean(),
     ]);
@@ -895,6 +1749,7 @@ export class CatalogService {
               description: categoryContent.description || '',
               heroImageUrl: categoryContent.heroImageUrl || '',
               iconUrl: categoryContent.iconUrl || '',
+              scope: categoryContent.scope || null,
             }
           : null,
       },
@@ -1111,6 +1966,8 @@ export class CatalogService {
         imageUrls: Array.isArray(input.imageUrls) ? input.imageUrls : [],
         faqItems: Array.isArray(input.faqItems) ? input.faqItems : [],
         sortOrder: typeof input.sortOrder === 'number' ? input.sortOrder : 0,
+        isFeaturedOnHome: input.isFeaturedOnHome === true,
+        featuredSortOrder: typeof input.featuredSortOrder === 'number' ? input.featuredSortOrder : 0,
         isActive: typeof input.isActive === 'boolean' ? input.isActive : true,
       },
       { upsert: true, new: true },
@@ -1139,6 +1996,8 @@ export class CatalogService {
     if (input.imageUrls !== undefined) update.imageUrls = input.imageUrls;
     if (input.faqItems !== undefined) update.faqItems = input.faqItems;
     if (input.sortOrder !== undefined) update.sortOrder = input.sortOrder;
+    if (input.isFeaturedOnHome !== undefined) update.isFeaturedOnHome = input.isFeaturedOnHome;
+    if (input.featuredSortOrder !== undefined) update.featuredSortOrder = input.featuredSortOrder;
     if (input.isActive !== undefined) update.isActive = input.isActive;
 
     const content = await BookNowSkuContent.findByIdAndUpdate(id, { $set: update }, { new: true }).lean();
@@ -1146,6 +2005,67 @@ export class CatalogService {
       throw new NotFoundError('Book Now service content not found');
     }
     return content;
+  }
+
+  static async listCustomerHomePromotions(includeInactive = false) {
+    const now = new Date();
+    const query: Record<string, unknown> = {};
+    if (!includeInactive) {
+      query.isActive = true;
+      query.$and = [
+        { $or: [{ startsAt: null }, { startsAt: { $lte: now } }] },
+        { $or: [{ endsAt: null }, { endsAt: { $gte: now } }] },
+      ];
+    }
+    return CustomerHomePromotion.find(query).sort({ sortOrder: 1, createdAt: -1 }).lean();
+  }
+
+  static async createCustomerHomePromotion(input: CreateCustomerHomePromotionInput) {
+    return CustomerHomePromotion.create({
+      ...input,
+      actionValue: input.actionValue?.trim() || '',
+      sortOrder: input.sortOrder ?? 0,
+      startsAt: input.startsAt ? new Date(input.startsAt) : null,
+      endsAt: input.endsAt ? new Date(input.endsAt) : null,
+      isActive: input.isActive ?? true,
+    });
+  }
+
+  static async patchCustomerHomePromotion(id: string, input: PatchCustomerHomePromotionInput) {
+    assertObjectId(id, 'promotion id');
+    const update: Record<string, unknown> = { ...input };
+    if (input.actionValue !== undefined) update.actionValue = input.actionValue.trim();
+    if (input.startsAt !== undefined) update.startsAt = input.startsAt ? new Date(input.startsAt) : null;
+    if (input.endsAt !== undefined) update.endsAt = input.endsAt ? new Date(input.endsAt) : null;
+    if (input.actionType !== undefined || input.actionValue !== undefined) {
+      const current = await CustomerHomePromotion.findById(id).lean();
+      if (!current) throw new NotFoundError('Customer home promotion not found');
+      const actionType = input.actionType ?? current.actionType;
+      const actionValue = input.actionValue ?? current.actionValue;
+      if (actionType !== 'none' && !actionValue.trim()) {
+        throw new BadRequestError('Action value is required for the selected action type');
+      }
+    }
+    if (input.startsAt !== undefined || input.endsAt !== undefined) {
+      const current = await CustomerHomePromotion.findById(id).lean();
+      if (!current) throw new NotFoundError('Customer home promotion not found');
+      const startsAt = input.startsAt === undefined
+        ? current.startsAt
+        : input.startsAt ? new Date(input.startsAt) : null;
+      const endsAt = input.endsAt === undefined
+        ? current.endsAt
+        : input.endsAt ? new Date(input.endsAt) : null;
+      if (startsAt && endsAt && endsAt < startsAt) {
+        throw new BadRequestError('End date must be on or after the start date');
+      }
+    }
+    const promotion = await CustomerHomePromotion.findByIdAndUpdate(
+      id,
+      { $set: update },
+      { new: true, runValidators: true },
+    ).lean();
+    if (!promotion) throw new NotFoundError('Customer home promotion not found');
+    return promotion;
   }
 
   static async resolveSkuContent(params: { categorySlug: string; taskTitle?: string; skuSlug?: string }) {
