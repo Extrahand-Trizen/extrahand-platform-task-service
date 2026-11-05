@@ -9,6 +9,7 @@ import {
   getFirstAvailableOfferStage,
   getPartnerCategoryValues,
   getPartnerWorkAreaValues,
+  isEligiblePartnerForBookNowTask,
   isBookNowOfferBeforeScheduledStart,
   mergeActiveOfferRecipients,
 } from '../services/BookNowAutoAssignService';
@@ -44,6 +45,39 @@ assert.ok(hyderabadAreas.some(({ area }) => area === 'Gachibowli'));
 assert.ok(
   hyderabadAreas.some(({ area }) => area === 'Madhapur'),
   'Nearby Hyderabad work areas should remain eligible',
+);
+
+const dispatchPartner = {
+  isActive: true,
+  isAvailable: true,
+  partnerProfile: {
+    status: 'approved',
+    categories: [],
+    skills: { cleaning: ['deep_cleaning'] },
+    workAreas: ['Madhapur'],
+    workShifts: [],
+  },
+};
+const bookNowCleaningTask = {
+  category: 'cleaning',
+  categorySlug: 'full-house',
+  location: hyderabadTask.location,
+} as any;
+assert.equal(
+  isEligiblePartnerForBookNowTask(dispatchPartner, bookNowCleaningTask),
+  true,
+  'Partners matched through saved skill groups and nearby dispatch areas must be able to accept offers',
+);
+assert.equal(
+  isEligiblePartnerForBookNowTask(
+    {
+      ...dispatchPartner,
+      partnerProfile: { ...dispatchPartner.partnerProfile, onLeave: true },
+    },
+    bookNowCleaningTask,
+  ),
+  false,
+  'Partners who are on leave must not be able to accept offers',
 );
 
 assert.deepStrictEqual(
