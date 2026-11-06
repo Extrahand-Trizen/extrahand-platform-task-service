@@ -38,6 +38,28 @@ assert.equal(partnerCategoryMatchesBookNowTask(['other'], dailyLabourTask), true
 assert.equal(partnerCategoryMatchesBookNowTask(['daily-labour'], dailyLabourTask), true);
 assert.equal(partnerCategoryMatchesBookNowTask(['cleaning'], dailyLabourTask), false);
 
+for (const [partnerCategory, categorySlug] of [
+  ['laundry', 'laundry-wash-by-weight'],
+  ['car_wash', 'car-wash-basic'],
+]) {
+  assert.equal(
+    partnerCategoryMatchesBookNowTask([partnerCategory], {
+      category: 'cleaning',
+      categorySlug,
+    }),
+    true,
+    `${partnerCategory} should match its Book Now service`,
+  );
+  assert.equal(
+    partnerCategoryMatchesBookNowTask(['electrician'], {
+      category: 'cleaning',
+      categorySlug,
+    }),
+    false,
+    `electrician should not match ${categorySlug}`,
+  );
+}
+
 const bathroomCleaningTask = {
   category: 'cleaning',
   categorySlug: 'cleaning-bathroom',

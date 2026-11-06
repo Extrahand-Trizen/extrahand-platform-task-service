@@ -468,6 +468,65 @@ function resolvePartnerDistanceKm(
   return haversineKm(taskCoords.lat, taskCoords.lng, coords[1], coords[0]);
 }
 
+export function isEligiblePartnerForBookNowTask(
+  profile: Record<string, unknown>,
+  task: ITask,
+): boolean {
+  const partnerProfile = (profile.partnerProfile as Record<string, unknown>) || {};
+  if (
+    profile.isActive !== true ||
+    profile.isAvailable === false ||
+    partnerProfile.status !== 'approved' ||
+    partnerProfile.onLeave === true
+  ) {
+    return false;
+  }
+
+  const categories = getPartnerCategoryValues(
+    partnerProfile.categories,
+    partnerProfile.skills,
+  );
+  if (!categories.length || !partnerCategoryMatchesBookNowTask(categories, task)) {
+    return false;
+  }
+
+  const workShifts: string[] = Array.isArray(partnerProfile.workShifts)
+    ? (partnerProfile.workShifts as string[])
+    : [];
+  if (!checkTimingMatch(workShifts, task)) return false;
+
+  if (isHourlyTask(task)) {
+    const preferredGender = resolvePreferredHelperGender(task);
+    if (
+      preferredGender &&
+      normalizePartnerGender(readPartnerGender(profile)) !== preferredGender
+    ) {
+      return false;
+    }
+
+    const location = (task.location || {}) as Record<string, unknown>;
+    const areaCandidates = buildHourlyServiceAreaCandidates({
+      area: location.taskArea as string | undefined,
+      city: location.city as string | undefined,
+      state: location.state as string | undefined,
+      address: location.address as string | undefined,
+    });
+    return matchEligibleHourlyHelperArea(profile, areaCandidates) !== null;
+  }
+
+  if (isConsultationBookNowTask(task)) return true;
+
+  const workAreas = getPartnerWorkAreaValues(
+    partnerProfile.workAreas,
+    profile.helperWorkAreas,
+  );
+  if (!workAreas.length) return false;
+
+  return buildOrderedWorkAreasForDispatch(task).some(({ area }) =>
+    partnerMatchesWorkArea(workAreas, normalizeArea(area)),
+  );
+}
+
 function sortPartnersByDistance(partners: EligiblePartner[]): EligiblePartner[] {
   return [...partners].sort((a, b) => {
     if (a.distKm === null && b.distKm === null) return 0;
@@ -2838,37 +2897,9 @@ export class BookNowAutoAssignService {
     const profile = await Profile.findOne({ uid, isActive: true });
     if (!profile) return null;
 
-    const pp = (profile.partnerProfile as any) || {};
-    if (pp.status !== 'approved') return null;
-    if (pp.onLeave === true || profile.isAvailable === false) return null;
-
-    const categories: string[] = Array.isArray(pp.categories) ? pp.categories : [];
-    if (!partnerCategoryMatchesBookNowTask(categories, task)) return null;
-
-    const workShifts: string[] = Array.isArray(pp.workShifts) ? pp.workShifts : [];
-    if (!checkTimingMatch(workShifts, task)) return null;
-
-    if (!isConsultationBookNowTask(task)) {
-      const postedArea = normalizeArea(
-        String(task.location?.taskArea || (task.location as any)?.locality || task.location?.city || ''),
-      );
-      const workAreas: string[] = Array.isArray(pp.workAreas)
-        ? pp.workAreas
-        : Array.isArray(profile.helperWorkAreas)
-          ? profile.helperWorkAreas
-          : [];
-      if (postedArea && (!workAreas.length || !workAreas.some((area) => partnerMatchesWorkArea([area], postedArea)))) {
-        return null;
-      }
-    }
+    if (!isEligiblePartnerForBookNowTask(profile, task)) return null;
 
     const partnerGender = readPartnerGender(profile as Record<string, unknown>);
-    if (isHourlyTask(task)) {
-      const preferredGender = resolvePreferredHelperGender(task);
-      if (preferredGender && normalizePartnerGender(partnerGender) !== preferredGender) {
-        return null;
-      }
-    }
 
     const postedArea =
       task.location?.taskArea ||
