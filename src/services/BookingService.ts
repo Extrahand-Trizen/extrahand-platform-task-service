@@ -2752,37 +2752,35 @@ export class BookingService {
         }),
       };
     }
-    const hourlyEligiblePartnerUids =
+    const hourlyEligibleHelpersPromise =
       opts?.availabilityMode === 'hourly' && (opts.serviceAddress || opts.serviceArea)
-        ? (
-            await HourlyHelperAvailabilityService.findEligibleHelpers(
-              buildHourlyServiceAreaCandidates({
-                area: opts.serviceArea,
-                city,
-                address: opts.serviceAddress,
-              }),
-            )
-          ).map((helper) => helper.uid)
+        ? HourlyHelperAvailabilityService.findEligibleHelpers(
+            buildHourlyServiceAreaCandidates({
+              area: opts.serviceArea,
+              city,
+              address: opts.serviceAddress,
+            }),
+          )
         : undefined;
-    const [occupied, partnerCapacityBySlot] = await Promise.all([
-      getOccupiedBookNowSlots(
-        date,
-        city,
-        undefined,
-        {
-          lat: Number.isFinite(lat) ? lat : undefined,
-          lng: Number.isFinite(lng) ? lng : undefined,
-        },
-      ),
-      getPartnerCapacityForSlots(date, city, durationMinutes, {
+    const occupiedPromise = getOccupiedBookNowSlots(date, city, undefined, {
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lng: Number.isFinite(lng) ? lng : undefined,
+    });
+    const partnerCapacityPromise = (async () => {
+      const eligibleHourlyHelpers = await hourlyEligibleHelpersPromise;
+      return getPartnerCapacityForSlots(date, city, durationMinutes, {
         area: opts?.area,
         lat: Number.isFinite(lat) ? lat : undefined,
         lng: Number.isFinite(lng) ? lng : undefined,
         hourlyHelper: opts?.availabilityMode === 'hourly',
         preferredHelperGender: opts?.preferredHelperGender,
         requiredPartnerCategory: opts?.requiredPartnerCategory,
-        allowedPartnerUids: hourlyEligiblePartnerUids,
-      }),
+        eligibleHourlyHelpers,
+      });
+    })();
+    const [occupied, partnerCapacityBySlot] = await Promise.all([
+      occupiedPromise,
+      partnerCapacityPromise,
     ]);
     return {
       date: String(date || '').trim(),

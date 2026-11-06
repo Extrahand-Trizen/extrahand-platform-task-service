@@ -1,5 +1,8 @@
 import { Config } from '../config/env';
-import { PERSONAL_ASSISTANT_CATEGORY_SLUG } from '../constants/personalAssistantBooking';
+import {
+  LEGACY_PERSONAL_ASSISTANT_CATEGORY_SLUG,
+  PERSONAL_ASSISTANT_CATEGORY_SLUG,
+} from '../constants/personalAssistantBooking';
 
 function parseTruthyEnv(value: string | undefined): boolean {
   const normalized = String(value ?? '').trim().toLowerCase();
@@ -21,12 +24,12 @@ export function getPersonalAssistantPreviewUids(): ReadonlySet<string> {
 }
 
 export function isPersonalAssistantCategorySlug(slug: string): boolean {
-  return (
-    String(slug || '')
-      .toLowerCase()
-      .replace(/[-_\s]+/g, '-')
-      .trim() === PERSONAL_ASSISTANT_CATEGORY_SLUG
-  );
+  const normalized = String(slug || '')
+    .toLowerCase()
+    .replace(/[-_\s]+/g, '-')
+    .trim();
+  return normalized === LEGACY_PERSONAL_ASSISTANT_CATEGORY_SLUG ||
+    normalized === PERSONAL_ASSISTANT_CATEGORY_SLUG;
 }
 
 /** Catalog visibility is controlled by the active category, service, and content records. */

@@ -69,16 +69,42 @@ function getCategoryMatchSlugs(input?: string): string[] {
 function resolvePackageAliases(packageId?: string): string[] {
   const id = String(packageId || '').trim().toLowerCase();
   if (!id) return [];
-  const set = new Set<string>([id]);
+
   for (const [canonical, aliases] of Object.entries(STATIC_TO_BACKEND_PACKAGE_ALIASES)) {
     const canonicalLower = canonical.toLowerCase();
     const aliasesLower = aliases.map((a) => a.toLowerCase());
-    if (canonicalLower === id || aliasesLower.includes(id)) {
-      set.add(canonicalLower);
-      aliasesLower.forEach((a) => set.add(a));
+    if (aliasesLower.includes(id)) return [id];
+    if (canonicalLower === id) return [canonicalLower, ...aliasesLower];
+  }
+
+  return [id];
+}
+
+async function getDeletedReviewerIds(
+  reviews: Array<{ reviewerId?: unknown }>,
+): Promise<Set<string>> {
+  const reviewerIdsByString = new Map<string, mongoose.Types.ObjectId>();
+  for (const review of reviews) {
+    const reviewerId = review.reviewerId;
+    if (reviewerId instanceof mongoose.Types.ObjectId) {
+      reviewerIdsByString.set(reviewerId.toString(), reviewerId);
+    } else if (typeof reviewerId === 'string' && mongoose.Types.ObjectId.isValid(reviewerId)) {
+      reviewerIdsByString.set(reviewerId, new mongoose.Types.ObjectId(reviewerId));
     }
   }
-  return Array.from(set);
+  const reviewerIds = [...reviewerIdsByString.values()];
+
+  if (reviewerIds.length === 0) return new Set();
+
+  const profiles = await mongoose.connection.collection('profiles')
+    .find({
+      _id: { $in: reviewerIds },
+      'dataPrivacy.accountDeleted': true,
+    })
+    .project({ _id: 1 })
+    .toArray();
+
+  return new Set(profiles.map((profile: any) => profile._id.toString()));
 }
 
 export class ReviewService {
@@ -533,11 +559,15 @@ export class ReviewService {
       };
     }
 
-    const reviews = await Review.find({
+    const matchedReviews = await Review.find({
       taskId: { $in: taskIds },
       isPublic: true,
       reviewType: 'poster_to_performer',
-    }).select('taskId rating comment createdAt').lean();
+    }).select('taskId rating comment createdAt reviewerId').lean();
+    const deletedReviewerIds = await getDeletedReviewerIds(matchedReviews);
+    const reviews = matchedReviews.filter(
+      (review) => !deletedReviewerIds.has(review.reviewerId.toString()),
+    );
 
     let catSum = 0;
     const catBreakdown: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -692,11 +722,23 @@ export class ReviewService {
       reviewType: 'poster_to_performer',
     };
 
-    const allMatchingReviews = await Review.find(baseReviewQuery).select('rating').lean();
-    const totalMatching = allMatchingReviews.length;
+    const allMatchingReviews = await Review.find(baseReviewQuery)
+      .select('rating reviewerId')
+      .lean();
+    const deletedReviewerIds = await getDeletedReviewerIds(allMatchingReviews);
+    const visibleMatchingReviews = allMatchingReviews.filter(
+      (review) => !deletedReviewerIds.has(review.reviewerId.toString()),
+    );
+    if (deletedReviewerIds.size > 0) {
+      baseReviewQuery.reviewerId = {
+        $nin: [...deletedReviewerIds].map((id) => new mongoose.Types.ObjectId(id)),
+      };
+    }
+
+    const totalMatching = visibleMatchingReviews.length;
     let sum = 0;
     const breakdown: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-    for (const r of allMatchingReviews) {
+    for (const r of visibleMatchingReviews) {
       sum += r.rating;
       const star = Math.min(5, Math.max(1, Math.round(r.rating)));
       breakdown[star] = (breakdown[star] || 0) + 1;

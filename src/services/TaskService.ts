@@ -294,6 +294,7 @@ function mapCategoryToEnum(frontendCategory: string | undefined): TaskCategory {
     "car-washing": "cleaning",
     "roadside-assistance": "repair",
     maid: "cleaning",
+    "personal-assistances": "other",
     "personal-assistance": "other",
     "Roadside Assistance": "repair",
     Maid: "cleaning",

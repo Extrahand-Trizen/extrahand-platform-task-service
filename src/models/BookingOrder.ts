@@ -252,6 +252,10 @@ BookingOrderSchema.index(
   { bookingKind: 1, serviceType: 1, status: 1, createdAt: -1 },
   { sparse: true, name: 'booking_kind_service_status_created' },
 );
+BookingOrderSchema.index(
+  { status: 1, scheduledDate: 1 },
+  { name: 'booking_status_scheduled_date' },
+);
 
 const BookingOrder: Model<IBookingOrder> =
   mongoose.models.BookingOrder || mongoose.model<IBookingOrder>('BookingOrder', BookingOrderSchema);

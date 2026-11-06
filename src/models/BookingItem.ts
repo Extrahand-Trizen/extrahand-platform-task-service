@@ -119,6 +119,10 @@ BookingItemSchema.index(
     partialFilterExpression: { checkoutLineIndex: { $type: 'number' } },
   },
 );
+BookingItemSchema.index(
+  { scheduledDate: 1, status: 1, orderId: 1 },
+  { name: 'booking_item_schedule_status_order' },
+);
 
 const BookingItem: Model<IBookingItem> =
   mongoose.models.BookingItem || mongoose.model<IBookingItem>('BookingItem', BookingItemSchema);

@@ -22,6 +22,10 @@ import {
   type HourlySlotSettings,
 } from '../utils/hourlySlotPolicy';
 
+const SLOT_SETTINGS_CACHE_MS = 15_000;
+const slotSettingsCache = new Map<string, { settings: HourlySlotSettings; expiresAt: number }>();
+const pendingSlotSettings = new Map<string, Promise<HourlySlotSettings>>();
+
 export type LocationAvailabilityItem = {
   _id: string;
   locationId: string;
@@ -87,10 +91,51 @@ export class HourlyHelperLocationAvailabilityService {
         { upsert: true, new: true, setDefaultsOnInsert: true },
       );
     }
+    slotSettingsCache.clear();
     return settings;
   }
 
   static async getSlotSettingsForAddress(input: {
+    areaName?: string;
+    cityName?: string;
+    stateName?: string;
+    address?: string;
+  }): Promise<HourlySlotSettings> {
+    const cacheKey = JSON.stringify([
+      canonicalServiceAreaName(input.areaName),
+      canonicalServiceAreaName(input.cityName),
+      canonicalServiceAreaName(input.stateName),
+      String(input.address || '').trim().toLowerCase(),
+    ]);
+    const cached = slotSettingsCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.settings;
+    const pending = pendingSlotSettings.get(cacheKey);
+    if (pending) return pending;
+
+    const lookup = this.lookupSlotSettingsForAddress(input)
+      .then((settings) => {
+        const now = Date.now();
+        for (const [key, value] of slotSettingsCache) {
+          if (value.expiresAt <= now) slotSettingsCache.delete(key);
+        }
+        if (slotSettingsCache.size >= 500) {
+          const oldestKey = slotSettingsCache.keys().next().value;
+          if (oldestKey) slotSettingsCache.delete(oldestKey);
+        }
+        slotSettingsCache.set(cacheKey, {
+          settings,
+          expiresAt: now + SLOT_SETTINGS_CACHE_MS,
+        });
+        return settings;
+      })
+      .finally(() => {
+        pendingSlotSettings.delete(cacheKey);
+      });
+    pendingSlotSettings.set(cacheKey, lookup);
+    return lookup;
+  }
+
+  private static async lookupSlotSettingsForAddress(input: {
     areaName?: string;
     cityName?: string;
     stateName?: string;
@@ -109,7 +154,7 @@ export class HourlyHelperLocationAvailabilityService {
       ...(input.stateName ? [{ type: 'state' as const, name: input.stateName }] : []),
     ];
 
-    for (const candidate of locationCandidates) {
+    const resolvedSettings = await Promise.all(locationCandidates.map(async (candidate) => {
       const ids: Array<string | mongoose.Types.ObjectId> = [];
       const name = candidate.name.trim();
       const canonical = canonicalServiceAreaName(name);
@@ -147,16 +192,16 @@ export class HourlyHelperLocationAvailabilityService {
         locationType: candidate.type,
         locationId: { $in: Array.from(new Map(ids.map((id) => [String(id), id])).values()) },
       }).lean();
-      if (record) {
-        return validateHourlySlotSettings({
-          mode: record.mode,
-          startTime: record.startTime,
-          endTime: record.endTime,
-          blockedHours: record.blockedHours,
-        });
-      }
-    }
-    return DEFAULT_HOURLY_SLOT_SETTINGS;
+      return record
+        ? validateHourlySlotSettings({
+            mode: record.mode,
+            startTime: record.startTime,
+            endTime: record.endTime,
+            blockedHours: record.blockedHours,
+          })
+        : null;
+    }));
+    return resolvedSettings.find((settings) => settings !== null) || DEFAULT_HOURLY_SLOT_SETTINGS;
   }
 
   /**

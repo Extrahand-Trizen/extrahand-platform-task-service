@@ -52,6 +52,7 @@ function assertObjectId(id: string, label = 'id'): string {
 /** Mobile parent label vs catalog subcategory slugs */
 const BOOK_NOW_CATEGORY_ALIASES: Record<string, string> = {
   'home-cleaning': 'full-house',
+  'personal-assistance': 'personal-assistances',
 };
 
 function normalizeCatalogLookup(value: string): string {
