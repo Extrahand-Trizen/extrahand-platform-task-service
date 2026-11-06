@@ -224,8 +224,8 @@ assert.doesNotThrow(() => assertBookNowFixedPriceMinimumCheckout(subcategoryLine
 
 // Test H: Personal Assistance, Hourly Helper, and Painting enforce explicit configured minimums
 const customMinimumConfigs = new Map<string, CategoryMinimumConfig>([
-  ['personal-assistances', {
-    categorySlug: 'personal-assistances',
+  ['personal-assistance', {
+    categorySlug: 'personal-assistance',
     categoryName: 'Personal Assistance',
     minOrderValue: 1000,
     hasExplicitConfig: true,
@@ -245,12 +245,12 @@ const customMinimumConfigs = new Map<string, CategoryMinimumConfig>([
 ]);
 
 // Personal Assistance under 1000 fails
-const paEval = evaluateCategoryMinimums([{ lineTotal: 149, categorySlug: 'personal-assistances' }], customMinimumConfigs);
+const paEval = evaluateCategoryMinimums([{ lineTotal: 149, categorySlug: 'personal-assistance' }], customMinimumConfigs);
 assert.equal(paEval.length, 1);
 assert.equal(paEval[0].isMet, false);
 assert.equal(paEval[0].minRequired, 1000);
 assert.equal(paEval[0].shortfall, 851);
-assert.throws(() => assertBookNowFixedPriceMinimumCheckout([{ lineTotal: 149, categorySlug: 'personal-assistances' }], customMinimumConfigs));
+assert.throws(() => assertBookNowFixedPriceMinimumCheckout([{ lineTotal: 149, categorySlug: 'personal-assistance' }], customMinimumConfigs));
 
 // Hourly Helper under 500 fails
 const hourlyEval = evaluateCategoryMinimums([{ lineTotal: 99, categorySlug: 'hourly-helper' }], customMinimumConfigs);
@@ -270,9 +270,9 @@ assert.throws(() => assertBookNowFixedPriceMinimumCheckout([{ lineTotal: 99, cat
 
 // When unconfigured, all three default to 0 min and pass without throwing
 const emptyConfigs = new Map<string, CategoryMinimumConfig>();
-const unconfigPaEval = evaluateCategoryMinimums([{ lineTotal: 149, categorySlug: 'personal-assistances' }], emptyConfigs);
+const unconfigPaEval = evaluateCategoryMinimums([{ lineTotal: 149, categorySlug: 'personal-assistance' }], emptyConfigs);
 assert.equal(unconfigPaEval[0].minRequired, 0);
 assert.equal(unconfigPaEval[0].isMet, true);
-assert.doesNotThrow(() => assertBookNowFixedPriceMinimumCheckout([{ lineTotal: 149, categorySlug: 'personal-assistances' }], emptyConfigs));
+assert.doesNotThrow(() => assertBookNowFixedPriceMinimumCheckout([{ lineTotal: 149, categorySlug: 'personal-assistance' }], emptyConfigs));
 
 console.log('✅ All Category Minimum & Scheduling unit tests passed successfully!');

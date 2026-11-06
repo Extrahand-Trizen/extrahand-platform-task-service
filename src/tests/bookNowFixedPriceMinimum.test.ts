@@ -20,7 +20,7 @@ function hourlyLine(lineTotal: number) {
 }
 
 function personalAssistantLine(lineTotal: number) {
-  return { lineTotal, categorySlug: 'personal-assistances', pricingUnit: 'hourly' as const };
+  return { lineTotal, categorySlug: 'personal-assistance', pricingUnit: 'hourly' as const };
 }
 
 function paintingConsultationLine(lineTotal: number) {

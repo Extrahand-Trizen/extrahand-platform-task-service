@@ -2,8 +2,8 @@
  * Book Now Personal Assistant — category + duration SKUs (single-visit checkout).
  */
 
-export const LEGACY_PERSONAL_ASSISTANT_CATEGORY_SLUG = 'personal-assistance' as const;
-export const PERSONAL_ASSISTANT_CATEGORY_SLUG = 'personal-assistances' as const;
+export const LEGACY_PERSONAL_ASSISTANT_CATEGORY_SLUG = 'personal-assistances' as const;
+export const PERSONAL_ASSISTANT_CATEGORY_SLUG = 'personal-assistance' as const;
 
 export const PERSONAL_ASSISTANT_DURATION_SKUS: ReadonlyArray<{
   slug: string;

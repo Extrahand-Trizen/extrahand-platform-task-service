@@ -60,6 +60,7 @@ export const BOOK_NOW_CATALOG_LABELS: Record<string, string> = {
   'laundry-bedding-and-blankets': 'Bedding & Blankets',
   'laundry-shoe-cleaning': 'Shoe Cleaning',
   'hourly-helper': 'Hourly Helper',
+  'personal-assistance': 'Personal Assistant',
   'personal-assistances': 'Personal Assistant',
 };
 
@@ -89,6 +90,7 @@ export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
   'laundry-shoe-cleaning': 'cleaning',
   /** Hourly Helper is general help — maps to Task enum `other` (not a catalog slug). */
   'hourly-helper': 'other',
+  'personal-assistance': 'other',
   'personal-assistances': 'other',
   // Electrician services
   'electrician-switch-and-socket': 'repair',
@@ -269,6 +271,7 @@ export const CATALOG_SLUG_TO_PARTNER_CATEGORY_ID: Record<string, string> = {
   'daily-labour-full-day': 'daily_labour',
   // Hourly / personal
   'hourly-helper': 'cleaning',
+  'personal-assistance': 'professional_services',
   'personal-assistances': 'professional_services',
   'daily-help': 'cleaning',
   // Packers & movers
@@ -335,7 +338,7 @@ export function resolveParentCategory(catalogIdOrSlug: string): ParentCategoryIn
     return { slug: 'appliance-repair', label: 'Appliance Repair' };
   }
   if (['personal-assistances', 'personal-assistance', 'personal-assistant'].includes(s)) {
-    return { slug: 'personal-assistances', label: 'Personal Assistance' };
+    return { slug: 'personal-assistance', label: 'Personal Assistance' };
   }
   if (s === 'daily-labour') {
     return { slug: 'daily-labour', label: 'Daily Labour' };
