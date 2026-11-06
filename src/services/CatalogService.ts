@@ -14,6 +14,7 @@ import HelpSupportContent from '../models/HelpSupportContent';
 import BookNowHubSection from '../models/BookNowHubSection';
 import CustomerHomePromotion from '../models/CustomerHomePromotion';
 import {
+  BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG,
   BOOK_NOW_HUB_SECTION_SEED,
 } from '../constants/bookNowHubCatalog';
 import type { HelpSupportVariant } from '../constants/helpSupportSeedData';
@@ -38,6 +39,7 @@ import {
   canAccessPersonalAssistantCatalog,
   isPersonalAssistantCategorySlug,
 } from '../utils/personalAssistantCatalogVisibility';
+import { PERSONAL_ASSISTANT_CATEGORY_SLUG } from '../constants/personalAssistantBooking';
 import { LocationPricingService, type PricedSku, type ResolvedSkuPrice } from './LocationPricingService';
 import { getSkuOfferPrice } from '../utils/skuPricing';
 import { resolveParentCategory } from '../utils/bookNowClientCatalog';
@@ -542,12 +544,51 @@ export class CatalogService {
         };
       });
 
-    const result = filterPersonalAssistantFromHubResponse(
+    const filteredSections = filterPersonalAssistantFromHubResponse(
       [...groupedSections, ...fallbackSections].sort(
         (a, b) => a.sortOrder - b.sortOrder,
       ),
       customerUid,
     );
+    const personalAssistantSections = filteredSections.filter((section) =>
+      isPersonalAssistantCategorySlug(section.slug) ||
+      section.services.some((service) => isPersonalAssistantCategorySlug(service.categorySlug)),
+    );
+    const result = filteredSections.filter((section) =>
+      !personalAssistantSections.includes(section),
+    );
+    if (personalAssistantSections.length > 0) {
+      const canonicalSection =
+        personalAssistantSections.find((section) => section.slug === PERSONAL_ASSISTANT_CATEGORY_SLUG) ||
+        personalAssistantSections[0];
+      const personalAssistantServices = new Map<
+        string,
+        (typeof canonicalSection.services)[number]
+      >();
+      for (const section of personalAssistantSections) {
+        for (const service of section.services) {
+          if (!isPersonalAssistantCategorySlug(service.categorySlug)) continue;
+          personalAssistantServices.set(PERSONAL_ASSISTANT_CATEGORY_SLUG, {
+            ...service,
+            id: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+            label: 'Personal Assistant',
+            categorySlug: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+            imageUrl:
+              BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG[PERSONAL_ASSISTANT_CATEGORY_SLUG] ||
+              service.imageUrl,
+          });
+        }
+      }
+      result.push({
+        ...canonicalSection,
+        id: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+        slug: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+        title: 'Personal Assistance',
+        iconKey: 'User',
+        services: [...personalAssistantServices.values()],
+      });
+      result.sort((a, b) => a.sortOrder - b.sortOrder);
+    }
     logger.info('Book Now home category query timings', {
       catalogReadsMs,
       activeSkuQueryMs,
