@@ -2752,8 +2752,13 @@ export class BookingService {
         }),
       };
     }
+    const shouldCalculatePartnerCapacity =
+      opts?.availabilityMode === 'hourly' ||
+      opts?.requiredPartnerCategory === DAILY_LABOUR_CATEGORY.partnerCategory;
     const hourlyEligibleHelpersPromise =
-      opts?.availabilityMode === 'hourly' && (opts.serviceAddress || opts.serviceArea)
+      shouldCalculatePartnerCapacity &&
+      opts?.availabilityMode === 'hourly' &&
+      (opts.serviceAddress || opts.serviceArea)
         ? HourlyHelperAvailabilityService.findEligibleHelpers(
             buildHourlyServiceAreaCandidates({
               area: opts.serviceArea,
@@ -2766,18 +2771,20 @@ export class BookingService {
       lat: Number.isFinite(lat) ? lat : undefined,
       lng: Number.isFinite(lng) ? lng : undefined,
     });
-    const partnerCapacityPromise = (async () => {
-      const eligibleHourlyHelpers = await hourlyEligibleHelpersPromise;
-      return getPartnerCapacityForSlots(date, city, durationMinutes, {
-        area: opts?.area,
-        lat: Number.isFinite(lat) ? lat : undefined,
-        lng: Number.isFinite(lng) ? lng : undefined,
-        hourlyHelper: opts?.availabilityMode === 'hourly',
-        preferredHelperGender: opts?.preferredHelperGender,
-        requiredPartnerCategory: opts?.requiredPartnerCategory,
-        eligibleHourlyHelpers,
-      });
-    })();
+    const partnerCapacityPromise = shouldCalculatePartnerCapacity
+      ? (async () => {
+          const eligibleHourlyHelpers = await hourlyEligibleHelpersPromise;
+          return getPartnerCapacityForSlots(date, city, durationMinutes, {
+            area: opts?.area,
+            lat: Number.isFinite(lat) ? lat : undefined,
+            lng: Number.isFinite(lng) ? lng : undefined,
+            hourlyHelper: opts?.availabilityMode === 'hourly',
+            preferredHelperGender: opts?.preferredHelperGender,
+            requiredPartnerCategory: opts?.requiredPartnerCategory,
+            eligibleHourlyHelpers,
+          });
+        })()
+      : Promise.resolve({});
     const [occupied, partnerCapacityBySlot] = await Promise.all([
       occupiedPromise,
       partnerCapacityPromise,
@@ -2786,11 +2793,7 @@ export class BookingService {
       date: String(date || '').trim(),
       city: String(city || '').trim(),
       ...occupied,
-      partnerCapacityBySlot:
-        opts?.availabilityMode === 'hourly' ||
-        opts?.requiredPartnerCategory === DAILY_LABOUR_CATEGORY.partnerCategory
-          ? partnerCapacityBySlot
-          : {},
+      partnerCapacityBySlot,
     };
   }
 

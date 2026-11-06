@@ -99,79 +99,95 @@ export class BookNowCatalogBootstrap {
   static async migratePersonalAssistantCategorySlug(): Promise<void> {
     const oldSlug = LEGACY_PERSONAL_ASSISTANT_CATEGORY_SLUG;
     const newSlug = PERSONAL_ASSISTANT_CATEGORY_SLUG;
-    const [oldCategory, newCategory, oldContent, newContent, oldHub, newHub] =
-      await Promise.all([
-        ServiceCategory.findOne({ slug: oldSlug }).select('_id').lean(),
-        ServiceCategory.findOne({ slug: newSlug }).select('_id').lean(),
-        BookNowCategoryContent.findOne({ categorySlug: oldSlug }).select('_id').lean(),
-        BookNowCategoryContent.findOne({ categorySlug: newSlug }).select('_id').lean(),
-        BookNowHubSection.findOne({ slug: oldSlug }).select('_id').lean(),
-        BookNowHubSection.findOne({ slug: newSlug }).select('_id').lean(),
-      ]);
+    const [oldCategory, newCategory, oldContent, newContent, oldHub, newHub] = await Promise.all([
+      ServiceCategory.findOne({ slug: oldSlug }).lean(),
+      ServiceCategory.findOne({ slug: newSlug }).lean(),
+      BookNowCategoryContent.findOne({ categorySlug: oldSlug }).lean(),
+      BookNowCategoryContent.findOne({ categorySlug: newSlug }).lean(),
+      BookNowHubSection.findOne({ slug: oldSlug }).lean(),
+      BookNowHubSection.findOne({ slug: newSlug }).lean(),
+    ]);
 
-    if (oldCategory && newCategory && String(oldCategory._id) !== String(newCategory._id)) {
-      throw new Error(
-        `Cannot migrate ${oldSlug}: both old and new ServiceCategory records exist`,
+    if (oldCategory && newCategory) {
+      const oldSkus = await ServiceSku.find({ categoryId: oldCategory._id })
+        .select('_id slug')
+        .lean();
+      const newSkuSlugs = new Set(
+        (await ServiceSku.find({ categoryId: newCategory._id }).select('slug').lean())
+          .map((sku) => sku.slug),
+      );
+      for (const sku of oldSkus) {
+        if (newSkuSlugs.has(sku.slug)) {
+          await ServiceSku.updateOne({ _id: sku._id }, { $set: { isActive: false } });
+        } else {
+          await ServiceSku.updateOne(
+            { _id: sku._id },
+            { $set: { categoryId: newCategory._id } },
+          );
+          newSkuSlugs.add(sku.slug);
+        }
+      }
+      if (
+        Number(oldCategory.minOrderValue || 0) > 0 &&
+        Number(newCategory.minOrderValue || 0) <= 0
+      ) {
+        await ServiceCategory.updateOne(
+          { _id: newCategory._id },
+          { $set: { minOrderValue: oldCategory.minOrderValue } },
+        );
+      }
+      await ServiceCategory.deleteOne({ _id: oldCategory._id });
+    } else if (oldCategory) {
+      await ServiceCategory.updateOne(
+        { _id: oldCategory._id },
+        { $set: { slug: newSlug } },
       );
     }
+
     if (oldContent && newContent) {
-      throw new Error(
-        `Cannot migrate ${oldSlug}: both old and new BookNowCategoryContent records exist`,
-      );
-    }
-    if (oldHub && newHub) {
-      throw new Error(
-        `Cannot migrate ${oldSlug}: both old and new BookNowHubSection records exist`,
-      );
-    }
-
-    const oldSkuContent = await BookNowSkuContent.find({ categorySlug: oldSlug })
-      .select('skuSlug')
-      .lean();
-    if (oldSkuContent.length > 0) {
-      const conflictingSkuContent = await BookNowSkuContent.findOne({
-        categorySlug: newSlug,
-        skuSlug: { $in: oldSkuContent.map((content) => content.skuSlug) },
-      })
-        .select('_id')
-        .lean();
-      if (conflictingSkuContent) {
-        throw new Error(
-          `Cannot migrate ${oldSlug}: matching old and new BookNowSkuContent records exist`,
-        );
-      }
-    }
-
-    const oldAvailability = await BookNowServiceLocationAvailability.find({
-      catalogId: oldSlug,
-    })
-      .select('locationType locationId')
-      .lean();
-    for (const availability of oldAvailability) {
-      const conflictingAvailability = await BookNowServiceLocationAvailability.findOne({
-        catalogId: newSlug,
-        locationType: availability.locationType,
-        locationId: availability.locationId,
-      })
-        .select('_id')
-        .lean();
-      if (conflictingAvailability) {
-        throw new Error(
-          `Cannot migrate ${oldSlug}: duplicate old and new location availability exists`,
-        );
-      }
-    }
-
-    await BookNowHubSection.updateOne(
-      { slug: oldSlug },
-      { $set: { slug: newSlug } },
-    );
-    await Promise.all([
-      ServiceCategory.updateOne({ slug: oldSlug }, { $set: { slug: newSlug } }),
-      BookNowCategoryContent.updateOne(
-        { categorySlug: oldSlug },
+      await BookNowCategoryContent.deleteOne({ _id: oldContent._id });
+    } else if (oldContent) {
+      await BookNowCategoryContent.updateOne(
+        { _id: oldContent._id },
         { $set: { categorySlug: newSlug } },
-      ),
+      );
+    }
+
+    if (oldHub && newHub) {
+      const mergedServices = new Map<string, Record<string, unknown>>();
+      for (const service of [...oldHub.services, ...newHub.services]) {
+        const normalizedService = {
+          ...service,
+          serviceId: service.serviceId === oldSlug ? newSlug : service.serviceId,
+          categorySlug: service.categorySlug === oldSlug ? newSlug : service.categorySlug,
+        };
+        mergedServices.set(
+          `${normalizedService.serviceId}:${normalizedService.categorySlug}`,
+          normalizedService,
+        );
+      }
+      await BookNowHubSection.updateOne(
+        { _id: newHub._id },
+        { $set: { services: [...mergedServices.values()] } },
+      );
+      await BookNowHubSection.deleteOne({ _id: oldHub._id });
+    } else if (oldHub) {
+      await BookNowHubSection.updateOne(
+        { _id: oldHub._id },
+        {
+          $set: {
+            slug: newSlug,
+            services: oldHub.services.map((service) => ({
+              ...service,
+              serviceId: service.serviceId === oldSlug ? newSlug : service.serviceId,
+              categorySlug: service.categorySlug === oldSlug ? newSlug : service.categorySlug,
+            })),
+          },
+        },
+      );
+    }
+
+    await Promise.all([
       BookNowHubSection.updateMany(
         { 'services.serviceId': oldSlug },
         { $set: { 'services.$[service].serviceId': newSlug } },
@@ -181,14 +197,6 @@ export class BookNowCatalogBootstrap {
         { 'services.categorySlug': oldSlug },
         { $set: { 'services.$[service].categorySlug': newSlug } },
         { arrayFilters: [{ 'service.categorySlug': oldSlug }] },
-      ),
-      BookNowSkuContent.updateMany(
-        { categorySlug: oldSlug },
-        { $set: { categorySlug: newSlug } },
-      ),
-      BookNowServiceLocationAvailability.updateMany(
-        { catalogId: oldSlug },
-        { $set: { catalogId: newSlug } },
       ),
       Task.updateMany(
         { categorySlug: oldSlug },
@@ -209,6 +217,41 @@ export class BookNowCatalogBootstrap {
         { arrayFilters: [{ 'line.catalogId': oldSlug }] },
       ),
     ]);
+
+    const oldSkuContent = await BookNowSkuContent.find({ categorySlug: oldSlug }).lean();
+    for (const content of oldSkuContent) {
+      const existing = await BookNowSkuContent.findOne({
+        categorySlug: newSlug,
+        skuSlug: content.skuSlug,
+      }).select('_id').lean();
+      if (existing) {
+        await BookNowSkuContent.deleteOne({ _id: content._id });
+      } else {
+        await BookNowSkuContent.updateOne(
+          { _id: content._id },
+          { $set: { categorySlug: newSlug } },
+        );
+      }
+    }
+
+    const oldAvailability = await BookNowServiceLocationAvailability.find({
+      catalogId: oldSlug,
+    }).lean();
+    for (const availability of oldAvailability) {
+      const existing = await BookNowServiceLocationAvailability.findOne({
+        catalogId: newSlug,
+        locationType: availability.locationType,
+        locationId: availability.locationId,
+      }).select('_id').lean();
+      if (existing) {
+        await BookNowServiceLocationAvailability.deleteOne({ _id: availability._id });
+      } else {
+        await BookNowServiceLocationAvailability.updateOne(
+          { _id: availability._id },
+          { $set: { catalogId: newSlug } },
+        );
+      }
+    }
 
     logger.info('Personal Assistant category slug migration complete', {
       oldSlug,
