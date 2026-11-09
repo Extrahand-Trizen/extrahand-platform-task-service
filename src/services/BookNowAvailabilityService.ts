@@ -110,23 +110,30 @@ export class BookNowAvailabilityService {
     }
     const resolved = await resolveAddressForAvailability(address);
     let areaId = resolved.areaId;
-    if (!areaId && resolved.pincodeId) {
+    if (resolved.pincodeId) {
       const areaMappings = await LocationPincodeAreaMap.find({
         pincodeId: resolved.pincodeId,
       })
         .select({ areaId: 1, isPrimary: 1 })
         .lean();
-      const mappedArea =
-        areaMappings.find((mapping) => mapping.isPrimary) ||
-        (areaMappings.length === 1 ? areaMappings[0] : undefined);
-      if (mappedArea) {
-        const activeArea = await LocationArea.findOne({
-          _id: mappedArea.areaId,
-          isActive: true,
-        })
-          .select({ _id: 1 })
-          .lean();
-        areaId = activeArea?._id || null;
+      const areaMatchesPincode = areaMappings.some(
+        (mapping) => String(mapping.areaId) === String(areaId),
+      );
+      if (areaId && !areaMatchesPincode) areaId = null;
+
+      if (!areaId) {
+        const mappedArea =
+          areaMappings.find((mapping) => mapping.isPrimary) ||
+          (areaMappings.length === 1 ? areaMappings[0] : undefined);
+        if (mappedArea) {
+          const activeArea = await LocationArea.findOne({
+            _id: mappedArea.areaId,
+            isActive: true,
+          })
+            .select({ _id: 1 })
+            .lean();
+          areaId = activeArea?._id || null;
+        }
       }
     }
     const candidates: LocationCandidate[] = [];
