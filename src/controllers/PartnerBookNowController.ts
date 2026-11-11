@@ -22,6 +22,11 @@ import {
 } from '../services/BookNowAutoAssignService';
 import { undispatchedBookNowOfferFilter } from '../utils/bookNowOfferState';
 
+const requesterProfileKey = (id: unknown): string =>
+  id instanceof mongoose.Types.ObjectId
+    ? `objectId:${id.toHexString()}`
+    : `${typeof id}:${String(id)}`;
+
 /**
  * Server-side visibility guard for the Book Now partner feed.
  *
@@ -133,23 +138,43 @@ export class PartnerBookNowController {
       tasks = await Task.find(filter).sort({ createdAt: -1 }).limit(50).lean() as Record<string, any>[];
     }
 
+    const requesterProfileIds = new Map<string, any>();
+    for (const task of tasks) {
+      if (task.requesterId) {
+        requesterProfileIds.set(
+          requesterProfileKey(task.requesterId),
+          task.requesterId,
+        );
+      }
+    }
+
+    let requesterProfiles = new Map<string, any>();
+    if (requesterProfileIds.size > 0) {
+      try {
+        const profiles = await mongoose.connection
+          .collection('profiles')
+          .find(
+            { _id: { $in: Array.from(requesterProfileIds.values()) } },
+            { projection: { name: 1 } },
+          )
+          .toArray();
+        requesterProfiles = new Map(
+          profiles.map((profile: any) => [requesterProfileKey(profile._id), profile]),
+        );
+      } catch {
+        // Name enrichment is best-effort.
+      }
+    }
+
     // Enrich with requester name (best-effort)
     const enriched = await Promise.all(
       tasks.map(async (task) => {
         let requesterName = 'Customer';
-        try {
-          if (task.requesterId) {
-            const Profile = mongoose.connection.collection('profiles');
-            const requester = await Profile.findOne(
-              { _id: task.requesterId },
-              { projection: { name: 1 } },
-            );
-            if (requester) {
-              requesterName = (requester as any).name || 'Customer';
-            }
+        if (task.requesterId) {
+          const requester = requesterProfiles.get(requesterProfileKey(task.requesterId));
+          if (requester) {
+            requesterName = requester.name || 'Customer';
           }
-        } catch {
-          // swallow — name enrichment is best-effort
         }
 
         let serviceContent: { includes?: string[]; excludes?: string[] } | null = null;

@@ -40,6 +40,7 @@ const ServiceSkuSchema = new Schema<IServiceSku>(
 );
 
 ServiceSkuSchema.index({ categoryId: 1, slug: 1 }, { unique: true });
+ServiceSkuSchema.index({ categoryId: 1, isActive: 1, name: 1, _id: 1 });
 
 const ServiceSku: Model<IServiceSku> =
   mongoose.models.ServiceSku || mongoose.model<IServiceSku>('ServiceSku', ServiceSkuSchema);
