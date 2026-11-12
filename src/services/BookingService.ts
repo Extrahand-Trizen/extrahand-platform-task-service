@@ -1255,14 +1255,6 @@ export class BookingService {
 
     const isHourlyOrder = resolvedLines.some(isHourlyResolvedLine);
     const hasBookNowServices = resolvedLines.some((line) => !isHourlyResolvedLine(line));
-    if (hasBookNowServices) {
-      await assertBookNowLocationAvailable(
-        address,
-        resolvedLines
-          .filter((line) => !isHourlyResolvedLine(line))
-          .map((line) => line.categorySlug),
-      );
-    }
 
     const hourlySlotSettings =
       looksHourlyInput || isHourlyOrder
@@ -1390,59 +1382,75 @@ export class BookingService {
     const serviceCount =
       dailyLabourLines.length > 0 ? 1 : resolvedLinesWithSchedule.length;
 
-    if (!skipSlotChecks) {
-      for (const line of resolvedLinesWithSchedule) {
-        if (isHourlyOrder && isHourlyResolvedLine(line) && line.schedule) {
-          assertHourlyScheduledSlotWithinOperatingHours({
-            scheduledTimeStart: line.schedule.scheduledTimeStart,
-            durationMinutes: line.schedule.durationMinutes,
-          });
-          if (
-            hourlySlotSettings?.mode === 'managed_schedule' &&
-            !isHourlySlotAllowedBySettings({
-              date: String(line.schedule.scheduledDate || '').slice(0, 10),
-              slot: String(line.schedule.scheduledTimeStart || ''),
-              durationMinutes: line.schedule.durationMinutes,
-              settings: hourlySlotSettings,
-            })
-          ) {
-            throw new BadRequestError(
-              'This Hourly Helper slot is outside the configured booking range or block period. Please choose another slot.',
-            );
-          }
-          if (hourlySlotSettings?.mode === 'managed_schedule') continue;
-          try {
-            await assertBookNowSlotAvailable({
-              date: line.schedule.scheduledDate,
-              city: address.city,
+    const locationAvailabilityPromise = hasBookNowServices
+      ? assertBookNowLocationAvailable(
+          address,
+          resolvedLinesWithSchedule
+            .filter((line) => !isHourlyResolvedLine(line))
+            .map((line) => line.categorySlug),
+        )
+      : Promise.resolve();
+    const slotAvailabilityPromise = (async () => {
+      if (skipSlotChecks) return;
+
+      if (isHourlyOrder) {
+        await Promise.all(
+          resolvedLinesWithSchedule.map(async (line) => {
+            if (!isHourlyResolvedLine(line) || !line.schedule) return;
+
+            assertHourlyScheduledSlotWithinOperatingHours({
               scheduledTimeStart: line.schedule.scheduledTimeStart,
               durationMinutes: line.schedule.durationMinutes,
-              availabilityMode: 'hourly',
-              area: resolveHourlyBookingAreaForCapacity(address),
-              lat: Array.isArray(address.coordinates) ? address.coordinates[1] : undefined,
-              lng: Array.isArray(address.coordinates) ? address.coordinates[0] : undefined,
-              preferredHelperGender,
-              allowedPartnerUids: hourlyEligiblePartnerUids,
             });
-          } catch (error) {
-            if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
+            if (
+              hourlySlotSettings?.mode === 'managed_schedule' &&
+              !isHourlySlotAllowedBySettings({
+                date: String(line.schedule.scheduledDate || '').slice(0, 10),
+                slot: String(line.schedule.scheduledTimeStart || ''),
+                durationMinutes: line.schedule.durationMinutes,
+                settings: hourlySlotSettings,
+              })
+            ) {
               throw new BadRequestError(
-                'No eligible Hourly Helper is free for this full time window. Please choose another slot.',
+                'This Hourly Helper slot is outside the configured booking range or block period. Please choose another slot.',
               );
             }
-            if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
-              throw new BadRequestError(
-                'That time has already passed. Please choose a later time slot.',
-              );
+            if (hourlySlotSettings?.mode === 'managed_schedule') return;
+
+            try {
+              await assertBookNowSlotAvailable({
+                date: line.schedule.scheduledDate,
+                city: address.city,
+                scheduledTimeStart: line.schedule.scheduledTimeStart,
+                durationMinutes: line.schedule.durationMinutes,
+                availabilityMode: 'hourly',
+                area: resolveHourlyBookingAreaForCapacity(address),
+                lat: Array.isArray(address.coordinates) ? address.coordinates[1] : undefined,
+                lng: Array.isArray(address.coordinates) ? address.coordinates[0] : undefined,
+                preferredHelperGender,
+                allowedPartnerUids: hourlyEligiblePartnerUids,
+              });
+            } catch (error) {
+              if (error instanceof Error && error.message === 'SLOT_UNAVAILABLE') {
+                throw new BadRequestError(
+                  'No eligible Hourly Helper is free for this full time window. Please choose another slot.',
+                );
+              }
+              if (error instanceof Error && error.message === 'SLOT_TOO_SOON') {
+                throw new BadRequestError(
+                  'That time has already passed. Please choose a later time slot.',
+                );
+              }
+              throw error;
             }
-            throw error;
-          }
-        }
+          }),
+        );
+        return;
       }
 
-      if (!isHourlyOrder) {
-        const slotChecks = collectCategoryBookNowSlotChecks(resolvedLinesWithSchedule);
-        for (const slotCheck of slotChecks) {
+      const slotChecks = collectCategoryBookNowSlotChecks(resolvedLinesWithSchedule);
+      await Promise.all(
+        slotChecks.map(async (slotCheck) => {
           try {
             await assertBookNowSlotAvailable({
               date: slotCheck.date,
@@ -1468,12 +1476,11 @@ export class BookingService {
             }
             throw error;
           }
-        }
-      }
-    }
-
-    const pricing = normalizedOrderGstExempt
-      ? {
+        }),
+      );
+    })();
+    const pricingPromise = normalizedOrderGstExempt
+      ? Promise.resolve({
           ...computeBookingTotals(
             resolvedLinesWithSchedule.reduce((sum, line) => sum + line.lineTotal, 0),
           ),
@@ -1483,8 +1490,8 @@ export class BookingService {
             gstPercentage: 0,
             gstAmount: 0,
           })),
-        }
-      : await (async () => {
+        })
+      : (async () => {
           const pricingResult = await PaymentClient.calculateBookNowOrderTotals(
             resolvedLinesWithSchedule.map((line) => ({
               categorySlug: line.categorySlug,
@@ -1500,11 +1507,21 @@ export class BookingService {
 
           return pricingResult.totals;
         })();
+    const existingAttemptOrderPromise = checkoutAttemptId
+      ? BookingOrder.findOne({ customerUid, checkoutAttemptId }).exec()
+      : Promise.resolve(null);
+
+    await Promise.all([
+      locationAvailabilityPromise,
+      slotAvailabilityPromise,
+      pricingPromise,
+      existingAttemptOrderPromise,
+    ]);
+
+    const pricing = await pricingPromise;
     const addonsTotal = pricing.addonsTotal ?? 0;
 
-    const existingAttemptOrder = checkoutAttemptId
-      ? await BookingOrder.findOne({ customerUid, checkoutAttemptId })
-      : null;
+    const existingAttemptOrder = await existingAttemptOrderPromise;
     if (
       existingAttemptOrder?.checkoutRequestFingerprint &&
       existingAttemptOrder.checkoutRequestFingerprint !== checkoutRequestFingerprint
@@ -1515,14 +1532,6 @@ export class BookingService {
     const primaryScheduleLine = resolvedLinesWithSchedule[0];
     const orderSchedule = orderScheduleFromLine(primaryScheduleLine);
 
-    if (hasBookNowServices) {
-      await assertBookNowLocationAvailable(
-        address,
-        resolvedLinesWithSchedule
-          .filter((line) => !isHourlyResolvedLine(line))
-          .map((line) => line.categorySlug),
-      );
-    }
     let order = existingAttemptOrder;
     if (!order) {
       try {
@@ -1574,15 +1583,11 @@ export class BookingService {
     }
     const orderId = order.orderId;
 
-    const createdItems: InstanceType<typeof BookingItem>[] = [];
-
     try {
-      for (let index = 0; index < resolvedLinesWithSchedule.length; index += 1) {
-        const line = resolvedLinesWithSchedule[index];
-        let item = await BookingItem.findOne({ orderId, checkoutLineIndex: index });
-        if (!item) {
+      const createdItems = await Promise.all(
+        resolvedLinesWithSchedule.map(async (line, index) => {
           try {
-            item = await BookingItem.create({
+            return await BookingItem.create({
               orderId,
               checkoutLineIndex: index,
               ...(line.skuId ? { skuId: line.skuId } : {}),
@@ -1610,12 +1615,12 @@ export class BookingService {
               'code' in error &&
               (error as { code?: unknown }).code === 11000;
             if (!duplicateLine) throw error;
-            item = await BookingItem.findOne({ orderId, checkoutLineIndex: index });
-            if (!item) throw error;
+            const existingItem = await BookingItem.findOne({ orderId, checkoutLineIndex: index });
+            if (!existingItem) throw error;
+            return existingItem;
           }
-        }
-        createdItems.push(item);
-      }
+        }),
+      );
 
       const primaryLine = resolvedLinesWithSchedule[0];
       const combinedTitle =
