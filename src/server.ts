@@ -17,11 +17,13 @@ import { TaskStartOtpNotificationQueue } from './services/TaskStartOtpNotificati
 import { createSocketServer } from './config/socket.config';
 import { initializeSocketHandlers } from './socket/socketHandlers';
 import { initRedis, disconnectRedis } from './config/redis';
+import { BookNowCatalogBootstrap } from './services/BookNowCatalogBootstrap';
 async function startServer() {
   try {
     // Connect to MongoDB
     if (config.MONGODB_URI) {
       await Database.connectToDb();
+      await BookNowCatalogBootstrap.seedPersonalAssistantCatalog();
     } else {
       logger.warn('⚠️ MONGODB_URI not provided, some features may not work');
     }

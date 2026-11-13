@@ -1,5 +1,6 @@
 import {
   PERSONAL_ASSISTANT_CATEGORY,
+  LEGACY_PERSONAL_ASSISTANT_CATEGORY_SLUG,
   PERSONAL_ASSISTANT_CATEGORY_SLUG,
   PERSONAL_ASSISTANT_DURATION_SKUS,
 } from '../constants/personalAssistantBooking';
@@ -7,6 +8,11 @@ import { personalAssistantCatalogIsActive } from '../utils/personalAssistantCata
 import { BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG } from '../constants/bookNowHubCatalog';
 import BookNowCategoryContent from '../models/BookNowCategoryContent';
 import BookNowHubSection from '../models/BookNowHubSection';
+import BookNowSkuContent from '../models/BookNowSkuContent';
+import BookNowServiceLocationAvailability from '../models/BookNowServiceLocationAvailability';
+import BookingItem from '../models/BookingItem';
+import BookingOrder from '../models/BookingOrder';
+import Task from '../models/Task';
 import fs from 'fs';
 import path from 'path';
 import mongoose from 'mongoose';
@@ -90,6 +96,169 @@ function loadSeedData(): { categories: SeedCategory[]; packages: SeedPackage[] }
 }
 
 export class BookNowCatalogBootstrap {
+  static async migratePersonalAssistantCategorySlug(): Promise<void> {
+    const oldSlug = LEGACY_PERSONAL_ASSISTANT_CATEGORY_SLUG;
+    const newSlug = PERSONAL_ASSISTANT_CATEGORY_SLUG;
+    const [oldCategory, newCategory, oldContent, newContent, oldHub, newHub] = await Promise.all([
+      ServiceCategory.findOne({ slug: oldSlug }).lean(),
+      ServiceCategory.findOne({ slug: newSlug }).lean(),
+      BookNowCategoryContent.findOne({ categorySlug: oldSlug }).lean(),
+      BookNowCategoryContent.findOne({ categorySlug: newSlug }).lean(),
+      BookNowHubSection.findOne({ slug: oldSlug }).lean(),
+      BookNowHubSection.findOne({ slug: newSlug }).lean(),
+    ]);
+
+    if (oldCategory && newCategory) {
+      const oldSkus = await ServiceSku.find({ categoryId: oldCategory._id })
+        .select('_id slug')
+        .lean();
+      const newSkuSlugs = new Set(
+        (await ServiceSku.find({ categoryId: newCategory._id }).select('slug').lean())
+          .map((sku) => sku.slug),
+      );
+      for (const sku of oldSkus) {
+        if (newSkuSlugs.has(sku.slug)) {
+          await ServiceSku.updateOne({ _id: sku._id }, { $set: { isActive: false } });
+        } else {
+          await ServiceSku.updateOne(
+            { _id: sku._id },
+            { $set: { categoryId: newCategory._id } },
+          );
+          newSkuSlugs.add(sku.slug);
+        }
+      }
+      if (
+        Number(oldCategory.minOrderValue || 0) > 0 &&
+        Number(newCategory.minOrderValue || 0) <= 0
+      ) {
+        await ServiceCategory.updateOne(
+          { _id: newCategory._id },
+          { $set: { minOrderValue: oldCategory.minOrderValue } },
+        );
+      }
+      await ServiceCategory.deleteOne({ _id: oldCategory._id });
+    } else if (oldCategory) {
+      await ServiceCategory.updateOne(
+        { _id: oldCategory._id },
+        { $set: { slug: newSlug } },
+      );
+    }
+
+    if (oldContent && newContent) {
+      await BookNowCategoryContent.deleteOne({ _id: oldContent._id });
+    } else if (oldContent) {
+      await BookNowCategoryContent.updateOne(
+        { _id: oldContent._id },
+        { $set: { categorySlug: newSlug } },
+      );
+    }
+
+    if (oldHub && newHub) {
+      const mergedServices = new Map<string, Record<string, unknown>>();
+      for (const service of [...oldHub.services, ...newHub.services]) {
+        const normalizedService = {
+          ...service,
+          serviceId: service.serviceId === oldSlug ? newSlug : service.serviceId,
+          categorySlug: service.categorySlug === oldSlug ? newSlug : service.categorySlug,
+        };
+        mergedServices.set(
+          `${normalizedService.serviceId}:${normalizedService.categorySlug}`,
+          normalizedService,
+        );
+      }
+      await BookNowHubSection.updateOne(
+        { _id: newHub._id },
+        { $set: { services: [...mergedServices.values()] } },
+      );
+      await BookNowHubSection.deleteOne({ _id: oldHub._id });
+    } else if (oldHub) {
+      await BookNowHubSection.updateOne(
+        { _id: oldHub._id },
+        {
+          $set: {
+            slug: newSlug,
+            services: oldHub.services.map((service) => ({
+              ...service,
+              serviceId: service.serviceId === oldSlug ? newSlug : service.serviceId,
+              categorySlug: service.categorySlug === oldSlug ? newSlug : service.categorySlug,
+            })),
+          },
+        },
+      );
+    }
+
+    await Promise.all([
+      BookNowHubSection.updateMany(
+        { 'services.serviceId': oldSlug },
+        { $set: { 'services.$[service].serviceId': newSlug } },
+        { arrayFilters: [{ 'service.serviceId': oldSlug }] },
+      ),
+      BookNowHubSection.updateMany(
+        { 'services.categorySlug': oldSlug },
+        { $set: { 'services.$[service].categorySlug': newSlug } },
+        { arrayFilters: [{ 'service.categorySlug': oldSlug }] },
+      ),
+      Task.updateMany(
+        { categorySlug: oldSlug },
+        { $set: { categorySlug: newSlug } },
+      ),
+      BookingItem.updateMany(
+        { 'skuSnapshot.categorySlug': oldSlug },
+        { $set: { 'skuSnapshot.categorySlug': newSlug } },
+      ),
+      BookingOrder.updateMany(
+        { 'pendingLines.categorySlug': oldSlug },
+        { $set: { 'pendingLines.$[line].categorySlug': newSlug } },
+        { arrayFilters: [{ 'line.categorySlug': oldSlug }] },
+      ),
+      BookingOrder.updateMany(
+        { 'pendingLines.catalogId': oldSlug },
+        { $set: { 'pendingLines.$[line].catalogId': newSlug } },
+        { arrayFilters: [{ 'line.catalogId': oldSlug }] },
+      ),
+    ]);
+
+    const oldSkuContent = await BookNowSkuContent.find({ categorySlug: oldSlug }).lean();
+    for (const content of oldSkuContent) {
+      const existing = await BookNowSkuContent.findOne({
+        categorySlug: newSlug,
+        skuSlug: content.skuSlug,
+      }).select('_id').lean();
+      if (existing) {
+        await BookNowSkuContent.deleteOne({ _id: content._id });
+      } else {
+        await BookNowSkuContent.updateOne(
+          { _id: content._id },
+          { $set: { categorySlug: newSlug } },
+        );
+      }
+    }
+
+    const oldAvailability = await BookNowServiceLocationAvailability.find({
+      catalogId: oldSlug,
+    }).lean();
+    for (const availability of oldAvailability) {
+      const existing = await BookNowServiceLocationAvailability.findOne({
+        catalogId: newSlug,
+        locationType: availability.locationType,
+        locationId: availability.locationId,
+      }).select('_id').lean();
+      if (existing) {
+        await BookNowServiceLocationAvailability.deleteOne({ _id: availability._id });
+      } else {
+        await BookNowServiceLocationAvailability.updateOne(
+          { _id: availability._id },
+          { $set: { catalogId: newSlug } },
+        );
+      }
+    }
+
+    logger.info('Personal Assistant category slug migration complete', {
+      oldSlug,
+      newSlug,
+    });
+  }
+
   static async deactivateDailyLabourCatalog(): Promise<{
     active: false;
     categories: number;
@@ -214,6 +383,7 @@ export class BookNowCatalogBootstrap {
 
   /** Seed Personal Assistant category + duration SKUs. Idempotent. */
   static async seedPersonalAssistantCatalog(): Promise<{ categoryId: string; skus: number }> {
+    await BookNowCatalogBootstrap.migratePersonalAssistantCategorySlug();
     const isActive = personalAssistantCatalogIsActive();
     const heroImageUrl =
       BOOK_NOW_CATEGORY_HERO_IMAGE_BY_SLUG[PERSONAL_ASSISTANT_CATEGORY_SLUG] || '';
@@ -241,6 +411,29 @@ export class BookNowCatalogBootstrap {
         heroImageUrl,
         faqCategoryKeys: [],
         sortOrder: PERSONAL_ASSISTANT_CATEGORY.sortOrder,
+        isActive,
+      },
+      { upsert: true, new: true },
+    );
+
+    await BookNowHubSection.findOneAndUpdate(
+      { slug: PERSONAL_ASSISTANT_CATEGORY.slug },
+      {
+        slug: PERSONAL_ASSISTANT_CATEGORY.slug,
+        title: PERSONAL_ASSISTANT_CATEGORY.name,
+        iconKey: 'User',
+        sortOrder: PERSONAL_ASSISTANT_CATEGORY.sortOrder,
+        services: [
+          {
+            serviceId: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+            label: 'Personal Assistant',
+            categorySlug: PERSONAL_ASSISTANT_CATEGORY_SLUG,
+            sectionId: '',
+            imageUrl: heroImageUrl,
+            sortOrder: 10,
+            isActive,
+          },
+        ],
         isActive,
       },
       { upsert: true, new: true },

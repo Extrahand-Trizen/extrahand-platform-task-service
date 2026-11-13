@@ -73,7 +73,7 @@ async function main() {
       includes: ['Submeter mounting', 'Basic electrical connection', 'Testing'],
       excludes: ['New submeter cost', 'Approval fees'],
       imageUrls: [
-        'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/Submeter%20Installation.png',
+        'https://extrahandimages-api.apps.extrahand.in/extrahand-categories-banners-images/Submeter%20Installation_v2.webp',
       ],
       faqItems: [],
       sortOrder: 0,

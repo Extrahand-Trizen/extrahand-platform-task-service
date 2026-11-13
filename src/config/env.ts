@@ -114,10 +114,9 @@ const envSchema = z.object({
 
   /**
    * Book Now Personal Assistant catalog visibility.
-   * Default false — seed + public APIs hide the category until launch.
-   * Set to true (or run setPersonalAssistantCatalogPublished script) when shipping mobile.
+   * Default true so catalog seeding publishes the category for public Book Now APIs.
    */
-  BOOK_NOW_PERSONAL_ASSISTANT_PUBLISHED: z.string().default('false'),
+  BOOK_NOW_PERSONAL_ASSISTANT_PUBLISHED: z.string().default('true'),
 
   /** Comma-separated Firebase UIDs that can see PA before public launch (optional). */
   BOOK_NOW_PERSONAL_ASSISTANT_PREVIEW_UIDS: z.string().optional(),

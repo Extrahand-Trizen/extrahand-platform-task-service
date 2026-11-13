@@ -21,6 +21,8 @@ export type HourlyHelperAvailabilityResult = {
 export type EligibleHourlyHelper = {
   uid: string;
   matchedArea: string;
+  workShifts: string[];
+  gender?: string;
 };
 
 export function workAreasMatchExactArea(
@@ -70,6 +72,12 @@ export function isEligibleHourlyHelperProfile(
 const AVAILABILITY_CACHE_MS = 10_000;
 const availabilityCache = new Map<string, { available: boolean; expiresAt: number }>();
 const pendingAvailability = new Map<string, Promise<boolean>>();
+const ELIGIBLE_HELPERS_CACHE_MS = 10_000;
+const eligibleHelpersCache = new Map<
+  string,
+  { helpers: EligibleHourlyHelper[]; expiresAt: number }
+>();
+const pendingEligibleHelpers = new Map<string, Promise<EligibleHourlyHelper[]>>();
 
 export function buildHourlyHelperAreaQueryRegex(area: string): RegExp {
   const canonical = canonicalServiceAreaName(area);
@@ -198,7 +206,51 @@ export class HourlyHelperAvailabilityService {
   static async findEligibleHelpers(
     areaCandidates: readonly string[],
   ): Promise<EligibleHourlyHelper[]> {
-    if (areaCandidates.length === 0) return [];
+    const candidates = Array.from(
+      new Set(areaCandidates.map((area) => canonicalServiceAreaName(area)).filter(Boolean)),
+    );
+    if (candidates.length === 0) return [];
+
+    const cacheKey = candidates.slice().sort().join('|');
+    const cached = eligibleHelpersCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.helpers;
+    const pending = pendingEligibleHelpers.get(cacheKey);
+    if (pending) return pending;
+
+    const lookup = this.loadEligibleHelpers(candidates)
+      .then((helpers) => {
+        const now = Date.now();
+        for (const [key, value] of eligibleHelpersCache) {
+          if (value.expiresAt <= now) eligibleHelpersCache.delete(key);
+        }
+        if (eligibleHelpersCache.size >= 500) {
+          const oldestKey = eligibleHelpersCache.keys().next().value;
+          if (oldestKey) eligibleHelpersCache.delete(oldestKey);
+        }
+        eligibleHelpersCache.set(cacheKey, {
+          helpers,
+          expiresAt: now + ELIGIBLE_HELPERS_CACHE_MS,
+        });
+        return helpers;
+      })
+      .finally(() => {
+        pendingEligibleHelpers.delete(cacheKey);
+      });
+    pendingEligibleHelpers.set(cacheKey, lookup);
+    return lookup;
+  }
+
+  private static async loadEligibleHelpers(
+    candidates: readonly string[],
+  ): Promise<EligibleHourlyHelper[]> {
+    const areaPatterns = candidates.map(buildHourlyHelperAreaQueryRegex);
+    const categoryFilters = HOURLY_HELPER_PARTNER_CATEGORIES.flatMap((category) => [
+      { 'partnerProfile.categories': category },
+      { 'partnerProfile.categories.id': category },
+      { 'partnerProfile.categories.slug': category },
+      { 'partnerProfile.categories.category': category },
+      { 'partnerProfile.categories.value': category },
+    ]);
 
     const profiles = await mongoose.connection
       .collection('profiles')
@@ -206,6 +258,17 @@ export class HourlyHelperAvailabilityService {
         {
           isActive: true,
           'partnerProfile.status': 'approved',
+          'partnerProfile.onLeave': { $ne: true },
+          isAvailable: { $ne: false },
+          $and: [
+            {
+              $or: [
+                { 'partnerProfile.workAreas': { $in: areaPatterns } },
+                { helperWorkAreas: { $in: areaPatterns } },
+              ],
+            },
+            { $or: categoryFilters },
+          ],
         },
         {
           projection: {
@@ -213,7 +276,13 @@ export class HourlyHelperAvailabilityService {
             roles: 1,
             isActive: 1,
             isAvailable: 1,
-            partnerProfile: 1,
+            'partnerProfile.status': 1,
+            'partnerProfile.onLeave': 1,
+            'partnerProfile.categories': 1,
+            'partnerProfile.workAreas': 1,
+            'partnerProfile.workShifts': 1,
+            'partnerProfile.gender': 1,
+            gender: 1,
             helperWorkAreas: 1,
           },
         },
@@ -225,8 +294,18 @@ export class HourlyHelperAvailabilityService {
       const record = profile as Record<string, unknown>;
       const uid = String(record.uid || '').trim();
       if (!uid) continue;
-      const matchedArea = matchEligibleHourlyHelperArea(record, areaCandidates);
-      if (matchedArea) eligible.push({ uid, matchedArea });
+      const matchedArea = matchEligibleHourlyHelperArea(record, candidates);
+      if (matchedArea) {
+        const partnerProfile = (record.partnerProfile as Record<string, unknown>) || {};
+        eligible.push({
+          uid,
+          matchedArea,
+          workShifts: Array.isArray(partnerProfile.workShifts)
+            ? partnerProfile.workShifts.map(String)
+            : [],
+          gender: String(record.gender ?? partnerProfile.gender ?? '').trim() || undefined,
+        });
+      }
     }
     return eligible;
   }

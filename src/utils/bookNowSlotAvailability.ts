@@ -210,9 +210,22 @@ export async function getOccupiedBookNowSlots(
     return { occupiedTimeStarts: [], occupiedTimeSlots: [], occupiedBookingAnchors: [] };
   }
 
+  const items = await BookingItem.find({
+    status: { $ne: 'cancelled' },
+    scheduledDate: { $gte: range.start, $lte: range.end },
+  })
+    .select('orderId scheduledDate scheduledTimeStart timeSlot')
+    .lean();
+  const orderIdsWithItems = Array.from(
+    new Set(items.map((item) => item.orderId).filter(Boolean)),
+  );
   const orders = await BookingOrder.find({
     'address.city': cityFilter,
     status: { $in: BLOCKING_STATUSES },
+    $or: [
+      { scheduledDate: { $gte: range.start, $lte: range.end } },
+      ...(orderIdsWithItems.length ? [{ orderId: { $in: orderIdsWithItems } }] : []),
+    ],
   })
     .select('orderId scheduledDate scheduledTimeStart timeSlot address.coordinates')
     .lean();
@@ -242,14 +255,7 @@ export async function getOccupiedBookNowSlots(
     return { occupiedTimeStarts: [], occupiedTimeSlots: [], occupiedBookingAnchors: [] };
   }
 
-  const orderIds = relevantOrders.map((order) => order.orderId);
-  const items = await BookingItem.find({
-    orderId: { $in: orderIds },
-    status: { $ne: 'cancelled' },
-    scheduledDate: { $gte: range.start, $lte: range.end },
-  })
-    .select('orderId scheduledDate scheduledTimeStart timeSlot')
-    .lean();
+  const relevantOrderIds = new Set(relevantOrders.map((order) => order.orderId));
 
   const occupiedTimeStarts = new Set<string>();
   const occupiedTimeSlots = new Set<BookNowTimeBucket>();
@@ -257,6 +263,7 @@ export async function getOccupiedBookNowSlots(
   const ordersWithItemAnchors = new Set<string>();
 
   for (const item of items) {
+    if (!relevantOrderIds.has(item.orderId)) continue;
     const anchor = resolveScheduleAnchor(item);
     if (!anchor) continue;
     addAnchorToOccupied(
@@ -523,6 +530,12 @@ export type PartnerCapacityLocation = {
   excludeTaskIds?: string[];
   /** Exact-area eligible partners; when set, replaces work-area key matching. */
   allowedPartnerUids?: string[];
+  /** Already-filtered Hourly Helper profiles from the address match. */
+  eligibleHourlyHelpers?: Array<{
+    uid: string;
+    workShifts: string[];
+    gender?: string;
+  }>;
 };
 
 type EligibleCapacityPartner = {
@@ -638,71 +651,95 @@ export async function getPartnerCapacityForSlots(
       });
   if (!allowedPartnerUids && !locationKeys.length) return capacity;
 
-  const Profile = mongoose.connection.collection('profiles');
-  const profiles = await Profile.find(
-    {
+  const eligiblePartners: EligibleCapacityPartner[] = [];
+  if (location?.eligibleHourlyHelpers) {
+    for (const helper of location.eligibleHourlyHelpers) {
+      if (!helper.uid) continue;
+      const preferredGender = location.preferredHelperGender;
+      if (
+        preferredGender &&
+        preferredGender !== 'any' &&
+        normalizePartnerGender(helper.gender) !== preferredGender
+      ) {
+        continue;
+      }
+      eligiblePartners.push({
+        uid: helper.uid,
+        workShifts: helper.workShifts,
+        gender: normalizePartnerGender(helper.gender) || undefined,
+        occupiedIntervals: [],
+      });
+    }
+  } else {
+    const Profile = mongoose.connection.collection('profiles');
+    const profileFilter: Record<string, unknown> = {
       isActive: true,
       'partnerProfile.status': 'approved',
-    },
-    {
-      projection: {
-        uid: 1,
-        isAvailable: 1,
-        helperWorkAreas: 1,
-        'partnerProfile.status': 1,
-        'partnerProfile.onLeave': 1,
-        'partnerProfile.workAreas': 1,
-        'partnerProfile.workShifts': 1,
-        'partnerProfile.categories': 1,
-        gender: 1,
-        'partnerProfile.gender': 1,
-      },
-    },
-  ).toArray();
-
-  const eligiblePartners: EligibleCapacityPartner[] = [];
-  for (const profile of profiles) {
-    const record = profile as Record<string, unknown>;
-    const pp = (record.partnerProfile as Record<string, unknown>) || {};
-    if (pp.status !== 'approved') continue;
-    if (record.isAvailable === false || pp.onLeave === true) continue;
-    if (location?.hourlyHelper) {
-      const categories = Array.isArray(pp.categories) ? (pp.categories as unknown[]) : [];
-      if (!partnerMatchesHourlyHelperCategory(categories)) continue;
-      const preferredGender = location.preferredHelperGender;
-      if (preferredGender && preferredGender !== 'any') {
-        const gender = normalizePartnerGender(record.gender ?? pp.gender);
-        if (gender !== preferredGender) continue;
-      }
-    }
-    if (location?.requiredPartnerCategory) {
-      const categories = Array.isArray(pp.categories) ? (pp.categories as unknown[]) : [];
-      if (!partnerMatchesRequiredCapacityCategory(
-        categories,
-        location.requiredPartnerCategory,
-      )) continue;
-    }
-
-    const uid = String(record.uid || '').trim();
-    if (!uid) continue;
+    };
     if (allowedPartnerUids) {
-      if (!allowedPartnerUids.has(uid)) continue;
-    } else {
-      const workAreas: string[] = Array.isArray(pp.workAreas)
-        ? (pp.workAreas as string[])
-        : Array.isArray(record.helperWorkAreas)
-          ? (record.helperWorkAreas as string[])
-          : [];
-      if (!workAreas.length) continue;
-      if (!partnerWorkAreasMatchLocationKeys(workAreas, locationKeys)) continue;
+      profileFilter.uid = { $in: Array.from(allowedPartnerUids) };
     }
-    if (location?.requiredPartnerUid && uid !== location.requiredPartnerUid) continue;
-    eligiblePartners.push({
-      uid,
-      workShifts: Array.isArray(pp.workShifts) ? (pp.workShifts as string[]) : [],
-      gender: normalizePartnerGender(record.gender ?? pp.gender) || undefined,
-      occupiedIntervals: [],
-    });
+    const profiles = await Profile.find(
+      profileFilter,
+      {
+        projection: {
+          uid: 1,
+          isAvailable: 1,
+          helperWorkAreas: 1,
+          'partnerProfile.status': 1,
+          'partnerProfile.onLeave': 1,
+          'partnerProfile.workAreas': 1,
+          'partnerProfile.workShifts': 1,
+          'partnerProfile.categories': 1,
+          gender: 1,
+          'partnerProfile.gender': 1,
+        },
+      },
+    ).toArray();
+
+    for (const profile of profiles) {
+      const record = profile as Record<string, unknown>;
+      const pp = (record.partnerProfile as Record<string, unknown>) || {};
+      if (pp.status !== 'approved') continue;
+      if (record.isAvailable === false || pp.onLeave === true) continue;
+      if (location?.hourlyHelper) {
+        const categories = Array.isArray(pp.categories) ? (pp.categories as unknown[]) : [];
+        if (!partnerMatchesHourlyHelperCategory(categories)) continue;
+        const preferredGender = location.preferredHelperGender;
+        if (preferredGender && preferredGender !== 'any') {
+          const gender = normalizePartnerGender(record.gender ?? pp.gender);
+          if (gender !== preferredGender) continue;
+        }
+      }
+      if (location?.requiredPartnerCategory) {
+        const categories = Array.isArray(pp.categories) ? (pp.categories as unknown[]) : [];
+        if (!partnerMatchesRequiredCapacityCategory(
+          categories,
+          location.requiredPartnerCategory,
+        )) continue;
+      }
+
+      const uid = String(record.uid || '').trim();
+      if (!uid) continue;
+      if (allowedPartnerUids) {
+        if (!allowedPartnerUids.has(uid)) continue;
+      } else {
+        const workAreas: string[] = Array.isArray(pp.workAreas)
+          ? (pp.workAreas as string[])
+          : Array.isArray(record.helperWorkAreas)
+            ? (record.helperWorkAreas as string[])
+            : [];
+        if (!workAreas.length) continue;
+        if (!partnerWorkAreasMatchLocationKeys(workAreas, locationKeys)) continue;
+      }
+      if (location?.requiredPartnerUid && uid !== location.requiredPartnerUid) continue;
+      eligiblePartners.push({
+        uid,
+        workShifts: Array.isArray(pp.workShifts) ? (pp.workShifts as string[]) : [],
+        gender: normalizePartnerGender(record.gender ?? pp.gender) || undefined,
+        occupiedIntervals: [],
+      });
+    }
   }
 
   if (!eligiblePartners.length) {

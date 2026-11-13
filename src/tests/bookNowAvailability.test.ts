@@ -135,6 +135,41 @@ async function runTests() {
       await BookNowAvailabilityService.getAvailabilityForAddress({});
     assert.equal(pincodeMappedAreaAvailability.isEnabled, true);
     assert.equal(pincodeMappedAreaAvailability.locationType, 'area');
+
+    const unrelatedAreaId = new mongoose.Types.ObjectId();
+    const pincodeAreaId = new mongoose.Types.ObjectId();
+    resolvedAddress.areaId = unrelatedAreaId;
+    Object.defineProperty(LocationPincodeAreaMap, 'find', {
+      configurable: true,
+      value: () => ({
+        select: () => ({
+          lean: async () => [{ areaId: pincodeAreaId, isPrimary: true }],
+        }),
+      }),
+    });
+    Object.defineProperty(LocationArea, 'findOne', {
+      configurable: true,
+      value: () => ({
+        select: () => ({
+          lean: async () => ({ _id: pincodeAreaId }),
+        }),
+      }),
+    });
+    Object.defineProperty(BookNowLocationAvailability, 'find', {
+      configurable: true,
+      value: () => ({
+        lean: async () => [{
+          locationType: 'area',
+          locationId: pincodeAreaId,
+          isEnabled: true,
+        }],
+      }),
+    });
+    const unrelatedResolvedAreaAvailability =
+      await BookNowAvailabilityService.getAvailabilityForAddress({});
+    assert.equal(unrelatedResolvedAreaAvailability.isEnabled, true);
+    assert.equal(unrelatedResolvedAreaAvailability.locationType, 'area');
+    assert.equal(unrelatedResolvedAreaAvailability.locationId, String(pincodeAreaId));
   } finally {
     LocationPricingService.resolveAddress = originalResolveAddress;
     if (originalFindDescriptor) {
