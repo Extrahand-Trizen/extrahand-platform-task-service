@@ -335,6 +335,7 @@ export async function findQcOrdersForPartner(
           'in_progress',
           'review',
           'completed',
+          'DELIVERED',
           'cancelled',
           'PAID',
           'open',
