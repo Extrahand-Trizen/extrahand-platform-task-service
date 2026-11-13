@@ -21,6 +21,7 @@ import {
   isBookNowOfferBeforeScheduledStart,
 } from '../services/BookNowAutoAssignService';
 import { undispatchedBookNowOfferFilter } from '../utils/bookNowOfferState';
+import { partnerOfferTaskMongoFilter } from '../utils/partnerOfferTasks';
 
 /**
  * Server-side visibility guard for the Book Now partner feed.
@@ -859,14 +860,14 @@ export class PartnerBookNowController {
 
   /**
    * GET /api/v1/book-now/my-offers
-   * Returns only open Book Now offers addressed to the authenticated partner.
+   * Returns only open partner offers addressed to the authenticated partner.
    */
   static async getMyOffers(req: AuthenticatedRequest, res: Response): Promise<void> {
     const uid = req.user?.uid || (req.headers['x-user-id'] as string | undefined);
     if (!uid) throw new BadRequestError('Partner UID required');
 
     const tasks = await Task.find({
-      bookingSource: 'book_now',
+      ...partnerOfferTaskMongoFilter(),
       status: 'open',
       'assignmentOffer.recipientUids': uid,
     })
@@ -930,7 +931,7 @@ export class PartnerBookNowController {
 
   /**
    * GET /api/v1/book-now/my-leads
-   * Returns the partner's currently active Book Now tasks.
+   * Returns the partner's currently active Book Now and Hourly offer tasks.
    */
   static async getMyLeads(req: AuthenticatedRequest, res: Response): Promise<void> {
     // Gateway sends X-User-Id. Auth middleware populates req.user.uid from it.
@@ -957,8 +958,10 @@ export class PartnerBookNowController {
 
     const [tasks, qcOrders] = await Promise.all([
       Task.find({
-        bookingSource: 'book_now',
-        $or: [{ partnerId: partnerOid }, { assigneeId: partnerOid }],
+        $and: [
+          partnerOfferTaskMongoFilter(),
+          { $or: [{ partnerId: partnerOid }, { assigneeId: partnerOid }] },
+        ],
         status: { $in: ['assigned', 'started', 'in_progress', 'review', 'completed', 'cancelled'] },
       })
         .sort({ partnerAcceptedAt: -1 })
@@ -1120,7 +1123,7 @@ export class PartnerBookNowController {
     if (newStatus === 'cancelled') {
       const task = await Task.findOne({
         _id: new mongoose.Types.ObjectId(String(id)),
-        bookingSource: 'book_now',
+        ...partnerOfferTaskMongoFilter(),
         partnerId: partnerOid,
         status: 'assigned',
       }).lean();
@@ -1202,7 +1205,7 @@ export class PartnerBookNowController {
       const reopened = await Task.findOneAndUpdate(
         {
           _id: new mongoose.Types.ObjectId(String(id)),
-          bookingSource: 'book_now',
+          ...partnerOfferTaskMongoFilter(),
           partnerId: partnerOid,
           status: 'assigned',
         },
@@ -1296,7 +1299,7 @@ export class PartnerBookNowController {
       ? await Task.findOneAndUpdate(
           {
             _id: new mongoose.Types.ObjectId(String(id)),
-            bookingSource: 'book_now',
+            ...partnerOfferTaskMongoFilter(),
             partnerId: partnerOid,           // Only the assigned partner can update
             status: { $ne: 'completed' },    // Prevent double-completion
           },
@@ -1491,8 +1494,10 @@ export class PartnerBookNowController {
 
     const task = await Task.findOne({
       _id: new mongoose.Types.ObjectId(id),
-      bookingSource: 'book_now',
-      $or: [{ partnerId: partnerOid }, { partnerUid: uid }],
+      $and: [
+        partnerOfferTaskMongoFilter(),
+        { $or: [{ partnerId: partnerOid }, { partnerUid: uid }] },
+      ],
     });
 
     if (!task) {
@@ -1571,9 +1576,9 @@ export class PartnerBookNowController {
    */
   static async getUnacknowledgedLeads(_req: AuthenticatedRequest, res: Response): Promise<void> {
     const tasks = await Task.find({
-      bookingSource: 'book_now',
+      ...partnerOfferTaskMongoFilter(),
       status: 'assigned',
-      $or: [{ confirmed: { $ne: true } }, { confirmed: false }],
+      $and: [{ $or: [{ confirmed: { $ne: true } }, { confirmed: false }] }],
       partnerAcceptedAt: { $in: [null] },
     })
       .sort({ assignedAt: -1, createdAt: -1 })

@@ -3,6 +3,7 @@ import Task, { ITask } from '../models/Task';
 import logger from '../config/logger';
 import { BookNowAutoAssignService } from '../services/BookNowAutoAssignService';
 import { undispatchedBookNowOfferFilter } from '../utils/bookNowOfferState';
+import { partnerOfferTaskMongoFilter } from '../utils/partnerOfferTasks';
 
 export class BookNowOfferScheduler {
   private static isInitialized = false;
@@ -26,13 +27,15 @@ export class BookNowOfferScheduler {
     try {
       const now = new Date();
       const undispatchedTasks = await Task.find({
-        bookingSource: 'book_now',
+        $and: [
+          partnerOfferTaskMongoFilter(),
+          undispatchedBookNowOfferFilter(),
+        ],
         status: 'open',
         assigneeId: null,
         assigneeUid: null,
         partnerId: null,
         partnerUid: null,
-        ...undispatchedBookNowOfferFilter(),
       })
         .sort({ createdAt: 1 })
         .limit(250);
@@ -62,7 +65,7 @@ export class BookNowOfferScheduler {
       }
 
       const timedOutTasks = await Task.find({
-        bookingSource: 'book_now',
+        ...partnerOfferTaskMongoFilter(),
         status: 'open',
         assigneeId: null,
         assigneeUid: null,
@@ -87,10 +90,18 @@ export class BookNowOfferScheduler {
       }
 
       const activeOfferTasks = await Task.find({
-        bookingSource: 'book_now',
+        ...partnerOfferTaskMongoFilter(),
         status: 'open',
         'assignmentOffer.stage': { $in: ['preferred', 'area_rule', 'all'] },
-        'assignmentOffer.recipientUids.0': { $exists: true },
+        $or: [
+          { 'assignmentOffer.recipientUids.0': { $exists: true } },
+          {
+            'assignmentOffer.expiresAt': {
+              $type: 'date',
+              $lte: now,
+            },
+          },
+        ],
       })
         .select('_id')
         .limit(250)
@@ -114,7 +125,7 @@ export class BookNowOfferScheduler {
 
       const escalated = await Task.updateMany(
         {
-          bookingSource: 'book_now',
+          ...partnerOfferTaskMongoFilter(),
           status: 'open',
           'dispatchProgress.supportEscalation.status': 'pending',
           'dispatchProgress.supportEscalation.dueAt': { $lte: now },

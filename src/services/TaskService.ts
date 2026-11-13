@@ -36,7 +36,8 @@ import { RecurringVisitService } from './RecurringVisitService';
 import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { recurringVisitConfig } from '../config/recurringVisitConfig';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
-import { BookNowAutoAssignService, isHourlyTask } from './BookNowAutoAssignService';
+import { BookNowAutoAssignService } from './BookNowAutoAssignService';
+import { isPartnerOfferTask } from '../utils/partnerOfferTasks';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
@@ -490,6 +491,9 @@ function buildMarketplaceBrowseClause(): Record<string, unknown> {
           { bookingOrderId: null },
           { bookingOrderId: '' },
         ],
+      },
+      {
+        'assignmentOffer.stage': { $nin: ['preferred', 'area_rule', 'all'] },
       },
     ],
   };
@@ -1266,7 +1270,7 @@ export class TaskService {
     const isTerminalTask = ['completed', 'cancelled'].includes(
       String(task.status || '').toLowerCase(),
     );
-    if (task.bookingSource === 'book_now' && !isTerminalTask) {
+    if (isPartnerOfferTask(task) && !isTerminalTask) {
       try {
         const { BookNowAutoAssignService } = await import('./BookNowAutoAssignService');
         const isUnassignedOpenTask =
@@ -1297,6 +1301,10 @@ export class TaskService {
           task,
           mergedDispatchLogs,
           eligiblePartners,
+        );
+        task.dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+          task.dispatchProgress,
+          task.dispatchLogs,
         );
       } catch (err) {
         logger.warn('Failed to build task-detail eligible partner list', { taskId, error: err });
@@ -1767,17 +1775,11 @@ export class TaskService {
 
     const taskRecord = task.toObject() as ITask;
 
-    if (taskRecord.bookingSource === 'book_now') {
+    if (isPartnerOfferTask(taskRecord)) {
       try {
         await BookNowAutoAssignService.dispatchBookNowOffers(taskRecord);
       } catch (dispatchErr) {
         logger.error('[BookNowOfferDispatch] Offer dispatch error in TaskService:', dispatchErr);
-      }
-    } else if (isHourlyTask(taskRecord)) {
-      try {
-        await BookNowAutoAssignService.autoAssign(taskRecord);
-      } catch (autoAssignErr) {
-        logger.error('[BookNowAutoAssign] ❌ Auto-assignment error in TaskService:', autoAssignErr);
       }
     }
 

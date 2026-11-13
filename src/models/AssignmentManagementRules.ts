@@ -13,6 +13,7 @@ interface PreferredAssignmentPartner {
 
 interface AreaAssignmentRule {
   area: string;
+  category?: string;
   zone: string;
   workTypes: string[];
   preferredPartners: PreferredAssignmentPartner[];
@@ -44,6 +45,7 @@ const PreferredPartnerSchema = new Schema<PreferredAssignmentPartner>(
 const AreaAssignmentRuleSchema = new Schema<AreaAssignmentRule>(
   {
     area: { type: String, required: true },
+    category: { type: String },
     zone: { type: String, default: 'Custom Zone' },
     workTypes: { type: [String], default: ['hourly'] },
     preferredPartners: { type: [PreferredPartnerSchema], default: [] },

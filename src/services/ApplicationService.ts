@@ -28,6 +28,7 @@ import { isRecurringVisitPlanTask } from "../utils/recurringVisitMeta";
 import { ApplicantProfileSnapshot, ProfileUtils } from "../utils/ProfileUtils";
 import { NegotiationUtils } from "../utils/NegotiationUtils";
 import { notifyBookNowAssignment } from "./AssignmentService";
+import { isHourlyPartnerOfferTask } from "../utils/partnerOfferTasks";
 
 export class ApplicationService {
   /**
@@ -62,8 +63,8 @@ export class ApplicationService {
         throw new BadRequestError("Task is not open for applications");
       }
 
-      if (task.bookingSource === "book_now") {
-        throw new BadRequestError("This task uses Book Now assignment — bidding is not available");
+      if (task.bookingSource === "book_now" || isHourlyPartnerOfferTask(task)) {
+        throw new BadRequestError("This work uses partner offers — bidding is not available");
       }
 
       // Compare ObjectIds
@@ -808,8 +809,8 @@ export class ApplicationService {
 
     // Validate status transition
     if (status === "accepted") {
-      if (task.bookingSource === "book_now") {
-        throw new BadRequestError("Book Now tasks are assigned by operations — cannot accept bids");
+      if (task.bookingSource === "book_now" || isHourlyPartnerOfferTask(task)) {
+        throw new BadRequestError("This work is assigned through partner offers — cannot accept bids");
       }
       const negotiationStatus = application.negotiation?.status || "none";
       if (negotiationStatus === "countered_by_poster") {

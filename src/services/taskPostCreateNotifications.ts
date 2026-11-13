@@ -15,6 +15,7 @@ import {
   resolvePosterUid,
   withHelperAlertData,
 } from '../utils/helperNotificationRecipients';
+import { isPartnerOfferTask } from '../utils/partnerOfferTasks';
 
 export type PostCreateNotificationContext = {
   uid?: string;
@@ -477,7 +478,7 @@ export async function runPostCreateNotifications(
       // Auto-assign runs in BookingService.scheduleBookNowAutoAssign after payment materialize.
     }
 
-    if (task.bookingSource === 'book_now') {
+    if (isPartnerOfferTask(task)) {
       return;
     }
 

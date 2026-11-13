@@ -1,18 +1,149 @@
 import assert from 'node:assert/strict';
 import {
+  BookNowAutoAssignService,
   buildOrderedWorkAreasForDispatch,
+  canStartAllOfferStage,
   filterTeamPostedOfferTiers,
   filterTeamPostedRecipientUids,
   getBookNowScheduledStartAt,
   getAllBookNowOfferRecipients,
   getBookNowNotificationTiers,
   getFirstAvailableOfferStage,
+  hasAcceptedPreferredOffer,
   getPartnerCategoryValues,
   getPartnerWorkAreaValues,
+  isConfiguredOfferPartner,
+  isApplicableAreaRuleForTask,
   isEligiblePartnerForBookNowTask,
   isBookNowOfferBeforeScheduledStart,
   mergeActiveOfferRecipients,
+  IDispatchAreaLog,
 } from '../services/BookNowAutoAssignService';
+import { ITask } from '../models/Task';
+import {
+  isHourlyPartnerOfferTask,
+  isPartnerOfferTask,
+  partnerOfferTaskMongoFilter,
+} from '../utils/partnerOfferTasks';
+
+assert.equal(
+  isHourlyPartnerOfferTask({ categoryLabel: 'Hourly Based' }),
+  true,
+  'Hourly Based tasks must use partner offers',
+);
+assert.equal(
+  isConfiguredOfferPartner(
+    {
+      uid: 'firebase-partner-uid',
+      profileId: 'mongo-profile-id',
+      name: 'Karthik',
+      distKm: 1,
+      workArea: 'Siddipet',
+      workAreaDistKm: 0,
+    },
+    { uid: 'mongo-profile-id', profileId: 'mongo-profile-id' },
+  ),
+  true,
+  'Configured preferred partners must match by saved profile ID as well as Firebase UID',
+);
+const staleDispatchProgress: NonNullable<ITask['dispatchProgress']> = {
+  currentStage: 'all',
+  startedAt: new Date('2026-11-13T10:00:00.000Z'),
+  stages: [
+    { stage: 'preferred', status: 'skipped', eligibleCount: 0, notifiedCount: 0, acceptedCount: 0, rejectedCount: 0, timedOutCount: 0 },
+    { stage: 'area_rule', status: 'skipped', eligibleCount: 0, notifiedCount: 0, acceptedCount: 0, rejectedCount: 0, timedOutCount: 0 },
+    { stage: 'all', status: 'in_progress', eligibleCount: 15, notifiedCount: 1, acceptedCount: 0, rejectedCount: 0, timedOutCount: 0 },
+  ],
+  supportEscalation: {
+    status: 'pending',
+    dueAt: new Date('2026-11-13T11:00:00.000Z'),
+  },
+};
+const refreshedDispatchLogs: IDispatchAreaLog[] = [{
+  area: 'Siddipet',
+  distanceKm: 0,
+  matchedCategoryCount: 3,
+  eligibleCount: 3,
+  notifiedCount: 1,
+  candidates: [
+    { partnerUid: 'preferred-1', name: 'Preferred 1', status: 'eligible', dispatchStage: 'area_rule' },
+    { partnerUid: 'preferred-2', name: 'Preferred 2', status: 'eligible', dispatchStage: 'area_rule' },
+    { partnerUid: 'other-1', name: 'Other 1', status: 'eligible', dispatchStage: 'all', notifiedAt: new Date() },
+  ],
+}];
+const refreshedDispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+  staleDispatchProgress,
+  refreshedDispatchLogs,
+);
+assert.equal(
+  refreshedDispatchProgress?.stages.find(({ stage }) => stage === 'area_rule')?.eligibleCount,
+  2,
+  'Task details must refresh preferred-stage counts from the recalculated partner list',
+);
+assert.equal(
+  refreshedDispatchProgress?.stages.find(({ stage }) => stage === 'all')?.eligibleCount,
+  1,
+  'Refreshing counts must not include preferred partners in the other-eligible stage',
+);
+assert.equal(
+  refreshedDispatchProgress?.currentStage,
+  'all',
+  'Refreshing task-detail counts must preserve the active dispatch stage',
+);
+assert.equal(
+  isPartnerOfferTask({ bookingSource: 'marketplace', budget: { type: 'hourly' } }),
+  true,
+  'Hourly marketplace tasks must use partner offers',
+);
+assert.equal(
+  isPartnerOfferTask({ bookingSource: 'marketplace', budget: { type: 'fixed' } }),
+  false,
+  'Fixed-price marketplace tasks must not enter the partner offer flow',
+);
+assert.ok(
+  JSON.stringify(partnerOfferTaskMongoFilter()).includes('budget.type'),
+  'Scheduler and offer queries must include hourly-budget tasks',
+);
+const siddipetBookNowCleaningTask = {
+  bookingSource: 'book_now',
+  category: 'cleaning',
+  categorySlug: 'full-house',
+  budget: { type: 'hourly' },
+  location: { taskArea: 'Siddipet', city: 'Siddipet' },
+} as any;
+assert.equal(
+  isApplicableAreaRuleForTask(siddipetBookNowCleaningTask, {
+    area: 'Siddipet',
+    category: 'cleaning',
+    workTypes: ['book_now'],
+  }),
+  true,
+  'Hourly-priced Book Now cleaning must match its Siddipet Book Now preference rule',
+);
+assert.equal(
+  isApplicableAreaRuleForTask(siddipetBookNowCleaningTask, {
+    area: 'Siddipet',
+    category: 'plumbing',
+    workTypes: ['book_now'],
+  }),
+  false,
+  'Book Now preferences configured for a different category must not be used',
+);
+assert.equal(
+  isApplicableAreaRuleForTask(
+    {
+      ...siddipetBookNowCleaningTask,
+      location: { taskArea: 'Kukatpally', city: 'Hyderabad' },
+    },
+    {
+      area: 'Hyderabad',
+      category: 'cleaning',
+      workTypes: ['book_now'],
+    },
+  ),
+  true,
+  'City-level preferences must apply when the work area is a neighborhood in that city',
+);
 
 const siddipetTask = {
   location: {
@@ -127,17 +258,110 @@ assert.equal(
     area_rule: [partner('area-rule-partner', '2222222222')],
     all: [partner('other-partner', '3333333333')],
   }),
-  'preferred',
-  'Preferred partners must be the first offer stage when available',
+  'area_rule',
+  'Area-rule partners must be notified before other eligible partners',
 );
 assert.equal(
   getFirstAvailableOfferStage({
-    preferred: [],
-    area_rule: [partner('area-rule-partner', '2222222222')],
+    preferred: [partner('preferred-partner', '1111111111')],
+    area_rule: [],
     all: [partner('other-partner', '3333333333')],
   }),
+  'all',
+  'Other eligible partners are the fallback when no area-rule partners are eligible',
+);
+const preferredNotAllowlisted = {
+  preferred: [],
+  area_rule: [partner('preferred-not-allowlisted', '1111111111')],
+  all: [partner('team-allowlisted-other', '9999999999')],
+};
+const teamFilteredPreferred = getBookNowNotificationTiers(
+  preferredNotAllowlisted,
+  true,
+  ['9999999999'],
+);
+assert.deepStrictEqual(
+  teamFilteredPreferred.area_rule,
+  [],
+  'Team-posted preferred partners outside the allowlist must not receive notifications',
+);
+assert.equal(
+  getFirstAvailableOfferStage(preferredNotAllowlisted),
   'area_rule',
-  'Area-rule partners are first when no preferred partners are eligible',
+  'The preferred acceptance window must start even when team filtering leaves no preferred notification recipients',
+);
+const preferredDeadline = new Date('2026-11-13T10:45:00.000Z');
+assert.equal(
+  canStartAllOfferStage(
+    true,
+    preferredDeadline,
+    new Date('2026-11-13T10:44:59.999Z'),
+  ),
+  false,
+  'Other eligible partners must remain blocked before the preferred window expires',
+);
+assert.equal(
+  canStartAllOfferStage(true, preferredDeadline, preferredDeadline),
+  true,
+  'Other eligible partners may be notified once the preferred window expires',
+);
+assert.equal(
+  canStartAllOfferStage(false, undefined, new Date('2026-11-13T10:00:00.000Z')),
+  true,
+  'Other eligible partners remain an immediate fallback when no preferred partners are eligible',
+);
+assert.equal(
+  hasAcceptedPreferredOffer([
+    {
+      area: 'Kareemabad',
+      distanceKm: 0,
+      matchedCategoryCount: 1,
+      eligibleCount: 1,
+      notifiedCount: 1,
+      candidates: [
+        {
+          partnerUid: 'accepted-preferred',
+          name: 'Preferred Partner',
+          status: 'eligible',
+          dispatchStage: 'area_rule',
+          responseStatus: 'accepted',
+        },
+      ],
+    },
+  ]),
+  true,
+  'An accepted preferred offer must prevent the later notification stage',
+);
+assert.equal(
+  hasAcceptedPreferredOffer([
+    {
+      area: 'Kareemabad',
+      distanceKm: 0,
+      matchedCategoryCount: 1,
+      eligibleCount: 1,
+      notifiedCount: 1,
+      candidates: [
+        {
+          partnerUid: 'accepted-other',
+          name: 'Other Partner',
+          status: 'eligible',
+          dispatchStage: 'all',
+          responseStatus: 'accepted',
+        },
+      ],
+    },
+  ]),
+  false,
+  'An acceptance from another stage is not a preferred acceptance',
+);
+assert.equal(
+  getFirstAvailableOfferStage({
+    preferred: [partner('preferred-partner', '1111111111')],
+    area_rule: [],
+    all: [],
+  }),
+  undefined,
+  'The global preferred-partner list must not start a Book Now offer stage',
 );
 const scheduledTask = {
   scheduledDate: new Date('2026-10-27T00:00:00.000+05:30'),

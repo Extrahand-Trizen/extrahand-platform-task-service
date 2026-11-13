@@ -26,10 +26,17 @@ import {
   hasBookNowOfferStarted,
   undispatchedBookNowOfferFilter,
 } from '../utils/bookNowOfferState';
+import {
+  isHourlyPartnerOfferTask,
+  isPartnerOfferTask,
+  partnerOfferTaskMongoFilter,
+} from '../utils/partnerOfferTasks';
 
 const OFFER_STAGES = ['preferred', 'area_rule', 'all'] as const;
 type OfferStage = (typeof OFFER_STAGES)[number];
 type DispatchCurrentStage = OfferStage | 'assigned' | 'closed';
+const OFFER_ACCEPTANCE_WINDOW_MINUTES = 45;
+const OFFER_ACCEPTANCE_WINDOW_MS = OFFER_ACCEPTANCE_WINDOW_MINUTES * 60 * 1000;
 const SUPPORT_ESCALATION_MS = 2 * 60 * 60 * 1000;
 
 export function getBookNowScheduledStartAt(task: ITask): Date | null {
@@ -217,6 +224,50 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
 
 function normalizeArea(s: string): string {
   return String(s).toLowerCase().replace(/[-_\s]+/g, '');
+}
+
+export function isApplicableAreaRuleForTask(
+  task: ITask,
+  rule: {
+    area: string;
+    category?: string;
+    workTypes?: string[];
+    active?: boolean;
+  },
+): boolean {
+  const taskAreas = Array.from(new Set([
+    task.location?.taskArea,
+    (task.location as any)?.locality,
+    task.location?.city,
+  ]
+    .map((area) => normalizeArea(String(area || '')))
+    .filter(Boolean)));
+  const ruleArea = normalizeArea(rule.area);
+  const workTypes = Array.isArray(rule.workTypes) ? rule.workTypes : [];
+  const isBookNow = task.bookingSource === 'book_now';
+  const isHourly = isHourlyTask(task);
+  const homeCleaning = isHomeCleaningTask(task);
+  const appliesToWorkType =
+    workTypes.includes('all') ||
+    (isBookNow && workTypes.includes('book_now')) ||
+    (!isBookNow &&
+      (isHourly || homeCleaning) &&
+      workTypes.includes('hourly'));
+  const matchesCategory =
+    !rule.category ||
+    partnerCategoryMatchesBookNowTask([rule.category], task);
+
+  return (
+    rule.active !== false &&
+    appliesToWorkType &&
+    matchesCategory &&
+    Boolean(ruleArea) &&
+    taskAreas.some((taskArea) =>
+      ruleArea === taskArea ||
+      ruleArea.includes(taskArea) ||
+      taskArea.includes(ruleArea),
+    )
+  );
 }
 
 export function getPartnerCategoryValues(
@@ -582,10 +633,48 @@ export interface EligiblePartner {
   shiftTiming?: string;
 }
 
+export function isConfiguredOfferPartner(
+  eligiblePartner: EligiblePartner,
+  configuredPartner: { uid?: string; profileId?: string },
+): boolean {
+  const eligibleIds = new Set(
+    [eligiblePartner.uid, eligiblePartner.profileId]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean),
+  );
+  return [configuredPartner.uid, configuredPartner.profileId]
+    .map((value) => String(value || '').trim())
+    .some((value) => value && eligibleIds.has(value));
+}
+
 export function getFirstAvailableOfferStage(
   tiers: Record<OfferStage, EligiblePartner[]>,
 ): OfferStage | undefined {
-  return OFFER_STAGES.find((stage) => tiers[stage].length > 0);
+  return (['area_rule', 'all'] as const).find((stage) => tiers[stage].length > 0);
+}
+
+export function canStartAllOfferStage(
+  hasEligiblePreferredPartners: boolean,
+  preferredStageExpiresAt: Date | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (!hasEligiblePreferredPartners) return true;
+  return Boolean(
+    preferredStageExpiresAt &&
+      preferredStageExpiresAt.getTime() <= now.getTime(),
+  );
+}
+
+export function hasAcceptedPreferredOffer(
+  dispatchLogs: IDispatchAreaLog[],
+): boolean {
+  return dispatchLogs.some((area) =>
+    area.candidates.some(
+      (candidate) =>
+        candidate.dispatchStage === 'area_rule' &&
+        candidate.responseStatus === 'accepted',
+    ),
+  );
 }
 
 export function getAllBookNowOfferRecipients(
@@ -690,21 +779,7 @@ function resolvePreferredHelperGender(task: ITask): 'male' | 'female' | null {
 }
 
 export function isHourlyTask(task: ITask): boolean {
-  const slug = String((task as any).categorySlug || '').trim().toLowerCase();
-  const cat = String(task.category || '').trim().toLowerCase();
-  const label = String((task as any).categoryLabel || '').trim().toLowerCase();
-  const budgetType = String(task.budget?.type || '').trim().toLowerCase();
-  const hourlyFlag = Boolean((task as any).hourlyHelper);
-  return (
-    slug === 'hourly-helper' ||
-    slug === 'hourly-based' ||
-    cat === 'hourly-helper' ||
-    cat === 'hourly-based' ||
-    label === 'hourly based' ||
-    label === 'hourly helper' ||
-    budgetType === 'hourly' ||
-    hourlyFlag
-  );
+  return isHourlyPartnerOfferTask(task);
 }
 
 function partnerMatchesPreferredGender(
@@ -748,33 +823,9 @@ export class BookNowAutoAssignService {
     const rules = await AssignmentManagementRules.findOne({
       key: 'assignment_management',
     }).lean();
-    const taskArea = normalizeArea(
-      String(
-        task.location?.taskArea ||
-          (task.location as any)?.locality ||
-          task.location?.city ||
-          '',
-      ),
+    return (rules?.areaRules || []).filter((rule) =>
+      isApplicableAreaRuleForTask(task, rule),
     );
-    const hourly = isHourlyTask(task);
-    const homeCleaning = isHomeCleaningTask(task);
-
-    return (rules?.areaRules || []).filter((rule) => {
-      const ruleArea = normalizeArea(rule.area);
-      const workTypes = Array.isArray(rule.workTypes) ? rule.workTypes : [];
-      const appliesToWorkType =
-        workTypes.includes('all') ||
-        ((hourly || homeCleaning) && workTypes.includes('hourly')) ||
-        (!hourly && workTypes.includes('book_now'));
-      return (
-        rule.active !== false &&
-        appliesToWorkType &&
-        Boolean(taskArea) &&
-        (ruleArea === taskArea ||
-          ruleArea.includes(taskArea) ||
-          taskArea.includes(ruleArea))
-      );
-    });
   }
 
   static async findEligiblePartners(task: ITask): Promise<EligiblePartner[]> {
@@ -1040,8 +1091,8 @@ export class BookNowAutoAssignService {
       candidates: area.candidates.map((candidate, candidateIndex) => ({
         ...candidate,
         dispatchStage:
-          dispatchLogs[areaIndex]?.candidates[candidateIndex]?.dispatchStage ||
-          candidate.dispatchStage,
+          candidate.dispatchStage ||
+          dispatchLogs[areaIndex]?.candidates[candidateIndex]?.dispatchStage,
       })),
     }));
   }
@@ -1054,45 +1105,46 @@ export class BookNowAutoAssignService {
     tiers: Record<OfferStage, EligiblePartner[]>;
     configuredStageByUid: Map<string, OfferStage>;
   }> {
-    const rules = await AssignmentManagementRules.findOne({
-      key: 'assignment_management',
-    }).lean();
     const eligibleByUid = new Map(eligiblePartners.map((partner) => [partner.uid, partner]));
-    const preferredUids = [
-      String(preferredPartnerUid || '').trim(),
-      ...(rules?.preferredPartners || [])
-        .filter((partner) => partner.active !== false)
-        .map((partner) => String(partner.uid || '').trim()),
-    ].filter((uid, index, uids) => uid && uids.indexOf(uid) === index);
-
     const areaRules = await BookNowAutoAssignService.findApplicableAreaRules(task);
-    const areaRuleUids = areaRules.flatMap((rule) => rule.preferredPartners || [])
+    const configuredAreaPartners = areaRules
+      .flatMap((rule) => rule.preferredPartners || [])
       .filter((partner) => partner.active !== false)
-      .map((partner) => String(partner.uid || '').trim());
-    const allPreferredUids = new Set(preferredUids);
-    const allConfiguredUids = new Set([...preferredUids, ...areaRuleUids]);
+      .filter((partner) => partner.uid || partner.profileId);
+    const areaRulePartners = eligiblePartners.filter((eligiblePartner) =>
+      configuredAreaPartners.some((configuredPartner) =>
+        isConfiguredOfferPartner(eligiblePartner, configuredPartner),
+      ),
+    );
+    const areaRuleUids = Array.from(new Set(areaRulePartners.map((partner) => partner.uid)));
+    const areaRuleUidSet = new Set(areaRuleUids);
+    const requestedPreferredUid = String(preferredPartnerUid || '').trim();
     const configuredStageByUid = new Map<string, OfferStage>();
-    for (const uid of preferredUids) configuredStageByUid.set(uid, 'preferred');
-    for (const uid of areaRuleUids) {
-      if (!allPreferredUids.has(uid)) configuredStageByUid.set(uid, 'area_rule');
+    for (const partner of configuredAreaPartners) {
+      for (const identifier of [partner.uid, partner.profileId]) {
+        const normalizedIdentifier = String(identifier || '').trim();
+        if (normalizedIdentifier) configuredStageByUid.set(normalizedIdentifier, 'area_rule');
+      }
+    }
+
+    const otherEligiblePartners = eligiblePartners.filter(
+      (partner) => !areaRuleUidSet.has(partner.uid),
+    );
+    if (requestedPreferredUid) {
+      otherEligiblePartners.sort(
+        (first, second) =>
+          Number(second.uid === requestedPreferredUid) -
+          Number(first.uid === requestedPreferredUid),
+      );
     }
 
     return {
       tiers: {
-        preferred: preferredUids
-          .map((uid) => eligibleByUid.get(uid))
-          .filter(
-            (partner): partner is EligiblePartner =>
-              partner !== undefined,
-          ),
+        preferred: [],
         area_rule: areaRuleUids
-          .filter((uid) => !allPreferredUids.has(uid))
           .map((uid) => eligibleByUid.get(uid))
-          .filter(
-            (partner): partner is EligiblePartner =>
-              partner !== undefined,
-          ),
-        all: eligiblePartners.filter((partner) => !allConfiguredUids.has(partner.uid)),
+          .filter((partner): partner is EligiblePartner => partner !== undefined),
+        all: otherEligiblePartners,
       },
       configuredStageByUid,
     };
@@ -1111,10 +1163,13 @@ export class BookNowAutoAssignService {
       ...area,
       candidates: area.candidates.map((candidate) => ({
         ...candidate,
-        ...(!candidate.dispatchStage &&
-        candidate.partnerUid &&
-        stageByUid.has(candidate.partnerUid)
-          ? { dispatchStage: stageByUid.get(candidate.partnerUid) }
+        ...((stageByUid.get(String(candidate.partnerUid || '')) ||
+          stageByUid.get(String(candidate.partnerId || '')))
+          ? {
+              dispatchStage:
+                stageByUid.get(String(candidate.partnerUid || '')) ||
+                stageByUid.get(String(candidate.partnerId || '')),
+            }
           : {}),
         responseStatus: candidate.responseStatus,
       })),
@@ -1180,7 +1235,7 @@ export class BookNowAutoAssignService {
     });
   }
 
-  private static refreshDispatchProgressCounts(
+  static refreshDispatchProgressCounts(
     progress: NonNullable<ITask['dispatchProgress']> | undefined,
     dispatchLogs: IDispatchAreaLog[],
   ): NonNullable<ITask['dispatchProgress']> | undefined {
@@ -1272,7 +1327,7 @@ export class BookNowAutoAssignService {
     return {
       currentStage,
       startedAt: previous?.startedAt || now,
-      acceptanceWindowMinutes: 30,
+      acceptanceWindowMinutes: OFFER_ACCEPTANCE_WINDOW_MINUTES,
       stages,
       assignedPartnerName: previous?.assignedPartnerName,
       assignedPartnerUid: previous?.assignedPartnerUid,
@@ -1336,7 +1391,7 @@ export class BookNowAutoAssignService {
         category: 'taskUpdates',
         recipients: recipientUids,
         entity: { type: 'task', id: String(task._id) },
-        title: 'New Book Now work offer',
+        title: 'New work offer',
         body: `${task.title || 'A new work'} is available.`,
         skipWhatsApp: true,
         data: {
@@ -1344,8 +1399,9 @@ export class BookNowAutoAssignService {
           title: task.title,
           category: task.category,
           categoryLabel: (task as any).categoryLabel || task.category,
-          bookingSource: 'book_now',
-          bookNowOffer: true,
+          bookingSource: task.bookingSource || 'marketplace',
+          partnerWorkOffer: true,
+          bookNowOffer: task.bookingSource === 'book_now',
           action: 'book_now_offer',
           recipientRole: 'partner',
           offerStage: stage,
@@ -1455,7 +1511,7 @@ export class BookNowAutoAssignService {
       ? expiresAtOverride
       : stage === 'all'
         ? null
-        : new Date(now.getTime() + 30 * 60 * 1000);
+        : new Date(now.getTime() + OFFER_ACCEPTANCE_WINDOW_MS);
     const filteredRecipientUids = await BookNowAutoAssignService.filterTeamPostedRecipientUids(
       task,
       recipients.map((partner) => partner.uid),
@@ -1477,7 +1533,16 @@ export class BookNowAutoAssignService {
       ),
       stage,
     );
-    if (!recipientUids.length) return false;
+    const hasEligiblePreferredCandidates =
+      stage === 'area_rule' &&
+      (task.dispatchLogs || []).some((area) =>
+        area.candidates.some(
+          (candidate) =>
+            candidate.dispatchStage === 'area_rule' &&
+            candidate.status !== 'ineligible',
+        ),
+      );
+    if (!recipientUids.length && !hasEligiblePreferredCandidates) return false;
     const notifiedPartnerUids = [...new Set(previouslyNotifiedUids)];
     let dispatchLogs = BookNowAutoAssignService.updateDispatchCandidateResponses(
       task.dispatchLogs || [],
@@ -1498,19 +1563,24 @@ export class BookNowAutoAssignService {
       now,
       expiresAt || undefined,
     );
+    const currentStageIndex = OFFER_STAGES.indexOf(stage);
     for (const progressStage of dispatchProgress.stages) {
       if (progressStage.stage === stage) continue;
-      if (OFFER_STAGES.indexOf(progressStage.stage) < OFFER_STAGES.indexOf(stage)) {
+      const progressStageIndex = OFFER_STAGES.indexOf(progressStage.stage);
+      if (progressStageIndex < currentStageIndex) {
         if (progressStage.eligibleCount > 0) {
           progressStage.status = 'completed';
           progressStage.completedAt ||= now;
+        } else {
+          progressStage.status = 'skipped';
+          progressStage.completedAt ||= now;
         }
-      } else if (
-        progressStage.eligibleCount === 0 ||
-        OFFER_STAGES.indexOf(progressStage.stage) > OFFER_STAGES.indexOf(stage)
-      ) {
+      } else if (progressStage.eligibleCount === 0) {
         progressStage.status = 'skipped';
         progressStage.completedAt ||= now;
+      } else {
+        progressStage.status = 'pending';
+        progressStage.completedAt = undefined;
       }
     }
     const updatedProgress =
@@ -1519,7 +1589,9 @@ export class BookNowAutoAssignService {
     const filter: Record<string, unknown> = {
       _id: taskId,
       status: 'open',
+      assigneeId: null,
       assigneeUid: null,
+      partnerId: null,
       partnerUid: null,
     };
     if (expectedStage) {
@@ -1549,11 +1621,13 @@ export class BookNowAutoAssignService {
       { new: true },
     );
     if (!updated) return false;
-    const deliveredUids = await BookNowAutoAssignService.sendOfferNotification(
-      task,
-      stage,
-      notificationRecipientUids,
-    );
+    const deliveredUids = notificationRecipientUids.length
+      ? await BookNowAutoAssignService.sendOfferNotification(
+          task,
+          stage,
+          notificationRecipientUids,
+        )
+      : [];
     if (deliveredUids.length) {
       await BookNowAutoAssignService.recordOfferNotifications(
         taskId,
@@ -1569,13 +1643,18 @@ export class BookNowAutoAssignService {
         recipientCount: failedRecipientCount,
       });
     }
-    logger.info('[BookNowAutoAssign] Partner offer wave sent', {
-      taskId: String(taskId),
-      stage,
-      recipientCount: notificationRecipientUids.length,
-      recipientUids: notificationRecipientUids,
-      expiresAt,
-    });
+    logger.info(
+      notificationRecipientUids.length
+        ? '[BookNowAutoAssign] Partner offer wave sent'
+        : '[BookNowAutoAssign] Preferred offer window started without notification recipients',
+      {
+        taskId: String(taskId),
+        stage,
+        recipientCount: notificationRecipientUids.length,
+        recipientUids: notificationRecipientUids,
+        expiresAt,
+      },
+    );
     return true;
   }
 
@@ -1623,7 +1702,7 @@ export class BookNowAutoAssignService {
       isTeamPosted,
       excludedPhones,
     );
-    const firstStage = getFirstAvailableOfferStage(notificationTiers);
+    const firstStage = getFirstAvailableOfferStage(tiers);
     const dispatchStartedAt = new Date();
     const dispatchProgress = BookNowAutoAssignService.buildDispatchProgress(
       dispatchLogs,
@@ -1631,7 +1710,7 @@ export class BookNowAutoAssignService {
       firstStage || 'closed',
       dispatchStartedAt,
       firstStage && firstStage !== 'all'
-        ? new Date(dispatchStartedAt.getTime() + 30 * 60 * 1000)
+        ? new Date(dispatchStartedAt.getTime() + OFFER_ACCEPTANCE_WINDOW_MS)
         : undefined,
     );
     const taskWithDispatch = { ...task, dispatchLogs, dispatchProgress } as ITask;
@@ -1639,7 +1718,9 @@ export class BookNowAutoAssignService {
       {
         _id: taskId,
         status: 'open',
+        assigneeId: null,
         assigneeUid: null,
+        partnerId: null,
         partnerUid: null,
         ...undispatchedBookNowOfferFilter(),
       },
@@ -1647,7 +1728,7 @@ export class BookNowAutoAssignService {
     );
 
     if (firstStage) {
-      const recipients = notificationTiers[firstStage];
+      const recipients = tiers[firstStage];
       const installed = await BookNowAutoAssignService.installOfferStage(
         taskId,
         taskWithDispatch,
@@ -1680,7 +1761,9 @@ export class BookNowAutoAssignService {
       {
         _id: taskId,
         status: 'open',
+        assigneeId: null,
         assigneeUid: null,
+        partnerId: null,
         partnerUid: null,
         ...undispatchedBookNowOfferFilter(),
       },
@@ -1732,8 +1815,8 @@ export class BookNowAutoAssignService {
     task: ITask,
     preferredPartnerUid?: string,
   ): Promise<AutoAssignResult> {
-    if (task.bookingSource !== 'book_now') {
-      return { assigned: false, reason: 'Partner offer dispatch is only for Book Now work' };
+    if (!isPartnerOfferTask(task)) {
+      return { assigned: false, reason: 'Partner offer dispatch is only for Book Now or Hourly work' };
     }
     if (task.status !== 'open') {
       return { assigned: false, reason: 'Work is not open for partner offers' };
@@ -1801,6 +1884,10 @@ export class BookNowAutoAssignService {
     if (
       !task ||
       task.status !== 'open' ||
+      task.assigneeId ||
+      task.assigneeUid ||
+      task.partnerId ||
+      task.partnerUid ||
       !task.assignmentOffer ||
       task.assignmentOffer.stage === 'closed'
     ) {
@@ -1816,6 +1903,15 @@ export class BookNowAutoAssignService {
       currentStageIndex >= OFFER_STAGES.length - 1 ||
       !currentOffer.expiresAt ||
       currentOffer.expiresAt > new Date()
+    ) {
+      return false;
+    }
+    const preferredProgress = task.dispatchProgress?.stages.find(
+      (stageProgress) => stageProgress.stage === 'area_rule',
+    );
+    if (
+      hasAcceptedPreferredOffer(task.dispatchLogs || []) ||
+      (preferredProgress?.acceptedCount || 0) > 0
     ) {
       return false;
     }
@@ -1858,7 +1954,7 @@ export class BookNowAutoAssignService {
       );
       const nextStageDeadline = stage === 'all'
         ? null
-        : new Date(Date.now() + 30 * 60 * 1000);
+        : new Date(Date.now() + OFFER_ACCEPTANCE_WINDOW_MS);
       return BookNowAutoAssignService.installOfferStage(
         taskId,
         { ...task, dispatchLogs } as ITask,
@@ -1889,7 +1985,7 @@ export class BookNowAutoAssignService {
     const task = await Task.findById(taskId).lean() as ITask | null;
     if (
       !task ||
-      task.bookingSource !== 'book_now' ||
+      !isPartnerOfferTask(task) ||
       task.status !== 'open' ||
       !isBookNowOfferBeforeScheduledStart(task) ||
       task.assigneeId ||
@@ -1897,7 +1993,7 @@ export class BookNowAutoAssignService {
       task.partnerId ||
       task.partnerUid
     ) {
-      throw new BadRequestError('Only open, unassigned Book Now work can be notified');
+      throw new BadRequestError('Only open, unassigned partner-offer work can be notified');
     }
     const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
     const { tiers, configuredStageByUid } =
@@ -1909,6 +2005,29 @@ export class BookNowAutoAssignService {
       isTeamPosted,
       excludedPhones,
     );
+    if (stage === 'all') {
+      const preferredProgress = task.dispatchProgress?.stages.find(
+        (stageProgress) => stageProgress.stage === 'area_rule',
+      );
+      const hasEligiblePreferredPartners =
+        tiers.area_rule.length > 0 || (preferredProgress?.eligibleCount || 0) > 0;
+      const preferredStageExpiresAt =
+        task.assignmentOffer?.stage === 'area_rule'
+          ? task.assignmentOffer.expiresAt
+          : preferredProgress?.expiresAt;
+      if (
+        hasAcceptedPreferredOffer(task.dispatchLogs || []) ||
+        (preferredProgress?.acceptedCount || 0) > 0 ||
+        !canStartAllOfferStage(
+          hasEligiblePreferredPartners,
+          preferredStageExpiresAt,
+        )
+      ) {
+        throw new BadRequestError(
+          'Other eligible partners can only be notified after the 45-minute preferred-partner window ends without an accepted offer',
+        );
+      }
+    }
     const dispatchLogs = BookNowAutoAssignService.tagDispatchStages(
       BookNowAutoAssignService.mergeEligiblePartnersIntoDispatchLog(
         task,
@@ -2164,7 +2283,7 @@ export class BookNowAutoAssignService {
       const now = new Date();
       const offerFilter = {
         _id: taskId,
-        bookingSource: 'book_now',
+        ...partnerOfferTaskMongoFilter(),
         status: 'open',
         'assignmentOffer.recipientUids': partnerUid,
       };
@@ -2205,7 +2324,7 @@ export class BookNowAutoAssignService {
 
     const task = await Task.findOne({
       _id: taskId,
-      bookingSource: 'book_now',
+      ...partnerOfferTaskMongoFilter(),
       status: 'open',
       'assignmentOffer.recipientUids': partnerUid,
     }).lean() as ITask | null;
@@ -2290,7 +2409,7 @@ export class BookNowAutoAssignService {
     const claimedTask = await Task.findOneAndUpdate(
       {
         _id: task._id,
-        bookingSource: 'book_now',
+        ...partnerOfferTaskMongoFilter(),
         status: 'open',
         assigneeUid: null,
         partnerUid: null,
@@ -3037,14 +3156,14 @@ export class BookNowAutoAssignService {
         category: 'taskUpdates',
         recipients: [partner.uid],
         entity: { type: 'task', id: taskId },
-        title: 'New Book Now Work Assigned!',
+        title: 'New partner work assigned',
         body: `${task.title || categoryLabel} - Tap to view details`,
         data: {
           taskId,
           title: task.title,
           category: task.category,
           categoryLabel,
-          bookingSource: 'book_now',
+          bookingSource: task.bookingSource || 'marketplace',
           eventKey: 'BOOK_NOW_PARTNER_ASSIGNED',
           action: 'assigned',
           recipientRole: 'partner',
@@ -3196,7 +3315,7 @@ export class BookNowAutoAssignService {
     const taskId = String(task._id);
 
     try {
-      if (task.bookingSource === 'book_now') {
+      if (isPartnerOfferTask(task)) {
         return BookNowAutoAssignService.dispatchBookNowOffers(
           task,
           String(options?.preferredPartnerUid || '').trim() || undefined,
