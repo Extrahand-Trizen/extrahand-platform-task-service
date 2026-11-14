@@ -1425,6 +1425,7 @@ export class BookNowAutoAssignService {
         category: 'taskUpdates',
         recipients: recipientUids,
         entity: { type: 'task', id: String(task._id) },
+        eventId: `book_now_offer:${String(task._id)}:${stage}`,
         title: 'New work offer',
         body: `${task.title || 'A new work'} is available.`,
         skipWhatsApp: true,
@@ -2180,12 +2181,15 @@ export class BookNowAutoAssignService {
     }
 
     const notifiedUids = new Set(
-      (task.dispatchLogs || []).flatMap((area) =>
-        area.candidates
-          .filter((candidate) => candidate.notifiedAt)
-          .map((candidate) => candidate.partnerUid)
-          .filter((uid): uid is string => Boolean(uid)),
-      ),
+      [
+        ...(task.assignmentOffer.notifiedPartnerUids || []),
+        ...(task.dispatchLogs || []).flatMap((area) =>
+          area.candidates
+            .filter((candidate) => candidate.notifiedAt)
+            .map((candidate) => candidate.partnerUid)
+            .filter((uid): uid is string => Boolean(uid)),
+        ),
+      ],
     );
     let recipientUids = offer.recipientUids.filter((uid) => !notifiedUids.has(uid));
     const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();

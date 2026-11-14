@@ -11,21 +11,26 @@ async function runTests() {
     entity: { type: 'task' as const, id: '665f1c2e9b1e8a0012345678' },
     title: 'New Book Now work offer',
     body: 'Accept or reject this offer.',
+    eventId: 'book_now_offer:665f1c2e9b1e8a0012345678:preferred',
     data: { taskId: '665f1c2e9b1e8a0012345678', action: 'book_now_offer' },
   };
+  let postedPayload: Record<string, unknown> | undefined;
 
   try {
-    axios.post = (async () =>
-      ({
+    axios.post = (async (_url, requestData) => {
+      postedPayload = requestData as Record<string, unknown>;
+      return ({
         data: {
           success: true,
           data: { sent: 1, failed: 0, deliveredUserIds: ['partner-uid'] },
         },
-      }) as any) as typeof axios.post;
+      }) as any;
+    }) as typeof axios.post;
     assert.deepStrictEqual(
       await NotificationClient.sendWithDeliveryResults(payload),
       ['partner-uid'],
     );
+    assert.strictEqual(postedPayload?.eventId, payload.eventId);
 
     axios.post = (async () =>
       ({
