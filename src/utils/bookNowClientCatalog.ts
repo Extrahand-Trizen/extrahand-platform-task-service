@@ -271,6 +271,7 @@ export const CATALOG_SLUG_TO_PARTNER_CATEGORY_ID: Record<string, string> = {
   'daily-labour-full-day': 'daily_labour',
   // Hourly / personal
   'hourly-helper': 'cleaning',
+  'hourly-based': 'cleaning',
   'personal-assistance': 'professional_services',
   'personal-assistances': 'professional_services',
   'daily-help': 'cleaning',

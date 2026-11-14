@@ -308,6 +308,38 @@ export function getPartnerWorkAreaValues(...sources: unknown[]): string[] {
   return values;
 }
 
+function getPartnerLocationCity(profile: Record<string, unknown>): string {
+  const location = (profile.location || {}) as Record<string, any>;
+  const homeLocation = (profile.homeLocation || {}) as Record<string, any>;
+  const savedAddresses = Array.isArray(profile.savedAddresses)
+    ? (profile.savedAddresses as Array<Record<string, unknown>>)
+    : [];
+  const defaultAddress = savedAddresses.find((address) => address.isDefault) || savedAddresses[0];
+  const city = [
+    location.addressDetails?.city,
+    location.city,
+    homeLocation.addressDetails?.city,
+    homeLocation.city,
+    defaultAddress?.city,
+  ].find((value) => typeof value === 'string' && value.trim());
+
+  return typeof city === 'string' ? city.trim() : '';
+}
+
+function partnerLocationMatchesTaskCity(
+  profile: Record<string, unknown>,
+  task: ITask,
+): boolean {
+  const partnerCity = normalizeArea(getPartnerLocationCity(profile));
+  const taskCity = normalizeArea(String(task.location?.city || '').trim());
+  return Boolean(partnerCity && taskCity && partnerCity === taskCity);
+}
+
+function matchesTaskCityArea(area: string, task: ITask): boolean {
+  const taskCity = normalizeArea(String(task.location?.city || '').trim());
+  return Boolean(taskCity && normalizeArea(area) === taskCity);
+}
+
 function normalizePhone(phone: unknown): string {
   return String(phone || '').replace(/\D/g, '');
 }
@@ -493,10 +525,7 @@ async function resolvePaintingConsultationPreferredPartnerUid(
 }
 
 function partnerMatchesWorkArea(workAreas: string[], areaKey: string): boolean {
-  const normAreas = workAreas.map((a: string) => normalizeArea(a));
-  return normAreas.some(
-    (a: string) => a === areaKey || a.includes(areaKey) || areaKey.includes(a),
-  );
+  return workAreas.some((area) => normalizeArea(area) === areaKey);
 }
 
 function resolvePartnerDistanceKm(
@@ -571,11 +600,12 @@ export function isEligiblePartnerForBookNowTask(
     partnerProfile.workAreas,
     profile.helperWorkAreas,
   );
-  if (!workAreas.length) return false;
+  const partnerHasMatchingWorkArea = workAreas.length > 0 &&
+    buildOrderedWorkAreasForDispatch(task).some(({ area }) =>
+      partnerMatchesWorkArea(workAreas, normalizeArea(area)),
+    );
 
-  return buildOrderedWorkAreasForDispatch(task).some(({ area }) =>
-    partnerMatchesWorkArea(workAreas, normalizeArea(area)),
-  );
+  return partnerHasMatchingWorkArea || partnerLocationMatchesTaskCity(profile, task);
 }
 
 function sortPartnersByDistance(partners: EligiblePartner[]): EligiblePartner[] {
@@ -852,6 +882,7 @@ export class BookNowAutoAssignService {
           helperWorkAreas: 1,
           homeLocation: 1,
           location: 1,
+          savedAddresses: 1,
           'partnerProfile.categories': 1,
           'partnerProfile.skills': 1,
           'partnerProfile.workAreas': 1,
@@ -973,9 +1004,12 @@ export class BookNowAutoAssignService {
           : [];
         if (
           categories.length &&
-          workAreas.length &&
           partnerCategoryMatchesBookNowTask(categories, task) &&
-          partnerMatchesWorkArea(workAreas, areaKey) &&
+          (
+            partnerMatchesWorkArea(workAreas, areaKey) ||
+            (matchesTaskCityArea(workArea.area, task) &&
+              partnerLocationMatchesTaskCity(profile, task))
+          ) &&
           checkTimingMatch(shifts, task)
         ) {
           addPartner(profile, workArea.area, workArea.distKm);
@@ -2594,6 +2628,11 @@ export class BookNowAutoAssignService {
          $or: [
            { 'partnerProfile.workAreas.0': { $exists: true } },
            { 'helperWorkAreas.0': { $exists: true } },
+           { 'location.addressDetails.city': { $exists: true } },
+           { 'location.city': { $exists: true } },
+           { 'homeLocation.addressDetails.city': { $exists: true } },
+           { 'homeLocation.city': { $exists: true } },
+           { 'savedAddresses.city': { $exists: true } },
          ],
        },
        {
@@ -2608,7 +2647,9 @@ export class BookNowAutoAssignService {
            helperWorkAreas: 1,
            homeLocation: 1,
            location: 1,
+           savedAddresses: 1,
            'partnerProfile.categories': 1,
+           'partnerProfile.skills': 1,
            'partnerProfile.workAreas': 1,
            'partnerProfile.status': 1,
            'partnerProfile.onLeave': 1,
@@ -2660,20 +2701,13 @@ export class BookNowAutoAssignService {
       // Find real matching profiles in DB
       for (const p of profiles) {
         const pp = (p.partnerProfile as any) || {};
-        const categories: string[] = Array.isArray(pp.categories) ? pp.categories : [];
-        const workAreas: string[] =
-          isHourly && Array.isArray(p.helperWorkAreas) && (!Array.isArray(pp.workAreas) || pp.workAreas.length === 0)
-            ? (p.helperWorkAreas as string[])
-            : Array.isArray(pp.workAreas)
-            ? pp.workAreas
-            : Array.isArray(p.helperWorkAreas)
-            ? (p.helperWorkAreas as string[])
-            : [];
+        const categories = getPartnerCategoryValues(pp.categories, pp.skills);
+        const workAreas = getPartnerWorkAreaValues(pp.workAreas, p.helperWorkAreas);
 
-        if (!workAreas.length) continue;
-        const normAreas = workAreas.map((a: string) => normalizeArea(a));
-        const areaMatches = normAreas.some((a: string) => a === areaKey || a.includes(areaKey) || areaKey.includes(a));
-        if (!areaMatches) continue;
+        const areaMatches = partnerMatchesWorkArea(workAreas, areaKey);
+        const cityMatches = matchesTaskCityArea(wa.area, task) &&
+          partnerLocationMatchesTaskCity(p as Record<string, unknown>, task);
+        if (!areaMatches && !cityMatches) continue;
 
         const categoryMatches = partnerCategoryMatchesBookNowTask(categories, task);
         if (!categoryMatches) continue;

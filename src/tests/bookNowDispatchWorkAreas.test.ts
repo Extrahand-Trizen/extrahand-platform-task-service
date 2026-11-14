@@ -199,6 +199,60 @@ assert.equal(
   true,
   'Partners matched through saved skill groups and nearby dispatch areas must be able to accept offers',
 );
+const siddipetLocationOnlyPartner = {
+  isActive: true,
+  isAvailable: true,
+  location: { addressDetails: { city: 'Siddipet' } },
+  partnerProfile: {
+    status: 'approved',
+    categories: ['plumbing'],
+    workAreas: [],
+    workShifts: [],
+  },
+};
+const siddipetPlumbingTask = {
+  category: 'repair',
+  categorySlug: 'plumbing-toilet',
+  location: { taskArea: 'Shivaji Nagar', city: 'Siddipet' },
+} as any;
+assert.equal(
+  isEligiblePartnerForBookNowTask(siddipetLocationOnlyPartner, siddipetPlumbingTask),
+  true,
+  'Approved partners without a selected work area can qualify when their structured profile city exactly matches the job city',
+);
+assert.equal(
+  isEligiblePartnerForBookNowTask(
+    {
+      ...siddipetLocationOnlyPartner,
+      location: { addressDetails: { city: 'Hyderabad Road' } },
+    },
+    {
+      ...siddipetPlumbingTask,
+      location: { taskArea: 'Hyderabad', city: 'Hyderabad' },
+    },
+  ),
+  false,
+  'A city-like road/address label must not count as an exact city match',
+);
+assert.equal(
+  isEligiblePartnerForBookNowTask(
+    {
+      ...dispatchPartner,
+      location: { addressDetails: { city: 'Hyderabad' } },
+      partnerProfile: {
+        ...dispatchPartner.partnerProfile,
+        categories: ['plumbing'],
+        workAreas: ['Hyderabad'],
+      },
+    },
+    {
+      ...siddipetPlumbingTask,
+      location: { taskArea: 'Hyderabad Road', city: 'Siddipet' },
+    },
+  ),
+  false,
+  'A Hyderabad work-area selection must not match a Siddipet task merely because its street name contains Hyderabad',
+);
 assert.equal(
   isEligiblePartnerForBookNowTask(
     {

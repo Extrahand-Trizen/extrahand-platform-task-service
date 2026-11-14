@@ -37,6 +37,24 @@ const dailyLabourTask = {
 assert.equal(partnerCategoryMatchesBookNowTask(['other'], dailyLabourTask), false);
 assert.equal(partnerCategoryMatchesBookNowTask(['daily-labour'], dailyLabourTask), true);
 assert.equal(partnerCategoryMatchesBookNowTask(['cleaning'], dailyLabourTask), false);
+for (const categorySlug of ['hourly-helper', 'hourly-based']) {
+  assert.equal(
+    partnerCategoryMatchesBookNowTask(['cleaning'], {
+      category: 'other',
+      categorySlug,
+    }),
+    true,
+    `${categorySlug} should notify partners in the Hourly Helper category`,
+  );
+  assert.equal(
+    partnerCategoryMatchesBookNowTask(['electrician'], {
+      category: 'other',
+      categorySlug,
+    }),
+    false,
+    `${categorySlug} should not notify unrelated service categories`,
+  );
+}
 
 const repairCategoryCases = [
   ['plumbing', 'plumbing-waste-pipe-installation', 'plumbing'],
