@@ -5,6 +5,7 @@ import {
   BOOK_NOW_WORK_AREA_PROXIMITY_KM,
   HYDERABAD_WORK_AREA_COORDS,
 } from '../constants/locations/hyderabadWorkAreaCoords';
+import { resolvePartnerCategoryId } from '../utils/bookNowClientCatalog';
 
 /**
  * Shared server-side visibility guard for partner-facing Book Now queries.
@@ -46,22 +47,25 @@ const CATEGORY_MAP: Record<string, string[]> = {
     'window-cleaning',
     'carpet-cleaning',
   ],
+  painting: [
+    'painting',
+    'painting-interior',
+    'painting-exterior',
+    'painting-rental',
+    'painting-waterproofing',
+    'interior-painting',
+    'exterior-painting',
+    'rental-painting',
+    'waterproofing',
+  ],
   repair: [
     'repair',
-    'plumbing',
-    'electrical',
-    'electrician',
-    'carpenter',
-    'carpentry',
-    'ac-service',
-    'ac-services',
-    'ac-repair',
-    'appliance-repair',
-    'appliance-repair-services',
   ],
-  plumbing: ['plumbing', 'repair'],
-  electrical: ['electrical', 'electrician', 'repair'],
-  electrician: ['electrician', 'electrical', 'repair'],
+  plumbing: ['plumbing'],
+  electrical: ['electrical', 'electrician'],
+  carpentry: ['carpenter', 'carpentry'],
+  'ac-service': ['ac-service', 'ac-services', 'ac-repair', 'ac_service'],
+  'appliance-repair': ['appliance-repair', 'appliance-repair-services', 'appliance_repair'],
   delivery: ['delivery', 'pickup', 'pick-drop'],
   assembly: ['assembly', 'furniture-assembly'],
   gardening: ['gardening', 'lawn-mowing'],
@@ -103,10 +107,12 @@ function normalizePartnerCategoryValue(raw: unknown): string {
     const obj = raw as Record<string, unknown>;
     const id = obj.id ?? obj.slug ?? obj.category ?? obj.value;
     if (id != null && String(id).trim()) {
-      return normalizeCategory(String(id));
+      const value = String(id);
+      return normalizeCategory(resolvePartnerCategoryId(value) || value);
     }
   }
-  return normalizeCategory(String(raw || ''));
+  const value = String(raw || '');
+  return normalizeCategory(resolvePartnerCategoryId(value) || value);
 }
 
 export function normalizePartnerCategorySlug(raw: unknown): string {
@@ -255,9 +261,53 @@ function partnerHasPaintingSupplyCategory(normalizedPartnerCategories: string[])
   );
 }
 
+function resolveTaskPartnerCategory(task: {
+  partnerCategoryId?: string;
+  categorySlug?: string;
+  categoryLabel?: string;
+  subcategory?: string;
+  category?: string;
+  serviceType?: string;
+  serviceFlowType?: string;
+  bookingKind?: string;
+}): string {
+  const specificHints = [
+    task.partnerCategoryId,
+    task.categorySlug,
+    task.categoryLabel,
+    task.subcategory,
+  ];
+
+  for (const hint of specificHints) {
+    const value = String(hint || '').trim();
+    if (!value) continue;
+
+    const resolvedId = resolvePartnerCategoryId(value);
+    if (resolvedId) return normalizeCategory(resolvedId);
+
+    const normalized = normalizeCategory(value);
+    if (normalized !== 'repair' && normalized !== 'other') {
+      return normalized;
+    }
+  }
+
+  if (
+    String(task.serviceType || '').trim().toLowerCase() === 'painting' ||
+    (String(task.serviceFlowType || '').trim() === 'consultation_project' &&
+      ['consultation', 'project'].includes(
+        String(task.bookingKind || '').trim().toLowerCase(),
+      ))
+  ) {
+    return normalizeCategory('painting');
+  }
+
+  return normalizeCategory(String(task.category || '').trim());
+}
+
 export function partnerCategoryMatchesBookNowTask(
   partnerCategories: unknown[],
   task: {
+    partnerCategoryId?: string;
     category?: string;
     categorySlug?: string;
     categoryLabel?: string;
@@ -270,66 +320,10 @@ export function partnerCategoryMatchesBookNowTask(
   const normalized = normalizePartnerCategoryList(partnerCategories);
   if (!normalized.length) return false;
 
-  const taskCategory = String(task.category || '').trim().toLowerCase();
-  const taskSlug = normalizeCategory(String(task.categorySlug || ''));
-  const taskLabel = normalizeCategory(String(task.categoryLabel || ''));
-  const taskSubcategory = String(task.subcategory || '').trim().toLowerCase();
-  const taskServiceType = String(task.serviceType || '').trim().toLowerCase();
-  const taskFlowType = String(task.serviceFlowType || '').trim();
-  const taskBookingKind = String(task.bookingKind || '').trim().toLowerCase();
+  const taskCategory = resolveTaskPartnerCategory(task);
+  if (!taskCategory) return false;
 
-  if (taskSlug === 'daily-labour') {
-    return partnerCategories.some((category) => {
-      const raw = category && typeof category === 'object'
-        ? String(
-            (category as Record<string, unknown>).id ??
-            (category as Record<string, unknown>).slug ??
-            (category as Record<string, unknown>).category ??
-            (category as Record<string, unknown>).value ??
-            '',
-          )
-        : String(category || '');
-      const slug = raw.trim().toLowerCase().replace(/[\s_]+/g, '-');
-      return slug === 'daily-labour' || slug === 'other';
-    });
-  }
-
-  const taskCategories = new Set<string>();
-  normalized.forEach((cat) => {
-    const mapped = PARTNER_CATEGORY_TO_TASK_CATEGORIES[cat];
-    if (mapped) mapped.forEach((tc) => taskCategories.add(tc));
-    else taskCategories.add(cat);
-  });
-
-  if (taskCategory && taskCategories.has(taskCategory)) return true;
-  if (taskSlug && normalized.includes(taskSlug)) return true;
-  if (taskLabel && normalized.includes(taskLabel)) return true;
-
-  if (partnerHasPaintingSupplyCategory(normalized)) {
-    if (taskServiceType === 'painting') return true;
-    if (
-      taskFlowType === 'consultation_project' &&
-      (taskBookingKind === 'consultation' || taskBookingKind === 'project')
-    ) {
-      return true;
-    }
-
-    if (PAINTING_SUPPLY_CATEGORY_SLUGS.has(taskSlug)) return true;
-    if (taskSubcategory.startsWith('painting-consultation-')) return true;
-    if (taskSubcategory.startsWith('consultation-project-')) return true;
-  }
-
-  return normalized.some((partnerCat) => {
-    const partnerKey = partnerCat.replace(/[\s_-]+/g, '');
-    const slugKey = taskSlug.replace(/[\s_-]+/g, '');
-    const labelKey = taskLabel.replace(/[\s_-]+/g, '');
-    const subKey = taskSubcategory.replace(/[\s_-]+/g, '');
-    return (
-      (slugKey && (slugKey === partnerKey || slugKey.includes(partnerKey) || partnerKey.includes(slugKey))) ||
-      (labelKey && (labelKey === partnerKey || labelKey.includes(partnerKey) || partnerKey.includes(labelKey))) ||
-      (subKey && (subKey.includes(partnerKey) || partnerKey.includes(subKey)))
-    );
-  });
+  return normalized.includes(taskCategory);
 }
 
 export function isHomeCleaningTask(task: {
