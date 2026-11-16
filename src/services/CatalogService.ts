@@ -40,6 +40,10 @@ import {
   isPersonalAssistantCategorySlug,
 } from '../utils/personalAssistantCatalogVisibility';
 import { PERSONAL_ASSISTANT_CATEGORY_SLUG } from '../constants/personalAssistantBooking';
+import {
+  getHourlyHelperSkuDisplayName,
+  HOURLY_HELPER_CATEGORY_SLUG,
+} from '../constants/hourlyBooking';
 import { LocationPricingService, type PricedSku, type ResolvedSkuPrice } from './LocationPricingService';
 import { getSkuOfferPrice } from '../utils/skuPricing';
 import { resolveParentCategory } from '../utils/bookNowClientCatalog';
@@ -1451,6 +1455,10 @@ export class CatalogService {
         const shortDescription = String(content?.shortDescription || '').trim();
         const fallbackDescription = String(sku.description || '').trim();
         const durationLabel = toDurationLabel(Number(sku.durationMinutes || 0));
+        const isHourlyHelperSku = category.slug === HOURLY_HELPER_CATEGORY_SLUG;
+        const displayName = isHourlyHelperSku
+          ? getHourlyHelperSkuDisplayName(Number(sku.durationMinutes || 0))
+          : String(sku.name || '');
         const serviceFlow = resolveBookNowServiceFlowConfig({
           categorySlug: category.slug,
           skuSlug: String(sku.slug || ''),
@@ -1461,7 +1469,7 @@ export class CatalogService {
           categorySlug: category.slug,
           categoryName: category.name,
           skuSlug: String(sku.slug || ''),
-          name: String(sku.name || ''),
+          name: displayName,
           description: shortDescription || fallbackDescription || durationLabel,
           durationMinutes: Number(sku.durationMinutes || 0),
           filterId: content?.filterId || undefined,
@@ -1469,7 +1477,9 @@ export class CatalogService {
           pricing: resolvedPrice ? withResolvedPricing(enriched.pricing, resolvedPrice) : enriched.pricing,
           content: content
             ? {
-                displayName: String(content.displayName || sku.name || ''),
+                displayName: isHourlyHelperSku
+                  ? displayName
+                  : String(content.displayName || sku.name || ''),
                 shortDescription,
                 longDescription: String(content.longDescription || '').trim(),
                 includes: Array.isArray(content.includes) ? content.includes : [],

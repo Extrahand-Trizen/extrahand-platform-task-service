@@ -19,6 +19,8 @@ export const BOOK_NOW_SLOTS_BLOCKED_PER_BOOKING = 1;
 export const BOOK_NOW_MIN_LEAD_TIME_MINUTES = 0;
 /** Standard services cannot be booked inside the next three hours. */
 export const BOOK_NOW_STANDARD_MIN_LEAD_TIME_MINUTES = 3 * 60;
+export const BOOK_NOW_STANDARD_START_HOUR = 7;
+export const BOOK_NOW_STANDARD_END_HOUR = 20;
 
 const BOOK_NOW_SLOT_STEP_MINUTES = 30;
 
@@ -892,7 +894,11 @@ export async function assertBookNowSlotAvailable(params: {
 
   if (params.availabilityMode !== 'hourly' && !params.requiredPartnerCategory) {
     const slotStartMinutes = parseHourlySlotToMinutes(slotToCheck);
-    if (slotStartMinutes == null || slotStartMinutes < 7 * 60 || slotStartMinutes >= 20 * 60) {
+    if (
+      slotStartMinutes == null ||
+      slotStartMinutes < BOOK_NOW_STANDARD_START_HOUR * 60 ||
+      slotStartMinutes >= BOOK_NOW_STANDARD_END_HOUR * 60
+    ) {
       throw new Error('SLOT_UNAVAILABLE');
     }
     return;

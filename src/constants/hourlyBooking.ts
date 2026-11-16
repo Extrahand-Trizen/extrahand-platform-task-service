@@ -23,7 +23,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   {
     slug: 'hourly-1h',
     durationMinutes: 60,
-    name: 'Helper · 1 hour',
+    name: 'ExtraHand Assist · 1 hour',
     basePrice: 99,
     offerPrice: 0,
     description: 'Book a helper for 1 hour of on-demand help.',
@@ -31,7 +31,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   {
     slug: 'hourly-1-5h',
     durationMinutes: 90,
-    name: 'Helper · 1.5 hours',
+    name: 'ExtraHand Assist · 1.5 hours',
     basePrice: 149,
     offerPrice: 0,
     description: 'Book a helper for 1.5 hours of on-demand help.',
@@ -39,7 +39,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   {
     slug: 'hourly-2h',
     durationMinutes: 120,
-    name: 'Helper · 2 hours',
+    name: 'ExtraHand Assist · 2 hours',
     basePrice: 189,
     offerPrice: 0,
     description: 'Book a helper for 2 hours of on-demand help.',
@@ -47,7 +47,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   {
     slug: 'hourly-3h',
     durationMinutes: 180,
-    name: 'Helper · 3 hours',
+    name: 'ExtraHand Assist · 3 hours',
     basePrice: 269,
     offerPrice: 0,
     description: 'Book a helper for 3 hours of on-demand help.',
@@ -55,7 +55,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   {
     slug: 'hourly-4h',
     durationMinutes: 240,
-    name: 'Helper · 4 hours',
+    name: 'ExtraHand Assist · 4 hours',
     basePrice: 349,
     offerPrice: 0,
     description: 'Book a helper for 4 hours of on-demand help.',
@@ -63,7 +63,7 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   {
     slug: 'hourly-30m',
     durationMinutes: 30,
-    name: 'Helper · 30 minutes',
+    name: 'ExtraHand Assist · 30 minutes',
     basePrice: 39,
     offerPrice: 0,
     description: 'Book a helper for 30 minutes of on-demand help.',
@@ -71,12 +71,38 @@ export const HOURLY_DURATION_SKUS: ReadonlyArray<{
   {
     slug: 'hourly-45m',
     durationMinutes: 45,
-    name: 'Helper · 45 minutes',
+    name: 'ExtraHand Assist · 45 minutes',
     basePrice: 49,
     offerPrice: 0,
     description: 'Book a helper for 45 minutes of on-demand help.',
   },
 ];
+
+export function getHourlyHelperSkuDisplayName(durationMinutes: number): string {
+  const configuredSku = HOURLY_DURATION_SKUS.find((sku) => sku.durationMinutes === durationMinutes);
+  if (configuredSku) return configuredSku.name;
+
+  const minutes = Number(durationMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 'ExtraHand Assist';
+
+  const durationLabel =
+    minutes < 60
+      ? `${minutes} minute${minutes === 1 ? '' : 's'}`
+      : minutes % 60 === 0
+        ? `${minutes / 60} hour${minutes === 60 ? '' : 's'}`
+        : minutes % 30 === 0
+          ? `${Number((minutes / 60).toFixed(1))} hours`
+          : `${Math.floor(minutes / 60)} hr ${minutes % 60} min`;
+  return `ExtraHand Assist · ${durationLabel}`;
+}
+
+export function normalizeHourlyHelperTaskTitle(title: string): string {
+  const normalizedTitle = String(title || '').trim();
+  if (!/^Helper(?:\s*·)?(?:\s|$)/i.test(normalizedTitle)) return normalizedTitle;
+
+  const durationLabel = normalizedTitle.replace(/^Helper(?:\s*·)?\s*/i, '').trim();
+  return durationLabel ? `ExtraHand Assist · ${durationLabel}` : 'ExtraHand Assist';
+}
 
 export const HOURLY_HELPER_CATEGORY = {
   slug: HOURLY_HELPER_CATEGORY_SLUG,

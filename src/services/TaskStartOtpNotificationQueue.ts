@@ -21,9 +21,17 @@ type StartOtpNotificationInput = {
   taskTitle: string;
   otp: string;
   notificationData: Record<string, unknown>;
-  journeyTitle: string;
-  journeyBody: string;
 };
+
+export function buildStartOtpNotificationCopy(taskTitle: string, otp: string): {
+  title: string;
+  body: string;
+} {
+  return {
+    title: `Start OTP for "${taskTitle}"`,
+    body: `Your OTP to start this work is ${otp}. Share it with your helper to begin.`,
+  };
+}
 
 export function startOtpNotificationRetryDelayMs(attempt: number): number {
   return Math.min(60_000, 1_000 * 2 ** Math.max(0, attempt - 1));
@@ -64,6 +72,7 @@ export async function enqueueStartOtpNotifications(input: StartOtpNotificationIn
 
 async function deliverJob(job: NonNullable<Awaited<ReturnType<typeof claimJob>>>): Promise<void> {
   const taskData = job.notificationData as Record<string, unknown>;
+  const notificationCopy = buildStartOtpNotificationCopy(job.taskTitle, job.otp);
   const send = async (
     channel: string,
     operation: () => Promise<
@@ -125,8 +134,8 @@ async function deliverJob(job: NonNullable<Awaited<ReturnType<typeof claimJob>>>
       category: 'taskUpdates',
       recipients: [job.requesterUid],
       entity: { type: 'task', id: job.taskId },
-      title: job.journeyTitle,
-      body: job.journeyBody,
+      title: notificationCopy.title,
+      body: notificationCopy.body,
       data: taskData,
       eventId: job.jobKey,
     }),
@@ -134,8 +143,8 @@ async function deliverJob(job: NonNullable<Awaited<ReturnType<typeof claimJob>>>
   await send('inApp', () =>
     InAppNotificationClient.send({
       userId: job.requesterUid,
-      title: job.journeyTitle,
-      body: job.journeyBody,
+      title: notificationCopy.title,
+      body: notificationCopy.body,
       type: 'info',
       category: 'taskUpdates',
       data: { ...taskData, eventId: job.jobKey },

@@ -18,8 +18,6 @@ export interface ITaskStartOtpNotificationJob extends Document {
   taskTitle: string;
   otp: string;
   notificationData: Record<string, unknown>;
-  journeyTitle: string;
-  journeyBody: string;
   channels: Record<string, { status: OtpNotificationChannelStatus; messageId?: string }>;
   status: 'pending' | 'processing' | 'retry' | 'completed' | 'dead';
   attempts: number;
@@ -42,8 +40,6 @@ const TaskStartOtpNotificationJobSchema = new Schema<ITaskStartOtpNotificationJo
     taskTitle: { type: String, required: true },
     otp: { type: String, required: true },
     notificationData: { type: Schema.Types.Mixed, required: true },
-    journeyTitle: { type: String, required: true },
-    journeyBody: { type: String, required: true },
     channels: { type: Schema.Types.Mixed, required: true },
     status: {
       type: String,
