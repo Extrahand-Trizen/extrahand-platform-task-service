@@ -45,7 +45,11 @@ import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 import { HourlyHelperAvailabilityService } from './HourlyHelperAvailabilityService';
 import { HourlyHelperLocationAvailabilityService } from './HourlyHelperLocationAvailabilityService';
 import { buildHourlyServiceAreaCandidates } from '../utils/hourlyHelperServiceArea';
-import { HOURLY_HELPER_COMING_SOON_CODE } from '../constants/hourlyBooking';
+import {
+  getHourlyHelperSkuDisplayName,
+  HOURLY_HELPER_CATEGORY_SLUG,
+  HOURLY_HELPER_COMING_SOON_CODE,
+} from '../constants/hourlyBooking';
 import {
   assertHourlyInstantOperatingHours,
   assertHourlyScheduledSlotWithinOperatingHours,
@@ -941,14 +945,19 @@ export class BookingService {
         ? undefined
         : normalized.durationMinutes,
     );
-    const title = `${sku.name}${variant && !variant.isDefault ? ` — ${variant.name}` : ''}`;
+    const categorySlug = category?.slug || normalized.categorySlug!;
+    const skuDisplayName =
+      categorySlug.toLowerCase() === HOURLY_HELPER_CATEGORY_SLUG
+        ? getHourlyHelperSkuDisplayName(sku.durationMinutes)
+        : sku.name;
+    const title = `${skuDisplayName}${variant && !variant.isDefault ? ` — ${variant.name}` : ''}`;
 
     return {
       skuId: sku._id,
       variantId: variant?._id,
       addonIds: selectedAddons.map((a) => a._id),
       packageSlug: sku.slug,
-      categorySlug: category?.slug || normalized.categorySlug!,
+      categorySlug,
       categoryLabel: category?.name || resolveBookNowCategoryLabel(normalized.categorySlug!),
       taskCategory: normalizeBookNowTaskCategory(
         sku.taskCategory || resolveBookNowTaskCategory(category?.slug || normalized.categorySlug || ''),
@@ -959,7 +968,7 @@ export class BookingService {
       lineTotal,
       durationMinutes,
       title,
-      snapshotName: sku.name,
+      snapshotName: skuDisplayName,
       taskDescription: normalized.taskDescription,
       images: Array.isArray(normalized.images) ? normalized.images.filter(Boolean) : undefined,
       serviceFlowType: normalized.serviceFlowType,
