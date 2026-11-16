@@ -24,7 +24,6 @@ import {
   deriveBookNowTimeSlot,
   getOccupiedBookNowSlots,
   getPartnerCapacityForSlots,
-  isBookNowSlotWithinLeadTime,
   normalizeBookNowSlotLabel,
   type BookNowTimeBucket,
 } from '../utils/bookNowSlotAvailability';
@@ -108,7 +107,10 @@ import { locationAdjustedUnitPrice } from '../utils/skuPricing';
 import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import { NotificationClient } from './NotificationClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
-import { resolveRescheduleEndTime } from '../utils/rescheduleSchedule';
+import {
+  isRescheduleSlotTimeAllowed,
+  resolveRescheduleEndTime,
+} from '../utils/rescheduleSchedule';
 import {
   buildHourlyScheduleCapacity,
   isHourlySlotAllowedBySettings,
@@ -513,6 +515,23 @@ function resolveStoredBookingDuration(
     .map((task) => Number(task.estimatedDuration || 0))
     .filter((duration) => Number.isFinite(duration) && duration > 0);
   return taskDurations.length ? Math.max(...taskDurations) : 30;
+}
+
+async function assertRescheduleSlotAvailable(
+  params: Parameters<typeof assertBookNowSlotAvailable>[0],
+): Promise<void> {
+  try {
+    await assertBookNowSlotAvailable(params);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    if (error.message === 'SLOT_TOO_SOON') {
+      throw new BadRequestError('The selected slot is too soon. Please choose a later slot.');
+    }
+    if (error.message === 'SLOT_UNAVAILABLE' || error.message === 'ASSIGNED_HELPER_UNAVAILABLE') {
+      throw new BadRequestError('The selected slot is no longer available. Please choose another slot.');
+    }
+    throw error;
+  }
 }
 
 function formatScheduleDateKey(date?: Date | null): string | null {
@@ -3007,6 +3026,7 @@ export class BookingService {
     const currentBookingDateKey = formatScheduleDateKey(order.scheduledDate);
     const normalizedCurrentBookingSlot = normalizeBookNowSlotLabel(String(order.scheduledTimeStart || ''));
     const slotStarts = hourly ? HOURLY_RESCHEDULE_SLOT_STARTS : RESCHEDULE_SLOT_STARTS;
+    const now = new Date();
     const hourlySlotSettings = hourly
       ? await HourlyHelperLocationAvailabilityService.getSlotSettingsForAddress({
           areaName: resolveHourlyBookingAreaForCapacity(order.address),
@@ -3033,8 +3053,14 @@ export class BookingService {
           durationMinutes,
           settings: hourlySlotSettings,
         });
+      const timeUnavailable = !isRescheduleSlotTimeAllowed({
+        date: dateKey,
+        scheduledTimeStart: normalized,
+        hourly,
+        now,
+      });
       const unavailable =
-        isBookNowSlotWithinLeadTime(normalized, dateKey) ||
+        timeUnavailable ||
         isSameDateAndSlot ||
         managedScheduleUnavailable ||
         (hourly && (() => {
@@ -3136,7 +3162,7 @@ export class BookingService {
     const lat = Number(initialOrder.address?.coordinates?.[1]);
     const lng = Number(initialOrder.address?.coordinates?.[0]);
     if (hourlySlotSettings?.mode !== 'managed_schedule') {
-      await assertBookNowSlotAvailable({
+      await assertRescheduleSlotAvailable({
         date: dateKey,
         city: initialOrder.address.city,
         scheduledTimeStart,
@@ -3219,21 +3245,23 @@ export class BookingService {
           : scheduledTimeEnd;
         const transactionLat = Number(order.address?.coordinates?.[1]);
         const transactionLng = Number(order.address?.coordinates?.[0]);
-        await assertBookNowSlotAvailable({
-          date: dateKey,
-          city: order.address.city,
-          scheduledTimeStart,
-          timeSlot,
-          durationMinutes: transactionDuration,
-          availabilityMode: hourly ? 'hourly' : 'standard',
-          area: resolveBookingAreaForCapacity(order.address),
-          lat: Number.isFinite(transactionLat) ? transactionLat : undefined,
-          lng: Number.isFinite(transactionLng) ? transactionLng : undefined,
-          requiredPartnerUid: transactionAssignedUids[0],
-          excludeOrderId: orderId,
-          excludeTaskIds: transactionTaskIds.map(String),
-          preferredHelperGender: order.preferredHelperGender,
-        });
+        if (hourlySlotSettings?.mode !== 'managed_schedule') {
+          await assertRescheduleSlotAvailable({
+            date: dateKey,
+            city: order.address.city,
+            scheduledTimeStart,
+            timeSlot,
+            durationMinutes: transactionDuration,
+            availabilityMode: hourly ? 'hourly' : 'standard',
+            area: resolveBookingAreaForCapacity(order.address),
+            lat: Number.isFinite(transactionLat) ? transactionLat : undefined,
+            lng: Number.isFinite(transactionLng) ? transactionLng : undefined,
+            requiredPartnerUid: transactionAssignedUids[0],
+            excludeOrderId: orderId,
+            excludeTaskIds: transactionTaskIds.map(String),
+            preferredHelperGender: order.preferredHelperGender,
+          });
+        }
         if (hourly) {
           assertHourlyScheduledSlotWithinOperatingHours({
             scheduledTimeStart,

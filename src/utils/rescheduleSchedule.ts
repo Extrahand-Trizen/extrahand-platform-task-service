@@ -1,3 +1,11 @@
+import {
+  BOOK_NOW_MIN_LEAD_TIME_MINUTES,
+  BOOK_NOW_STANDARD_END_HOUR,
+  BOOK_NOW_STANDARD_MIN_LEAD_TIME_MINUTES,
+  BOOK_NOW_STANDARD_START_HOUR,
+  isBookNowSlotWithinLeadTime,
+} from './bookNowSlotAvailability';
+
 function parseSlotMinutes(slot: string): number | null {
   const match = String(slot || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
   if (!match) return null;
@@ -26,4 +34,31 @@ export function resolveRescheduleEndTime(
   const duration = Number(durationMinutes);
   if (startMinutes == null || !Number.isInteger(duration) || duration <= 0) return null;
   return formatSlotMinutes(startMinutes + duration);
+}
+
+export function isRescheduleSlotTimeAllowed(params: {
+  date: string;
+  scheduledTimeStart: string;
+  hourly: boolean;
+  now?: Date;
+}): boolean {
+  const startMinutes = parseSlotMinutes(params.scheduledTimeStart);
+  if (startMinutes == null) return false;
+  if (
+    !params.hourly &&
+    (startMinutes < BOOK_NOW_STANDARD_START_HOUR * 60 ||
+      startMinutes >= BOOK_NOW_STANDARD_END_HOUR * 60)
+  ) {
+    return false;
+  }
+
+  const leadTimeMinutes = params.hourly
+    ? BOOK_NOW_MIN_LEAD_TIME_MINUTES
+    : BOOK_NOW_STANDARD_MIN_LEAD_TIME_MINUTES;
+  return !isBookNowSlotWithinLeadTime(
+    params.scheduledTimeStart,
+    params.date,
+    params.now,
+    leadTimeMinutes,
+  );
 }
