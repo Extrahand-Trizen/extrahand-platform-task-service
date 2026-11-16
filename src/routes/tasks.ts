@@ -85,6 +85,20 @@ router.get(
 );
 
 router.post(
+  "/:id/accept",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.acceptOpenTask)
+);
+
+router.post(
+  "/:id/reject",
+  serviceAuthMiddleware,
+  authMiddleware,
+  asyncHandler(TaskController.rejectOpenTask)
+);
+
+router.post(
   "/:id/dispatch/notify-stage",
   serviceAuthMiddleware,
   asyncHandler(TaskController.notifyBookNowStageImmediately)

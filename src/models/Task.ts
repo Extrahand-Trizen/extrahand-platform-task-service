@@ -179,6 +179,10 @@ export interface ITask extends Document {
   /** Firebase UID of the assigned helper — required for tasker My Work lookup */
   /** Firebase uid of assigned helper when denormalized on the task document. */
   assigneeUid?: string | null;
+  /** Helper UIDs that personally rejected this marketplace task. */
+  rejectedByHelperUids?: string[];
+  /** Personalized detail response; never persisted. */
+  rejectedByCurrentHelper?: boolean;
   /**
    * Canonical denormalized helper display name, stored at assignment time.
    * Prefer this field for customer-facing "Professional assigned" UI.
@@ -712,6 +716,7 @@ const TaskSchema = new Schema<ITask>(
       default: null,
     },
     assigneeUid: { type: String, default: null, index: true },
+    rejectedByHelperUids: { type: [String], default: [], select: false },
     /** Stored at assignment time — exact helper name for work progress / history. */
     assignedHelperName: { type: String, default: null },
     assignedToName: { type: String, default: null },

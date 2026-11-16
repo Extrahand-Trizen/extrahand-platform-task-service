@@ -6,7 +6,7 @@ import BookingItem from '../models/BookingItem';
 import Task from '../models/Task';
 import TaskApplication from '../models/TaskApplication';
 import { PaymentClient } from './PaymentClient';
-import { BadRequestError, NotFoundError } from '../errors/AppError';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../errors/AppError';
 import logger from '../config/logger';
 import { NOTIFICATION_EVENT_KEYS } from '../constants/notifications';
 import { emitTaskStatusChanged } from '../socket/socketHandlers';
@@ -14,6 +14,8 @@ import { NotificationClient } from './NotificationClient';
 import { InAppNotificationClient } from '../clients/InAppNotificationClient';
 import { fireDialogWhatsAppForUser } from '../clients/fireDialogWhatsAppForUser';
 import { ProfileUtils } from '../utils/ProfileUtils';
+import { taskerHasBlockingActiveTask } from '../utils/taskCommitment';
+import { isHourlyPartnerOfferTask } from '../utils/partnerOfferTasks';
 
 /**
  * Resolve the helper's display name (request body first, then profile lookup)
@@ -289,8 +291,20 @@ async function upsertAcceptedApplication(params: {
   helperUid: string;
   helperName?: string;
   budgetAmount: number;
+  acceptedBy?: 'poster' | 'tasker';
+  coverLetter?: string;
+  session?: mongoose.ClientSession;
 }): Promise<mongoose.Types.ObjectId> {
-  const { taskId, helperProfileId, helperUid, helperName, budgetAmount } = params;
+  const {
+    taskId,
+    helperProfileId,
+    helperUid,
+    helperName,
+    budgetAmount,
+    acceptedBy = 'poster',
+    coverLetter = 'Book Now — assigned by operations',
+    session,
+  } = params;
 
   const application = await TaskApplication.findOneAndUpdate(
     { taskId, applicantUid: helperUid },
@@ -301,7 +315,7 @@ async function upsertAcceptedApplication(params: {
         applicantUid: helperUid,
         applicantProfile: helperName ? { name: helperName } : undefined,
         status: 'accepted',
-        coverLetter: 'Book Now — assigned by operations',
+        coverLetter,
         proposedBudget: {
           amount: budgetAmount,
           currency: 'INR',
@@ -312,12 +326,12 @@ async function upsertAcceptedApplication(params: {
           currentAmount: budgetAmount,
           finalAmount: budgetAmount,
           status: 'accepted',
-          lastActionBy: 'poster',
+          lastActionBy: acceptedBy,
           history: [
             {
               amount: budgetAmount,
               action: 'accept',
-              by: 'poster',
+              by: acceptedBy,
               at: new Date(),
             },
           ],
@@ -326,13 +340,189 @@ async function upsertAcceptedApplication(params: {
         respondedToRevisionRound: 0,
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+      ...(session ? { session } : {}),
+    }
   );
 
   return application._id as mongoose.Types.ObjectId;
 }
 
 export class AssignmentService {
+  static async acceptOpenTask(params: {
+    taskId: string;
+    helperUid: string;
+    helperProfileId: string;
+  }) {
+    const taskId = String(params.taskId || '').trim();
+    const helperUid = String(params.helperUid || '').trim();
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      throw new BadRequestError('Invalid task ID');
+    }
+    if (!mongoose.Types.ObjectId.isValid(params.helperProfileId) || !helperUid) {
+      throw new BadRequestError('Helper identity is required');
+    }
+
+    const helperProfileId = new mongoose.Types.ObjectId(params.helperProfileId);
+    const resolvedHelperName = await resolveAssignedHelperName({
+      helperProfileId,
+      helperUid,
+    });
+    const session = await mongoose.startSession();
+    let task: any = null;
+    let alreadyAssigned = false;
+
+    try {
+      await session.withTransaction(async () => {
+        const currentTask = await Task.findById(taskId).session(session);
+        if (!currentTask) throw new NotFoundError('Task not found');
+
+        if (
+          currentTask.status === 'assigned' &&
+          String(currentTask.assigneeUid || '') === helperUid
+        ) {
+          task = currentTask.toObject();
+          alreadyAssigned = true;
+          return;
+        }
+
+        if (String(currentTask.requesterId) === String(helperProfileId)) {
+          throw new ForbiddenError('You cannot accept your own work');
+        }
+        if (
+          currentTask.bookingSource === 'book_now' ||
+          currentTask.bookingOrderId ||
+          currentTask.bookingItemId
+        ) {
+          throw new BadRequestError('Book Now work must be accepted from its booking offer');
+        }
+        if (isHourlyPartnerOfferTask(currentTask)) {
+          throw new BadRequestError('Hourly work must be accepted through its partner offer');
+        }
+        if (
+          currentTask.status !== 'open' ||
+          currentTask.assigneeId ||
+          currentTask.assigneeUid ||
+          currentTask.partnerId ||
+          currentTask.partnerUid
+        ) {
+          throw new ConflictError('This work is no longer available');
+        }
+
+        const hasScheduleConflict = await taskerHasBlockingActiveTask(helperProfileId, {
+          scheduledDate: currentTask.scheduledDate,
+          scheduledTimeStart: currentTask.scheduledTimeStart,
+          scheduledTimeEnd: currentTask.scheduledTimeEnd,
+          timeSlot: currentTask.timeSlot,
+        });
+        if (hasScheduleConflict) {
+          throw new ConflictError('You already have work scheduled at this time');
+        }
+
+        const rawBudget = currentTask.budget as unknown as
+          | { amount?: number }
+          | number
+          | null;
+        const budgetAmount = Number(
+          typeof rawBudget === 'object' && rawBudget
+            ? rawBudget.amount ?? 0
+            : rawBudget ?? 0,
+        );
+        if (!Number.isFinite(budgetAmount) || budgetAmount <= 0) {
+          throw new BadRequestError('This work does not have a valid budget to accept');
+        }
+
+        const applicationId = await upsertAcceptedApplication({
+          taskId: currentTask._id as mongoose.Types.ObjectId,
+          helperProfileId,
+          helperUid,
+          helperName: resolvedHelperName,
+          budgetAmount,
+          acceptedBy: 'tasker',
+          coverLetter: 'Accepted work directly from the task details page',
+          session,
+        });
+
+        const assignedAt = new Date();
+        const assignedTask = await Task.findOneAndUpdate(
+          {
+            _id: currentTask._id,
+            status: 'open',
+            assigneeId: null,
+            assigneeUid: null,
+            partnerId: null,
+            partnerUid: null,
+            requesterId: { $ne: helperProfileId },
+            rejectedByHelperUids: { $ne: helperUid },
+            bookingSource: { $ne: 'book_now' },
+            bookingOrderId: { $in: [null, ''] },
+            bookingItemId: null,
+          },
+          {
+            $set: {
+              assigneeId: helperProfileId,
+              assigneeUid: helperUid,
+              assignedAt,
+              status: 'assigned',
+              assignmentStatus: 'assigned',
+              acceptedApplicationId: applicationId,
+              ...(resolvedHelperName
+                ? {
+                    assignedHelperName: resolvedHelperName,
+                    assignedToName: resolvedHelperName,
+                    assigneeName: resolvedHelperName,
+                  }
+                : {}),
+            },
+            $unset: { assignmentOffer: 1 },
+          },
+          { new: true, session },
+        ).lean();
+
+        if (!assignedTask) {
+          throw new ConflictError('This work was accepted by someone else');
+        }
+        task = assignedTask;
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!alreadyAssigned && task) {
+      try {
+        emitTaskStatusChanged(taskId, task);
+      } catch (error) {
+        logger.warn('Failed to emit task accepted event', {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      const helperSnapshot = await resolveAssignedHelperSnapshot({
+        helperName: resolvedHelperName,
+        helperProfileId,
+        helperUid,
+      });
+      await notifyBookNowAssignment({
+        actorUid: helperUid,
+        taskId,
+        taskTitle: String(task.title || 'your work'),
+        customerUid: task.requesterUid,
+        customerProfileId: task.requesterId,
+        helperUid,
+        helperName: helperSnapshot.name || resolvedHelperName,
+        helperRating: helperSnapshot.rating,
+        recipientRole: 'tasker',
+        notifyPartner: false,
+      });
+    }
+
+    return { task, alreadyAssigned };
+  }
+
   static async listPendingAssignments(limit = 50, page = 1) {
     const skip = (Math.max(page, 1) - 1) * limit;
     const query = { status: 'assigning' };

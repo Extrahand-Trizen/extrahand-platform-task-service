@@ -4,7 +4,7 @@ import { AuthenticatedRequest } from '../types';
 import { TaskService } from '../services/TaskService';
 import Task from '../models/Task';
 import { ApplicationService } from '../services/ApplicationService';
-import { BadRequestError, ConflictError } from '../errors/AppError';
+import { BadRequestError, ConflictError, ForbiddenError } from '../errors/AppError';
 import { ApiResponse } from '../utils/ApiResponse';
 import { getRedisClient } from '../config/redis';
 import { containsPhoneNumber, PHONE_NUMBER_ERROR } from '../utils/phoneDetection';
@@ -17,12 +17,49 @@ import { attachProfileIdForLocalTestIfNeeded } from '../utils/resolveLocalTestPr
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
 import { resolvePartnerMatchConditions } from '../services/partnerVisibility';
 import { BookNowAutoAssignService } from '../services/BookNowAutoAssignService';
+import { AssignmentService } from '../services/AssignmentService';
+import { ProfileUtils } from '../utils/ProfileUtils';
 
 /**
  * Internal/system service callers that legitimately list the Book Now pool
  * without going through the partner feed (main admin dashboard).
  */
 const INTERNAL_SERVICE_UIDS = ['main-admin-service'];
+
+async function requireHelperIdentity(req: AuthenticatedRequest): Promise<{
+  uid: string;
+  profileId: mongoose.Types.ObjectId;
+  isAadhaarVerified: boolean;
+}> {
+  const { uid, profileId } = req.user || {};
+  if (!uid || !profileId) {
+    throw new BadRequestError('Profile not found. Please complete onboarding.');
+  }
+
+  const profile = await ProfileUtils.getByProfileId(
+    profileId,
+    'roles role primaryRole partnerProfile isAadhaarVerified',
+  );
+  const roles = [
+    ...(Array.isArray(profile?.roles) ? profile.roles : []),
+    profile?.role,
+    profile?.primaryRole,
+  ]
+    .map((role) => String(role || '').trim().toLowerCase())
+    .filter(Boolean);
+  const hasHelperRole = roles.some((role) =>
+    ['helper', 'tasker', 'performer', 'partner', 'both'].includes(role),
+  );
+  if (!hasHelperRole && !profile?.partnerProfile) {
+    throw new ForbiddenError('Only helpers can accept or reject available work');
+  }
+
+  return {
+    uid,
+    profileId,
+    isAadhaarVerified: profile?.isAadhaarVerified === true,
+  };
+}
 
 /**
  * Book Now pool visibility guard for GET /tasks?bookingSource=book_now.
@@ -137,6 +174,7 @@ export class TaskController {
       bookingSource: bookingSource ? (bookingSource as string) : undefined,
       scheduledDateFrom: scheduledDateFrom ? (scheduledDateFrom as string) : undefined,
       scheduledDateTo: scheduledDateTo ? (scheduledDateTo as string) : undefined,
+      rejectedByHelperUid: req.user?.uid,
       isInternalService,
       ...(await resolveBookNowVisibilityGuard(req, bookingSource ? (bookingSource as string) : undefined)),
       limit: limit ? parseInt(limit as string) : undefined,
@@ -212,6 +250,7 @@ export class TaskController {
       remotely: remotelyBool,
       sortBy: sortBy ? (sortBy as string) : undefined,
       excludeRequesterId: excludeRequesterId ? (excludeRequesterId as string) : undefined,
+      rejectedByHelperUid: req.user?.uid,
       assigneeId: assigneeId ? (assigneeId as string) : undefined,
       posterUid: posterUid ? (posterUid as string) : undefined,
     });
@@ -247,7 +286,10 @@ export class TaskController {
   static async getTask(req: AuthenticatedRequest, res: Response): Promise<void> {
     assertMongoObjectIdTaskId(req.params.id);
     const isServiceCall = Boolean(req.headers['x-service-auth'] || (req as any).serviceName);
-    const task = await TaskService.getTaskById(req.params.id, { allowDeleted: isServiceCall });
+    const task = await TaskService.getTaskById(req.params.id, {
+      allowDeleted: isServiceCall,
+      viewerUid: req.user?.uid,
+    });
 
     // Increment views in background so response is not blocked
     setImmediate(() => {
@@ -255,6 +297,34 @@ export class TaskController {
     });
 
     ApiResponse.success(res, task, 'Task retrieved successfully');
+  }
+
+  static async acceptOpenTask(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { uid, profileId, isAadhaarVerified } = await requireHelperIdentity(req);
+    if (!isAadhaarVerified) {
+      throw new ForbiddenError('Complete Aadhaar verification before accepting work');
+    }
+
+    const result = await AssignmentService.acceptOpenTask({
+      taskId: req.params.id,
+      helperUid: uid,
+      helperProfileId: String(profileId),
+    });
+    await TaskService.invalidateTaskCacheAsync(req.params.id);
+    TaskService.invalidateTaskListCache();
+
+    ApiResponse.success(res, result, 'Work accepted and assigned to you');
+  }
+
+  static async rejectOpenTask(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const { uid, profileId } = await requireHelperIdentity(req);
+
+    const result = await TaskService.rejectOpenTaskForHelper(
+      req.params.id,
+      profileId,
+      uid,
+    );
+    ApiResponse.success(res, result, 'Work rejected');
   }
 
   /**

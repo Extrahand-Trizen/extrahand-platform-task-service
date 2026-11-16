@@ -37,7 +37,10 @@ import { getVisitsForPlan, findVisitForPlan } from './RecurringVisitPlanStore';
 import { recurringVisitConfig } from '../config/recurringVisitConfig';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { BookNowAutoAssignService } from './BookNowAutoAssignService';
-import { isPartnerOfferTask } from '../utils/partnerOfferTasks';
+import {
+  isPartnerOfferTask,
+  partnerOfferTaskMongoFilter,
+} from '../utils/partnerOfferTasks';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
@@ -559,6 +562,7 @@ export class TaskService {
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
     excludeRequesterId?: string;
+    rejectedByHelperUid?: string;
     assigneeId?: string;
     posterUid?: string;
     requesterId?: string;
@@ -577,7 +581,7 @@ export class TaskService {
     limit?: number;
     page?: number;
   }): Promise<{ tasks: ITask[]; pagination: any }> {
-    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo, partnerVisibilityFilter, partnerVisibilityBlocked, isInternalService, limit = 50, page = 1 } = filters;
+    const { status, excludeOverdue, category, city, minBudget, maxBudget, search, suburb, remotely, sortBy, sortOrder, excludeRequesterId, rejectedByHelperUid, assigneeId, posterUid, requesterId, bookingSource, scheduledDateFrom, scheduledDateTo, partnerVisibilityFilter, partnerVisibilityBlocked, isInternalService, limit = 50, page = 1 } = filters;
     const effectiveLimit = Math.min(limit, MAX_LIMIT);
     const effectivePage = Math.min(Math.max(1, page), MAX_PAGE);
     const skip = (effectivePage - 1) * effectiveLimit;
@@ -604,7 +608,7 @@ export class TaskService {
     const hasSearchOrSuburb = !!search || !!suburb;
     const hasRemotelyFilter = typeof remotely === "boolean";
     const hasUserSpecificFilter =
-      !!excludeRequesterId || !!assigneeId || !!posterUid || !!requesterId;
+      !!excludeRequesterId || !!rejectedByHelperUid || !!assigneeId || !!posterUid || !!requesterId;
     const hasNonDefaultSort =
       !!sortBy && sortBy !== "recent";
 
@@ -664,6 +668,10 @@ export class TaskService {
       isDeletedByCustomer: { $ne: true },
       isDeletedBySupport: { $ne: true },
     });
+
+    if (rejectedByHelperUid) {
+      andClauses.push({ rejectedByHelperUids: { $ne: rejectedByHelperUid } });
+    }
 
     // When bookingSource is explicitly specified (admin view), skip the marketplace-only
     // clause so book_now tasks are visible. Otherwise apply it to protect helper browse.
@@ -890,6 +898,7 @@ export class TaskService {
     remotely?: boolean | null;
     sortBy?: string;
     excludeRequesterId?: string;
+    rejectedByHelperUid?: string;
     assigneeId?: string;
     posterUid?: string;
   }): Promise<{ tasks: ITask[]; pagination: any; location: any }> {
@@ -909,6 +918,7 @@ export class TaskService {
       remotely,
       sortBy,
       excludeRequesterId,
+      rejectedByHelperUid,
       assigneeId,
       posterUid,
     } = params;
@@ -952,6 +962,9 @@ export class TaskService {
       andClauses.push({
         requesterId: { $ne: new mongoose.Types.ObjectId(excludeRequesterId) },
       });
+    }
+    if (rejectedByHelperUid) {
+      andClauses.push({ rejectedByHelperUids: { $ne: rejectedByHelperUid } });
     }
 
     if (assigneeId && mongoose.Types.ObjectId.isValid(assigneeId)) {
@@ -1189,11 +1202,20 @@ export class TaskService {
   }
 
   /** Get a single task by ID directly from MongoDB. */
-  static async getTaskById(taskId: string, options?: { allowDeleted?: boolean }): Promise<ITask> {
+  static async getTaskById(
+    taskId: string,
+    options?: { allowDeleted?: boolean; viewerUid?: string },
+  ): Promise<ITask> {
     // Avoid Mongoose CastError 500s for Book Now escrow placeholders (`booknow-pending-*`).
     assertMongoObjectIdTaskId(taskId);
 
-    let task = (await Task.findById(taskId).lean()) as unknown as ITask | null;
+    const taskQuery = Task.findById(taskId);
+    if (options?.viewerUid) taskQuery.select('+rejectedByHelperUids');
+    let task = (await taskQuery.lean()) as unknown as ITask | null;
+    const rejectedByCurrentHelper = Boolean(
+      options?.viewerUid &&
+        task?.rejectedByHelperUids?.includes(options.viewerUid),
+    );
 
     if (!task) {
       const recovered = await RecurringVisitService.resolveDeletedRecurringChildTaskAccess(
@@ -1335,9 +1357,69 @@ export class TaskService {
       }
     }
 
+    if (options?.viewerUid) {
+      const personalizedTask = task as unknown as Record<string, unknown>;
+      personalizedTask.rejectedByCurrentHelper = rejectedByCurrentHelper;
+      delete personalizedTask.rejectedByHelperUids;
+    }
+
     const result = task as unknown as ITask;
 
     return result;
+  }
+
+  static async rejectOpenTaskForHelper(
+    taskId: string,
+    helperProfileId: mongoose.Types.ObjectId,
+    helperUid: string,
+  ): Promise<{ taskId: string; rejected: true }> {
+    assertMongoObjectIdTaskId(taskId);
+
+    const uid = String(helperUid || '').trim();
+    if (!uid) throw new BadRequestError('Helper identity is required');
+
+    const task = await Task.findOneAndUpdate(
+      {
+        _id: taskId,
+        status: 'open',
+        assigneeId: null,
+        assigneeUid: null,
+        partnerId: null,
+        partnerUid: null,
+        requesterId: { $ne: helperProfileId },
+        bookingSource: { $ne: 'book_now' },
+        bookingOrderId: { $in: [null, ''] },
+        bookingItemId: null,
+        $nor: [partnerOfferTaskMongoFilter()],
+      },
+      { $addToSet: { rejectedByHelperUids: uid } },
+      { new: true },
+    )
+      .select('_id')
+      .lean();
+
+    if (!task) {
+      const currentTask = await Task.findById(taskId)
+        .select('status requesterId assigneeId assigneeUid bookingSource bookingOrderId bookingItemId category categorySlug categoryLabel budget hourlyHelper')
+        .lean();
+      if (!currentTask) throw new NotFoundError('Task not found');
+      if (String(currentTask.requesterId) === String(helperProfileId)) {
+        throw new ForbiddenError('You cannot reject your own work');
+      }
+      if (
+        currentTask.bookingSource === 'book_now' ||
+        currentTask.bookingOrderId ||
+        currentTask.bookingItemId
+      ) {
+        throw new BadRequestError('Book Now work cannot be rejected from this page');
+      }
+      if (isPartnerOfferTask(currentTask)) {
+        throw new BadRequestError('Partner-offer work cannot be rejected from this page');
+      }
+      throw new ConflictError('This work is no longer available to reject');
+    }
+
+    return { taskId, rejected: true };
   }
 
   /**
