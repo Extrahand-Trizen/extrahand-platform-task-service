@@ -96,6 +96,14 @@ export function getHourlyHelperSkuDisplayName(durationMinutes: number): string {
   return `ExtraHand Assist · ${durationLabel}`;
 }
 
+export function normalizeHourlyHelperTaskTitle(title: string): string {
+  const normalizedTitle = String(title || '').trim();
+  if (!/^Helper(?:\s*·)?(?:\s|$)/i.test(normalizedTitle)) return normalizedTitle;
+
+  const durationLabel = normalizedTitle.replace(/^Helper(?:\s*·)?\s*/i, '').trim();
+  return durationLabel ? `ExtraHand Assist · ${durationLabel}` : 'ExtraHand Assist';
+}
+
 export const HOURLY_HELPER_CATEGORY = {
   slug: HOURLY_HELPER_CATEGORY_SLUG,
   name: 'Hourly Helper',

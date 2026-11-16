@@ -3869,8 +3869,6 @@ export class TaskService {
             eventKey: 'HELPER_ON_THE_WAY',
             executionPhase: 'on_the_way',
           },
-          journeyTitle: 'Helper on the way',
-          journeyBody: 'Your helper has started from their location.',
         });
         invalidatePartnerLocationSubject(String(qcOrder._id));
         invalidatePartnerLocationSubject(taskId);
@@ -4021,8 +4019,6 @@ export class TaskService {
       taskTitle: workTitleForOtp,
       otp,
       notificationData,
-      journeyTitle,
-      journeyBody,
     });
 
     // WhatsApp — Meta template extrahand_work_starting_soon (Dialog + legacy)
