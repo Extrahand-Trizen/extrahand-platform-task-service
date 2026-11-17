@@ -1295,40 +1295,58 @@ export class TaskService {
     );
     if (isPartnerOfferTask(task) && !isTerminalTask) {
       try {
-        const { BookNowAutoAssignService } = await import('./BookNowAutoAssignService');
         const isUnassignedOpenTask =
           task.status === 'open' &&
           !task.assigneeId &&
           !task.assigneeUid &&
           !task.partnerId &&
           !task.partnerUid;
-        if (isUnassignedOpenTask && !task.assignmentOffer) {
-          await BookNowAutoAssignService.dispatchBookNowOffers(task);
-          const refreshedTask = await Task.findById(taskId).lean();
-          if (refreshedTask) {
-            task = refreshedTask as unknown as ITask;
-          }
-        }
+        const savedDispatchLogs = Array.isArray(task.dispatchLogs)
+          ? task.dispatchLogs
+          : [];
+        const hasUnstagedEligiblePartner = savedDispatchLogs.some((area) =>
+          area.candidates.some(
+            (candidate) =>
+              candidate.status !== 'ineligible' &&
+              candidate.partnerUid &&
+              !candidate.dispatchStage,
+          ),
+        );
 
-        const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
-        const dispatchLogs =
-          task.dispatchLogs && task.dispatchLogs.length
-            ? task.dispatchLogs
-            : await BookNowAutoAssignService.buildDispatchLog(task);
-        const mergedDispatchLogs = BookNowAutoAssignService.mergeEligiblePartnersIntoDispatchLog(
-          task,
-          dispatchLogs,
-          eligiblePartners,
-        );
-        task.dispatchLogs = await BookNowAutoAssignService.assignDispatchStages(
-          task,
-          mergedDispatchLogs,
-          eligiblePartners,
-        );
-        task.dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
-          task.dispatchProgress,
-          task.dispatchLogs,
-        );
+        // Saved dispatch logs already contain the partner list and offer stages.
+        // Recomputing eligibility on every detail poll scans approved profiles and
+        // reloads assignment rules without changing the saved list.
+        if (savedDispatchLogs.length > 0 && !hasUnstagedEligiblePartner) {
+          task.dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+            task.dispatchProgress,
+            savedDispatchLogs,
+          );
+        } else {
+          if (isUnassignedOpenTask && !task.assignmentOffer) {
+            await BookNowAutoAssignService.dispatchBookNowOffers(task);
+            const refreshedTask = await Task.findById(taskId).lean();
+            if (refreshedTask) {
+              task = refreshedTask as unknown as ITask;
+            }
+          }
+
+          const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
+          const dispatchLogs = await BookNowAutoAssignService.buildDispatchLog(task);
+          const mergedDispatchLogs = BookNowAutoAssignService.mergeEligiblePartnersIntoDispatchLog(
+            task,
+            dispatchLogs,
+            eligiblePartners,
+          );
+          task.dispatchLogs = await BookNowAutoAssignService.assignDispatchStages(
+            task,
+            mergedDispatchLogs,
+            eligiblePartners,
+          );
+          task.dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
+            task.dispatchProgress,
+            task.dispatchLogs,
+          );
+        }
       } catch (err) {
         logger.warn('Failed to build task-detail eligible partner list', { taskId, error: err });
       }
