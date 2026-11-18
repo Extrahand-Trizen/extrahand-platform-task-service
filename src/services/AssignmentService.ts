@@ -767,6 +767,31 @@ export class AssignmentService {
     return null;
   }
 
+  static async getTaskAssignmentHistory(taskId: string): Promise<{
+    assignedByUid: string | null;
+    assignedAt: Date | null;
+    assignmentMode: string;
+    helperUid: string | null;
+  } | null> {
+    if (!mongoose.Types.ObjectId.isValid(taskId)) return null;
+
+    const assignment = await Assignment.findOne({
+      taskId: new mongoose.Types.ObjectId(taskId),
+      status: 'assigned',
+    })
+      .sort({ assignedAt: -1, createdAt: -1 })
+      .select('assignedByUid assignedAt assignmentMode helperUid')
+      .lean();
+
+    if (!assignment) return null;
+    return {
+      assignedByUid: assignment.assignedByUid ?? null,
+      assignedAt: assignment.assignedAt ?? null,
+      assignmentMode: assignment.assignmentMode,
+      helperUid: assignment.helperUid ?? null,
+    };
+  }
+
   /**
    * Directly assign helper (fallback for tasks without booking orders).
    * Also creates a synthetic accepted TaskApplication for My Work visibility.

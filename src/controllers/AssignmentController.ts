@@ -1,10 +1,15 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { AssignmentService } from '../services/AssignmentService';
 import { AuthenticatedRequest } from '../types';
 import { BadRequestError } from '../errors/AppError';
 
 export class AssignmentController {
+  static async getTaskAssignmentHistory(req: Request, res: Response): Promise<void> {
+    const data = await AssignmentService.getTaskAssignmentHistory(req.params.taskId);
+    res.json({ success: true, data });
+  }
+
   static async listPending(req: AuthenticatedRequest, res: Response): Promise<void> {
     const limit = Number(req.query.limit) || 50;
     const page = Number(req.query.page) || 1;
