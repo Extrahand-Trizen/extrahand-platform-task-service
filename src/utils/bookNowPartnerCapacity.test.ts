@@ -150,8 +150,11 @@ assert.strictEqual(
 {
   const morningFull = ['morning_full_time'];
   assert.strictEqual(workShiftsCoverInterval(morningFull, 15 * 60, 16 * 60), true);
-  assert.strictEqual(workShiftsCoverInterval(morningFull, 16 * 60, 18 * 60), false);
+  assert.strictEqual(workShiftsCoverInterval(morningFull, 16 * 60 + 30, 17 * 60 + 30), true);
+  assert.strictEqual(workShiftsCoverInterval(morningFull, 20 * 60, 21 * 60), false);
   assert.strictEqual(workShiftsCoverInterval([], 16 * 60, 18 * 60), true);
+  assert.strictEqual(workShiftsCoverInterval(['morning_rush'], 7 * 60, 13 * 60), true);
+  assert.strictEqual(workShiftsCoverInterval(['morning_rush'], 13 * 60, 14 * 60), false);
   assert.strictEqual(workShiftsCoverInterval(morningFull, 7 * 60, 20 * 60, true), true);
   assert.strictEqual(workShiftsCoverInterval(['morning_rush'], 7 * 60, 13 * 60, true), true);
   assert.strictEqual(workShiftsCoverInterval(['morning_rush'], 13 * 60, 14 * 60, true), false);
@@ -178,7 +181,7 @@ assert.strictEqual(
     7 * 60,
     8 * 60,
   ),
-  0,
+  1,
 );
 assert.strictEqual(
   countPartnersAvailableForInterval(

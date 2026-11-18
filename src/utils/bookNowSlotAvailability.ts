@@ -373,12 +373,12 @@ export function isHourlyCapacityCandidateWithinWindow(
 
 /** Same shift windows as BookNowAutoAssignService.checkTimingMatch. */
 const SHIFT_WINDOWS: Record<string, { startHour: number; endHour: number }> = {
-  morning_rush: { startHour: 8.0, endHour: 12.0 },
+  morning_rush: { startHour: 7.0, endHour: 13.0 },
   morning_block: { startHour: 8.0, endHour: 12.0 },
   midday_block: { startHour: 12.0, endHour: 16.0 },
   mid_day_block: { startHour: 12.0, endHour: 16.0 },
-  afternoon_block: { startHour: 15.5, endHour: 19.5 },
-  morning_full_time: { startHour: 8.0, endHour: 16.0 },
+  afternoon_block: { startHour: 14.0, endHour: 20.0 },
+  morning_full_time: { startHour: 7.0, endHour: 20.0 },
   general_day_full_time: { startHour: 10.0, endHour: 18.0 },
   evening_full_time: { startHour: 11.5, endHour: 19.5 },
 };

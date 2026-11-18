@@ -355,14 +355,14 @@ function phoneMatchesExcluded(phone: unknown, excludedPhones: string[]): boolean
 }
 
 const SHIFT_WINDOWS: Record<string, { start: number; end: number; label: string }> = {
-  morning_rush: { start: 8.0, end: 12.0, label: '9am-1pm' },
+  morning_rush: { start: 7.0, end: 13.0, label: '7am-1pm' },
   morning_block: { start: 8.0, end: 12.0, label: '9am-1pm' },
   midday_block: { start: 12.0, end: 16.0, label: '12-4pm' },
   mid_day_block: { start: 12.0, end: 16.0, label: '12-4pm' },
-  afternoon_block: { start: 15.5, end: 19.5, label: '3:30-7:30pm' },
-  morning_full_time: { start: 8.0, end: 16.0, label: '8am-4pm' },
+  afternoon_block: { start: 14.0, end: 20.0, label: '2-8pm' },
+  morning_full_time: { start: 7.0, end: 20.0, label: '7am-8pm' },
   general_day_full_time: { start: 10.0, end: 18.0, label: '10am-6pm' },
-  evening_full_time: { start: 11.5, end: 19.5, label: '1-9pm' },
+  evening_full_time: { start: 11.5, end: 19.5, label: '11:30am-7:30pm' },
 };
 
 function formatShiftLabel(shiftKeys?: string[]): string {
@@ -1049,6 +1049,15 @@ export class BookNowAutoAssignService {
           existing.details = `Eligible for work in ${partner.workArea}`;
         }
         existing.gender = partner.gender;
+        if (partner.shiftTiming) {
+          existing.shiftTiming = partner.shiftTiming;
+          if (existing.details?.startsWith('shift ')) {
+            existing.details = existing.details.replace(
+              /^shift [^,]+/,
+              `shift ${partner.shiftTiming}`,
+            );
+          }
+        }
         if (isHourly && hasGenderPreference) {
           existing.genderCheckResult = 'passed';
         }
