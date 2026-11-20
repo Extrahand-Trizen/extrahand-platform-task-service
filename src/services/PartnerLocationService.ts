@@ -67,7 +67,7 @@ export type PartnerLocationSubject = {
   partnerUid: string | null;
   status: string;
   fulfillmentStatus?: string | null;
-  /** QC customer-leg journey only — live GPS after second Start Journey. */
+  /** Journey phase; QC live GPS is limited to the customer-bound leg. */
   executionPhase?: string | null;
   source: "task" | "qc";
 };
@@ -152,7 +152,7 @@ export async function resolvePartnerLocationSubject(
   }
 
   const task = await Task.findById(taskId)
-    .select("partnerId assigneeId requesterId status")
+    .select("partnerId assigneeId requesterId status executionPhase")
     .lean();
 
   let subject: PartnerLocationSubject | null = null;
@@ -165,6 +165,7 @@ export async function resolvePartnerLocationSubject(
       requesterUid: null,
       partnerUid: null,
       status: String(task.status || ""),
+      executionPhase: task.executionPhase ? String(task.executionPhase) : null,
       source: "task",
     };
   } else {
@@ -371,20 +372,22 @@ export async function processPartnerLocationUpdate(
     logger.warn(`⚠️  partner location — Redis not available, skipping cache for profile: ${profileId}`);
   }
 
-  void persistPartnerLocationSnapshot({
+  const persistSnapshot = persistPartnerLocationSnapshot({
     taskId,
     partnerId: profileId,
     lat,
     lng,
     timestamp: acceptedTimestamp,
     forcePersist,
-  }).catch((err) => {
+  });
+  const logPersistenceFailure = (err: unknown) => {
     logger.warn("Partner location snapshot persistence failed", {
       taskId,
       partnerId: profileId,
       error: err instanceof Error ? err.message : String(err),
     });
-  });
+  };
+  void persistSnapshot.catch(logPersistenceFailure);
 
   // Fan-out to the customer's task room.
   emitPartnerLocation(taskId, { lat, lng, timestamp: acceptedTimestamp });

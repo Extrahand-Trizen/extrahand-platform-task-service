@@ -8,6 +8,11 @@ export interface ITaskLiveLocation extends Document {
   accuracy?: number | null;
   heading?: number | null;
   speed?: number | null;
+  journeyStartedLocation?: {
+    lat: number;
+    lng: number;
+    recordedAt: Date;
+  };
   source: 'socket';
   recordedAt: Date;
   createdAt: Date;
@@ -52,6 +57,11 @@ const TaskLiveLocationSchema = new Schema<ITaskLiveLocation>(
     speed: {
       type: Number,
       default: null,
+    },
+    journeyStartedLocation: {
+      lat: { type: Number, min: -90, max: 90 },
+      lng: { type: Number, min: -180, max: 180 },
+      recordedAt: { type: Date },
     },
     source: {
       type: String,

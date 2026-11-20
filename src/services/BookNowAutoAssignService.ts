@@ -2481,6 +2481,18 @@ export class BookNowAutoAssignService {
           dispatchLogs,
           ...(dispatchProgress ? { dispatchProgress } : {}),
         },
+        $push: {
+          assignmentAttempts: {
+            attempt: Array.isArray(task.assignmentAttempts)
+              ? task.assignmentAttempts.length + 1
+              : 1,
+            partnerId: partnerProfileId,
+            partnerUid,
+            partnerName: partner.name,
+            assignedAt: now,
+            status: 'assigned',
+          },
+        },
         $unset: { assignmentOffer: '' },
       },
       { new: true },
@@ -3162,6 +3174,18 @@ export class BookNowAutoAssignService {
           status: 'assigned',
           assignmentStatus: 'assigned',
           dispatchLogs,
+        },
+        $push: {
+          assignmentAttempts: {
+            attempt: Array.isArray(task.assignmentAttempts)
+              ? task.assignmentAttempts.length + 1
+              : 1,
+            partnerId: partnerProfileObjId,
+            partnerUid: partner.uid,
+            partnerName: partner.name,
+            assignedAt: new Date(),
+            status: 'assigned',
+          },
         },
         $unset: { assignmentOffer: '' },
       },
