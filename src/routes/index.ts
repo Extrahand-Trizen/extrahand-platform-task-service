@@ -21,6 +21,7 @@ import { asyncHandler } from '../middleware/errorHandler';
 import { CascadeDeleteController } from '../controllers/CascadeDeleteController';
 import { BookingController } from '../controllers/BookingController';
 import { RecurringVisitController } from '../controllers/RecurringVisitController';
+import { AssignmentController } from '../controllers/AssignmentController';
 import { CatalogController } from '../controllers/CatalogController';
 import { QcOrderAutoAssignController } from '../controllers/QcOrderAutoAssignController';
 import { serviceAuthMiddleware } from '../middleware/serviceAuth';
@@ -67,6 +68,12 @@ router.post(
   '/recurring/internal/visit-payment-quote',
   serviceAuthMiddleware,
   asyncHandler(RecurringVisitController.visitPaymentQuote)
+);
+
+router.get(
+  '/admin/assignment-history/:taskId',
+  serviceAuthMiddleware,
+  asyncHandler(AssignmentController.getTaskAssignmentHistory)
 );
 
 // Quick Commerce: auto-assign partner to order after payment (service-to-service)
