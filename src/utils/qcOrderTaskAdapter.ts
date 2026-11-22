@@ -207,6 +207,7 @@ export function normalizeQcOrderToTask(order: Record<string, any>): Record<strin
     executionPhase:
       order.executionPhase ||
       (order.arrivedAt ? 'arrived' : order.onTheWayAt ? 'on_the_way' : 'assigned'),
+    journeyStarted: order.journeyStarted,
     onTheWayAt: order.onTheWayAt,
     arrivedAt: order.arrivedAt,
     startOtp: order.startOtp,

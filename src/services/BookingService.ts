@@ -2440,6 +2440,7 @@ export class BookingService {
             $set: transitionPatch,
             $unset: {
               startOtp: '',
+              journeyStarted: '',
               onTheWayAt: '',
               arrivedAt: '',
               startedAt: '',
@@ -2602,6 +2603,7 @@ export class BookingService {
             $set: transitionPatch,
             $unset: {
               startOtp: '',
+              journeyStarted: '',
               onTheWayAt: '',
               arrivedAt: '',
               startedAt: '',
@@ -3338,7 +3340,7 @@ export class BookingService {
                         ? {}
                         : buildOriginalScheduleFields(previousTaskSchedule)),
                     },
-                    $unset: { startOtp: 1, onTheWayAt: 1, arrivedAt: 1 },
+                    $unset: { startOtp: 1, journeyStarted: 1, onTheWayAt: 1, arrivedAt: 1 },
                     $inc: { rescheduleCount: 1 },
                     $push: {
                       rescheduleHistory: buildRescheduleHistoryEntry({

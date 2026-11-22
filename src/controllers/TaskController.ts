@@ -289,6 +289,9 @@ export class TaskController {
     const task = await TaskService.getTaskById(req.params.id, {
       allowDeleted: isServiceCall,
       viewerUid: req.user?.uid,
+      includeJourneyStartLocation:
+        String(req.headers['x-service-name'] || (req as any).serviceName || '') ===
+        'main-admin-service',
     });
 
     // Increment views in background so response is not blocked
@@ -700,10 +703,37 @@ export class TaskController {
       throw new BadRequestError('Profile not found. Please complete onboarding.');
     }
 
+    let journeyStarted:
+      | { at: Date; location: { lat: number; lng: number } }
+      | undefined;
+    if (req.body?.journeyStarted !== undefined) {
+      const input = req.body.journeyStarted;
+      if (!input || typeof input !== 'object') {
+        throw new BadRequestError('Journey start requires a valid time and GPS location');
+      }
+      const { at, location } = input;
+      const lat = location?.lat;
+      const lng = location?.lng;
+      const timestamp = typeof at === 'string' ? new Date(at) : new Date(Number.NaN);
+      if (
+        !Number.isFinite(timestamp.getTime()) ||
+        typeof lat !== 'number' ||
+        typeof lng !== 'number' ||
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lng) ||
+        Math.abs(lat) > 90 ||
+        Math.abs(lng) > 180
+      ) {
+        throw new BadRequestError('Journey start requires a valid time and GPS location');
+      }
+      journeyStarted = { at: timestamp, location: { lat, lng } };
+    }
+
     const result = await TaskService.requestStartOtp(
       req.params.id,
       req.user!.profileId,
-      req.user!.uid
+      req.user!.uid,
+      journeyStarted,
     );
 
     ApiResponse.success(res, result, 'Task start OTP sent to requester');

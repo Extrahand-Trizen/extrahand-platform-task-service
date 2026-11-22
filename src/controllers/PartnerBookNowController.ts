@@ -628,6 +628,14 @@ export class PartnerBookNowController {
 
     // Concurrency guard: update only if unassigned
     const now = new Date();
+    const existingOrder = await CustomerOrders.findOne(
+      { _id: orderOid },
+      { projection: { assignmentAttempts: 1 } },
+    );
+    const nextAttempt =
+      (Array.isArray(existingOrder?.assignmentAttempts)
+        ? existingOrder.assignmentAttempts.length
+        : 0) + 1;
     const updateResult = await CustomerOrders.updateOne(
       {
         _id: orderOid,
@@ -670,7 +678,17 @@ export class PartnerBookNowController {
           confirmedAt: now,
           updatedAt: now,
         },
-      },
+        $push: {
+          assignmentAttempts: {
+            attempt: nextAttempt,
+            partnerId: partnerOid,
+            partnerUid: uid,
+            partnerName,
+            assignedAt: now,
+            status: 'assigned',
+          },
+        },
+      } as any,
     );
 
     if (updateResult.matchedCount === 0 || updateResult.modifiedCount === 0) {
@@ -769,7 +787,7 @@ export class PartnerBookNowController {
           completionApprovedAt: now,
           updatedAt: now,
         },
-      },
+      } as any,
     );
 
     logger.info(
@@ -1204,6 +1222,24 @@ export class PartnerBookNowController {
               cancellationReason: cancellationReason || null,
               updatedAt: new Date(),
             },
+            $push: {
+              assignmentAttempts: {
+                attempt: Array.isArray(qcOrder.assignmentAttempts)
+                  ? qcOrder.assignmentAttempts.length + 1
+                  : 1,
+                partnerId: partnerOid,
+                partnerUid: uid,
+                partnerName:
+                  qcOrder.assignedHelperName ||
+                  qcOrder.assigneeName ||
+                  qcOrder.assignedToName ||
+                  undefined,
+                assignedAt: qcOrder.assignedAt || qcOrder.partnerAcceptedAt || new Date(),
+                status: 'cancelled',
+                cancelledAt: new Date(),
+                cancellationReason: cancellationReason || null,
+              },
+            } as any,
           },
         );
 
@@ -1247,6 +1283,24 @@ export class PartnerBookNowController {
             cancelledById: partnerOid,
             cancellationReason: cancellationReason || null,
             updatedAt: new Date(),
+          },
+          $push: {
+            assignmentAttempts: {
+              attempt: Array.isArray(task.assignmentAttempts)
+                ? task.assignmentAttempts.length + 1
+                : 1,
+              partnerId: partnerOid,
+              partnerUid: uid,
+              partnerName:
+                task.assignedHelperName ||
+                task.assigneeName ||
+                task.assignedToName ||
+                undefined,
+              assignedAt: task.assignedAt || task.partnerAcceptedAt || new Date(),
+              status: 'cancelled',
+              cancelledAt: new Date(),
+              cancellationReason: cancellationReason || null,
+            },
           },
         },
         { new: true },
@@ -1387,7 +1441,7 @@ export class PartnerBookNowController {
             $set: qcUpdate,
             // Clear any stale customer-leg journey fields from older builds.
             ...(newStatus === 'started' || newStatus === 'in_progress'
-              ? { $unset: { onTheWayAt: '', arrivedAt: '' } }
+              ? { $unset: { journeyStarted: '', onTheWayAt: '', arrivedAt: '' } }
               : {}),
           },
         );

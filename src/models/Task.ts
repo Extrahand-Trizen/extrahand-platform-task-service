@@ -341,10 +341,14 @@ export interface ITask extends Document {
 
   /**
    * Journey sub-phase while task.status is still `assigned`.
-   * Helper updates this (no live GPS). OTP is issued when journey starts (`on_the_way`).
+   * The on-the-way phase starts when the helper requests the start OTP and live GPS tracking.
    */
   executionPhase?: 'assigned' | 'on_the_way' | 'arrived';
   executionPhaseUpdatedAt?: Date;
+  journeyStarted?: {
+    at: Date;
+    location?: { lat: number; lng: number } | null;
+  };
   onTheWayAt?: Date;
   arrivedAt?: Date;
 
@@ -406,6 +410,20 @@ export interface ITask extends Document {
   cancelledAt?: Date;
   cancelledById?: mongoose.Types.ObjectId; // ObjectId reference to Profile
   cancellationReason?: string;
+  assignmentAttempts?: Array<{
+    attempt: number;
+    partnerId?: mongoose.Types.ObjectId | string;
+    partnerUid?: string;
+    partnerName?: string;
+    assignedAt: Date;
+    status: 'assigned' | 'cancelled' | 'started' | 'in_progress' | 'completed';
+    cancelledAt?: Date;
+    cancellationReason?: string;
+    journeyStartedAt?: Date;
+    arrivedAt?: Date;
+    startedAt?: Date;
+    completedAt?: Date;
+  }>;
 
   /**
    * Customer soft-delete: hides from customer lists only.
@@ -928,6 +946,13 @@ const TaskSchema = new Schema<ITask>(
       index: true,
     },
     executionPhaseUpdatedAt: Date,
+    journeyStarted: {
+      at: Date,
+      location: {
+        lat: { type: Number, min: -90, max: 90 },
+        lng: { type: Number, min: -180, max: 180 },
+      },
+    },
     onTheWayAt: Date,
     arrivedAt: Date,
     startOtp: {
@@ -1095,6 +1120,29 @@ const TaskSchema = new Schema<ITask>(
       index: true,
     },
     cancellationReason: String,
+    assignmentAttempts: {
+      type: [
+        {
+          attempt: { type: Number, required: true, min: 1 },
+          partnerId: { type: Schema.Types.ObjectId, ref: "Profile" },
+          partnerUid: String,
+          partnerName: String,
+          assignedAt: { type: Date, required: true },
+          status: {
+            type: String,
+            enum: ["assigned", "cancelled", "started", "in_progress", "completed"],
+            required: true,
+          },
+          cancelledAt: Date,
+          cancellationReason: String,
+          journeyStartedAt: Date,
+          arrivedAt: Date,
+          startedAt: Date,
+          completedAt: Date,
+        },
+      ],
+      default: [],
+    },
 
     isDeletedByCustomer: { type: Boolean, default: false, index: true },
     deletedByCustomerAt: Date,

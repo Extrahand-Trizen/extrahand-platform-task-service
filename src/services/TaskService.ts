@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Task, { ITask } from "../models/Task";
+import TaskLiveLocation from "../models/TaskLiveLocation";
 import { buildOriginalScheduleFields, buildRescheduleHistoryEntry } from "../models/rescheduleHistory";
 import {
   BadRequestError,
@@ -58,6 +59,10 @@ import {
   incrementQcStartOtpAttempts,
   claimQcStartOtpVerification,
 } from '../utils/qcOrderTaskAdapter';
+import {
+  buildJourneyStartedRecord,
+  needsJourneyStartedUpdate,
+} from '../utils/journeyStarted';
 import { invalidatePartnerLocationSubject } from './PartnerLocationService';
 import {
   createStartOtpNotificationJobKey,
@@ -1204,7 +1209,11 @@ export class TaskService {
   /** Get a single task by ID directly from MongoDB. */
   static async getTaskById(
     taskId: string,
-    options?: { allowDeleted?: boolean; viewerUid?: string },
+    options?: {
+      allowDeleted?: boolean;
+      viewerUid?: string;
+      includeJourneyStartLocation?: boolean;
+    },
   ): Promise<ITask> {
     // Avoid Mongoose CastError 500s for Book Now escrow placeholders (`booknow-pending-*`).
     assertMongoObjectIdTaskId(taskId);
@@ -1379,6 +1388,45 @@ export class TaskService {
       const personalizedTask = task as unknown as Record<string, unknown>;
       personalizedTask.rejectedByCurrentHelper = rejectedByCurrentHelper;
       delete personalizedTask.rejectedByHelperUids;
+    }
+
+    if (options?.includeJourneyStartLocation) {
+      const taskDetails = task as unknown as Record<string, unknown>;
+      const executionPhase = String(taskDetails.executionPhase || '').toLowerCase();
+      const startOtp = taskDetails.startOtp;
+      const requestedAt =
+        startOtp && typeof startOtp === 'object' && 'requestedAt' in startOtp
+          ? startOtp.requestedAt
+          : undefined;
+      if (
+        !taskDetails.onTheWayAt &&
+        (executionPhase === 'on_the_way' || executionPhase === 'arrived') &&
+        requestedAt
+      ) {
+        taskDetails.onTheWayAt = requestedAt;
+      }
+
+      const storedLocation = await TaskLiveLocation.findOne({ taskId: task._id })
+        .select('lat lng recordedAt journeyStartedLocation')
+        .lean();
+      if (storedLocation) {
+        taskDetails.partnerLocation = {
+          lat: storedLocation.lat,
+          lng: storedLocation.lng,
+          recordedAt: storedLocation.recordedAt,
+        };
+        if (storedLocation.journeyStartedLocation) {
+          taskDetails.journeyStartedLocation = storedLocation.journeyStartedLocation;
+        }
+      }
+    } else {
+      const taskDetails = task as unknown as Record<string, unknown>;
+      const journeyStarted = taskDetails.journeyStarted;
+      if (journeyStarted && typeof journeyStarted === 'object') {
+        taskDetails.journeyStarted = {
+          at: (journeyStarted as { at?: unknown }).at,
+        };
+      }
     }
 
     const result = task as unknown as ITask;
@@ -2404,6 +2452,7 @@ export class TaskService {
       (task as any).executionPhaseUpdatedAt = task.lastRescheduledAt;
     }
     (task as any).startOtp = undefined;
+    (task as any).journeyStarted = undefined;
     (task as any).onTheWayAt = undefined;
     (task as any).arrivedAt = undefined;
     await task.save();
@@ -2992,6 +3041,7 @@ export class TaskService {
           qcUpdate.startedAt = now;
           qcUpdate.executionPhase = 'assigned';
           qcUpdate.executionPhaseUpdatedAt = now;
+          qcUpdate.journeyStarted = null;
           qcUpdate.onTheWayAt = null;
           qcUpdate.arrivedAt = null;
         } else if (status === 'in_progress') {
@@ -2999,6 +3049,7 @@ export class TaskService {
           qcUpdate.inProgressAt = now;
           qcUpdate.executionPhase = 'assigned';
           qcUpdate.executionPhaseUpdatedAt = now;
+          qcUpdate.journeyStarted = null;
           qcUpdate.onTheWayAt = null;
           qcUpdate.arrivedAt = null;
         } else if (status === 'completed') {
@@ -3912,6 +3963,10 @@ export class TaskService {
     taskId: string,
     profileId: mongoose.Types.ObjectId,
     _uid: string,
+    journeyStarted?: {
+      at: Date;
+      location: { lat: number; lng: number };
+    },
   ): Promise<{ sentTo: string; expiresAt: null; resendAvailable: false; deliveryStatus: 'queued' }> {
     const task = await Task.findById(taskId);
     if (!task) {
@@ -3934,6 +3989,8 @@ export class TaskService {
         let requestedAt = qcOrder.startOtp?.requestedAt
           ? new Date(qcOrder.startOtp.requestedAt)
           : now;
+        const journeyStartedRecord =
+          buildJourneyStartedRecord(qcOrder.journeyStarted, journeyStarted, now);
         if (!otp) {
           otp = String(Math.floor(1000 + Math.random() * 9000));
           await updateQcOrderById(qcOrder._id, {
@@ -3946,7 +4003,15 @@ export class TaskService {
               requestedById: profileId,
             },
             executionPhase: 'on_the_way',
-            onTheWayAt: now,
+            onTheWayAt: journeyStartedRecord.at,
+            journeyStarted: journeyStartedRecord,
+            updatedAt: now,
+          });
+        } else if (needsJourneyStartedUpdate(qcOrder.journeyStarted, journeyStarted)) {
+          await updateQcOrderById(qcOrder._id, {
+            executionPhase: 'on_the_way',
+            onTheWayAt: journeyStartedRecord.at,
+            journeyStarted: journeyStartedRecord,
             updatedAt: now,
           });
         }
@@ -4018,6 +4083,8 @@ export class TaskService {
     }
 
     const now = new Date();
+    const journeyStartedRecord =
+      buildJourneyStartedRecord(workTask.journeyStarted, journeyStarted, now);
     let otp = String(workTask.startOtp?.codeHash || '');
     let requestedAt = workTask.startOtp?.requestedAt
       ? new Date(workTask.startOtp.requestedAt)
@@ -4044,6 +4111,8 @@ export class TaskService {
               requestedById: profileId,
             },
             executionPhase: 'on_the_way',
+            onTheWayAt: journeyStartedRecord.at,
+            journeyStarted: journeyStartedRecord,
           },
         },
         { new: true },
@@ -4056,8 +4125,45 @@ export class TaskService {
       requestedAt = activeTask.startOtp.requestedAt || requestedAt;
       workTask.startOtp = activeTask.startOtp;
       workTask.executionPhase = activeTask.executionPhase;
+      workTask.onTheWayAt = activeTask.onTheWayAt;
+      workTask.journeyStarted = activeTask.journeyStarted;
       TaskService.invalidateTaskCache(effectiveTaskId);
       if (effectiveTaskId !== taskId) TaskService.invalidateTaskCache(taskId);
+      invalidatePartnerLocationSubject(effectiveTaskId);
+      if (effectiveTaskId !== taskId) invalidatePartnerLocationSubject(taskId);
+    }
+    if (needsJourneyStartedUpdate(workTask.journeyStarted, journeyStarted)) {
+      const updatedJourneyTask = await Task.findOneAndUpdate(
+        {
+          _id: workTask._id,
+          status: 'assigned',
+          $or: [
+            { 'journeyStarted.at': { $exists: false } },
+            { 'journeyStarted.at': null },
+            { 'journeyStarted.location.lat': { $exists: false } },
+            { 'journeyStarted.location.lat': null },
+            { 'journeyStarted.location.lng': { $exists: false } },
+            { 'journeyStarted.location.lng': null },
+          ],
+        },
+        {
+          $set: {
+            journeyStarted: journeyStartedRecord,
+            onTheWayAt: journeyStartedRecord.at,
+            executionPhase: 'on_the_way',
+          },
+        },
+        { new: true },
+      );
+      if (updatedJourneyTask) {
+        workTask.journeyStarted = updatedJourneyTask.journeyStarted;
+        workTask.onTheWayAt = updatedJourneyTask.onTheWayAt;
+        workTask.executionPhase = updatedJourneyTask.executionPhase;
+      }
+      TaskService.invalidateTaskCache(effectiveTaskId);
+      if (effectiveTaskId !== taskId) TaskService.invalidateTaskCache(taskId);
+      invalidatePartnerLocationSubject(effectiveTaskId);
+      if (effectiveTaskId !== taskId) invalidatePartnerLocationSubject(taskId);
     }
 
     const { workTitle: workTitleForOtp, visitNumber } =
