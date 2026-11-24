@@ -39,6 +39,7 @@ import { recurringVisitConfig } from '../config/recurringVisitConfig';
 import { schedulePostCreateNotifications } from './taskPostCreateNotifications';
 import { BookNowAutoAssignService } from './BookNowAutoAssignService';
 import {
+  isHourlyCleaningAssistTask,
   isPartnerOfferTask,
   partnerOfferTaskMongoFilter,
 } from '../utils/partnerOfferTasks';
@@ -1321,11 +1322,24 @@ export class TaskService {
               !candidate.dispatchStage,
           ),
         );
+        const refreshTeamHourlyCandidateStages =
+          isHourlyCleaningAssistTask(task) &&
+          await BookNowAutoAssignService.isExcludedCustomer(task);
 
-        // Saved dispatch logs already contain the partner list and offer stages.
-        // Recomputing eligibility on every detail poll scans approved profiles and
-        // reloads assignment rules without changing the saved list.
-        if (savedDispatchLogs.length > 0 && !hasUnstagedEligiblePartner) {
+        // Team-posted Hourly Helper candidates are previews; retag saved candidates
+        // from the current Hourly rules without rescanning all partner profiles.
+        if (refreshTeamHourlyCandidateStages) {
+          task.dispatchLogs =
+            await BookNowAutoAssignService.refreshTeamHourlyDispatchPreview(
+              task,
+              savedDispatchLogs,
+            );
+          task.dispatchProgress =
+            BookNowAutoAssignService.refreshDispatchProgressCounts(
+              task.dispatchProgress,
+              task.dispatchLogs,
+            );
+        } else if (savedDispatchLogs.length > 0 && !hasUnstagedEligiblePartner) {
           task.dispatchProgress = BookNowAutoAssignService.refreshDispatchProgressCounts(
             task.dispatchProgress,
             savedDispatchLogs,

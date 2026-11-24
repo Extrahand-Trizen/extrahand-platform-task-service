@@ -159,8 +159,10 @@ assert.equal(
 );
 const siddipetHourlyCleaningTask = {
   ...siddipetBookNowCleaningTask,
-  bookingSource: 'marketplace',
-  subcategory: 'hourly-help',
+  categorySlug: 'hourly-helper',
+  categoryLabel: 'Hourly Helper',
+  subcategory: 'hourly-3h',
+  title: 'ExtraHand Assist · 3 hours',
   location: { taskArea: 'Siddipet', city: 'Siddipet' },
 } as any;
 assert.equal(
@@ -170,7 +172,16 @@ assert.equal(
     workTypes: ['hourly'],
   }),
   true,
-  'Hourly cleaning must match its exact Siddipet preferred-partner rule',
+  'Book Now Hourly Helper cleaning must match its exact Siddipet hourly preferred-partner rule',
+);
+assert.equal(
+  isApplicableAreaRuleForTask(siddipetHourlyCleaningTask, {
+    area: 'Siddipet',
+    category: 'cleaning',
+    workTypes: ['book_now'],
+  }),
+  false,
+  'Book Now source must not override the Hourly Helper preference rule',
 );
 assert.equal(
   isApplicableAreaRuleForTask(siddipetHourlyCleaningTask, {

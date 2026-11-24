@@ -27,6 +27,7 @@ import {
   undispatchedBookNowOfferFilter,
 } from '../utils/bookNowOfferState';
 import {
+  isHourlyCleaningAssistTask,
   isHourlyPartnerOfferTask,
   isPartnerOfferTask,
   partnerOfferTaskMongoFilter,
@@ -247,10 +248,13 @@ export function isApplicableAreaRuleForTask(
   const isBookNow = task.bookingSource === 'book_now';
   const isHourly = isHourlyTask(task);
   const homeCleaning = isHomeCleaningTask(task);
+  const isHourlyCleaningAssist = isHourlyCleaningAssistTask(task);
   const appliesToWorkType =
     workTypes.includes('all') ||
-    (isBookNow && workTypes.includes('book_now')) ||
+    (isHourlyCleaningAssist && workTypes.includes('hourly')) ||
+    (!isHourlyCleaningAssist && isBookNow && workTypes.includes('book_now')) ||
     (!isBookNow &&
+      !isHourlyCleaningAssist &&
       (isHourly || homeCleaning) &&
       workTypes.includes('hourly'));
   const matchesCategory =
@@ -1102,6 +1106,39 @@ export class BookNowAutoAssignService {
           candidate.dispatchStage ||
           dispatchLogs[areaIndex]?.candidates[candidateIndex]?.dispatchStage,
       })),
+    }));
+  }
+
+  static async refreshTeamHourlyDispatchPreview(
+    task: ITask,
+    dispatchLogs: IDispatchAreaLog[],
+  ): Promise<IDispatchAreaLog[]> {
+    const preferredIds = new Set(
+      (await BookNowAutoAssignService.findApplicableAreaRules(task))
+        .flatMap((rule) => rule.preferredPartners || [])
+        .filter((partner) => partner.active !== false)
+        .flatMap((partner) => [partner.uid, partner.profileId])
+        .map((identifier) => String(identifier || '').trim())
+        .filter(Boolean),
+    );
+
+    return dispatchLogs.map((area) => ({
+      ...area,
+      candidates: area.candidates.map((candidate) => {
+        const identifiers = [candidate.partnerUid, candidate.partnerId]
+          .map((identifier) => String(identifier || '').trim())
+          .filter(Boolean);
+        const isPreferred = identifiers.some((identifier) => preferredIds.has(identifier));
+        if (isPreferred) return { ...candidate, dispatchStage: 'area_rule' };
+        const wasStaged =
+          candidate.dispatchStage === 'area_rule' || candidate.dispatchStage === 'all';
+        if (wasStaged && candidate.status !== 'ineligible' && candidate.partnerUid) {
+          return { ...candidate, dispatchStage: 'all' };
+        }
+
+        const { dispatchStage: _staleStage, ...candidateWithoutStage } = candidate;
+        return candidateWithoutStage;
+      }),
     }));
   }
 
