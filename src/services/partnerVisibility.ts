@@ -171,8 +171,8 @@ const PARTNER_CATEGORY_TO_TASK_CATEGORIES: Record<string, string[]> = {
   // Plumbing
   plumbing: ['repair'],
   // Carpentry
-  carpentry: ['repair'],
-  carpenter: ['repair'],
+  carpentry: ['repair', 'carpentry'],
+  carpenter: ['repair', 'carpentry'],
   // Pest control
   pest_control: ['other'],
   'pest-control': ['other'],

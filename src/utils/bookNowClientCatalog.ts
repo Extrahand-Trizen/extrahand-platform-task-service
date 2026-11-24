@@ -107,10 +107,20 @@ export const BOOK_NOW_TASK_CATEGORY_BY_CATALOG: Record<string, TaskCategory> = {
   'plumbing-bath-shower': 'repair',
   'plumbing-general': 'repair',
   // Carpentry services
-  carpentry: 'repair',
-  'carpentry-door-window': 'repair',
-  'carpentry-furniture': 'repair',
-  'carpentry-general': 'repair',
+  carpenter: 'carpentry',
+  carpentry: 'carpentry',
+  'carpenter-cupboard-drawer': 'carpentry',
+  'carpenter-kitchen-fittings': 'carpentry',
+  'carpenter-shelves-wall-decor': 'carpentry',
+  'carpenter-door': 'carpentry',
+  'carpenter-windows-curtain': 'carpentry',
+  'carpenter-furniture-repair': 'carpentry',
+  'carpenter-furniture-assembly': 'carpentry',
+  'carpenter-wardrobe': 'carpentry',
+  'carpenter-clothes-hangers': 'carpentry',
+  'carpentry-door-window': 'carpentry',
+  'carpentry-furniture': 'carpentry',
+  'carpentry-general': 'carpentry',
   // Pest control
   'pest-control': 'other',
   'pest-control-termite': 'other',
@@ -126,6 +136,8 @@ const TASK_CATEGORY_ALIASES: Record<string, TaskCategory> = {
   helper: 'other',
   'hourly-helper': 'other',
   handyman: 'repair',
+  carpenter: 'carpentry',
+  carpentry: 'carpentry',
   cleaning: 'cleaning',
   repair: 'repair',
   delivery: 'delivery',
@@ -148,7 +160,7 @@ export function resolveBookNowTaskCategory(catalogId: string): TaskCategory {
   if (key === 'painting' || key.startsWith('painting-')) return 'other';
   if (key === 'electrician' || key.startsWith('electrician-')) return 'repair';
   if (key === 'plumbing' || key.startsWith('plumbing-')) return 'repair';
-  if (key === 'carpentry' || key.startsWith('carpentry-')) return 'repair';
+  if (key === 'carpentry' || key.startsWith('carpentry-') || key === 'carpenter' || key.startsWith('carpenter-')) return 'carpentry';
   if (key === 'pest-control' || key.startsWith('pest-control-')) return 'other';
   if (key === 'bath-accessories' || key.startsWith('bath-accessories-')) return 'repair';
   return 'cleaning';

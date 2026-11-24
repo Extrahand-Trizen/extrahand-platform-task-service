@@ -1330,8 +1330,8 @@ export class TaskService {
             task.dispatchProgress,
             savedDispatchLogs,
           );
-        } else {
-          if (isUnassignedOpenTask && !task.assignmentOffer) {
+        } else if (isUnassignedOpenTask) {
+          if (!task.assignmentOffer) {
             await BookNowAutoAssignService.dispatchBookNowOffers(task);
             const refreshedTask = await Task.findById(taskId).lean();
             if (refreshedTask) {
