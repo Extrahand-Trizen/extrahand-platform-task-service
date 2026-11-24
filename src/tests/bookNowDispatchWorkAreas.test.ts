@@ -32,6 +32,21 @@ assert.equal(
   'Hourly Based tasks must use partner offers',
 );
 assert.equal(
+  isHourlyPartnerOfferTask({
+    category: 'cleaning',
+    subcategory: 'hourly-help',
+  }),
+  true,
+  'Cleaning tasks with an hourly-help subcategory must use partner offers',
+);
+assert.equal(
+  isHourlyPartnerOfferTask({
+    title: 'ExtraHand Assist · 2 hours',
+  }),
+  true,
+  'ExtraHand Assist duration titles must use partner offers',
+);
+assert.equal(
   isConfiguredOfferPartner(
     {
       uid: 'firebase-partner-uid',
