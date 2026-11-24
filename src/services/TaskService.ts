@@ -3624,14 +3624,15 @@ export class TaskService {
             await InAppNotificationClient.send({
               userId: requesterProfile.uid,
               title: 'Task cancelled',
-              body: `The task "${task.title}" has been cancelled. Amount will be refunded within 5-7 days.`,
+              body: `The task "${task.title}" has been cancelled.`,
               type: 'warning',
-              category: 'payments',
+              category: 'taskUpdates',
               data: {
                 taskId: taskId.toString(),
                 actionUrl: `/tasks/${taskId}/track`,
-                eventKey: 'REFUND_INITIATED',
-                entityType: 'refund',
+                eventKey: 'TASK_CANCELLED_CUSTOMER',
+                entityType: 'task',
+                recipientRole: 'customer',
               },
             });
 
@@ -3640,14 +3641,16 @@ export class TaskService {
               category: 'taskUpdates',
               actorId: 'system',
               recipients: [requesterProfile.uid],
+              recipientRole: 'customer',
               entity: { type: 'task', id: taskId.toString() },
               title: 'Task cancelled',
-              body: `The task "${task.title}" has been cancelled. Amount will be refunded within 5-7 days.`,
+              body: `The task "${task.title}" has been cancelled.`,
               data: {
                 taskId: taskId.toString(),
                 actionUrl: `/tasks/${taskId}/track`,
-                eventKey: 'REFUND_INITIATED',
-                entityType: 'refund',
+                eventKey: 'TASK_CANCELLED_CUSTOMER',
+                entityType: 'task',
+                recipientRole: 'customer',
               },
             });
           }

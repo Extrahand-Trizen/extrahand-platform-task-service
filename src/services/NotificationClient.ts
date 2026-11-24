@@ -30,6 +30,7 @@ export interface NotificationEvent {
   body: string; // Main message
 
   data?: Record<string, any>; // Extra info for frontend navigation (taskId, etc.)
+  recipientRole?: string;
   eventId?: string;
   skipWhatsApp?: boolean;
   createdAt?: Date;
