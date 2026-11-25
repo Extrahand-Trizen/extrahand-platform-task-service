@@ -344,7 +344,7 @@ function normalizePhone(phone: unknown): string {
   return String(phone || '').replace(/\D/g, '');
 }
 
-function phoneMatchesExcluded(phone: unknown, excludedPhones: string[]): boolean {
+export function phoneMatchesExcluded(phone: unknown, excludedPhones: string[]): boolean {
   const normalized = normalizePhone(phone);
   if (!normalized) return false;
   const lastTen = normalized.slice(-10);
@@ -352,6 +352,25 @@ function phoneMatchesExcluded(phone: unknown, excludedPhones: string[]): boolean
     const normalizedExcluded = normalizePhone(excluded);
     return normalizedExcluded === normalized || normalizedExcluded.slice(-10) === lastTen;
   });
+}
+
+export function filterTeamPostedPartnerUids(
+  recipientUids: string[],
+  profiles: Array<Record<string, unknown>>,
+  excludedPhones: string[],
+): string[] {
+  const teamPartnerUids = new Set(
+    profiles
+      .filter((profile) =>
+        phoneMatchesExcluded(
+          profile.phone || profile.phoneNumber || profile.mobile,
+          excludedPhones,
+        ),
+      )
+      .map((profile) => String(profile.uid || '').trim())
+      .filter(Boolean),
+  );
+  return recipientUids.filter((uid) => teamPartnerUids.has(uid));
 }
 
 const SHIFT_WINDOWS: Record<string, { start: number; end: number; label: string }> = {
@@ -732,15 +751,6 @@ export function mergeActiveOfferRecipients(
     recipients.set(partner.uid, partner);
   }
   return Array.from(recipients.values());
-}
-
-export function getBookNowNotificationTiers(
-  tiers: Record<OfferStage, EligiblePartner[]>,
-  isTeamPosted: boolean,
-): Record<OfferStage, EligiblePartner[]> {
-  return isTeamPosted
-    ? { preferred: [], area_rule: [], all: [] }
-    : tiers;
 }
 
 export interface AutoAssignResult {
@@ -1395,12 +1405,25 @@ export class BookNowAutoAssignService {
       return recipientUids;
     }
 
-    logger.info('[BookNowAutoAssign] Suppressed partner notifications for team-posted work', {
+    const profiles = await mongoose.connection
+      .collection('profiles')
+      .find(
+        { uid: { $in: recipientUids } },
+        { projection: { uid: 1, phone: 1, phoneNumber: 1, mobile: 1 } },
+      )
+      .toArray() as Array<Record<string, unknown>>;
+    const allowedRecipientUids = filterTeamPostedPartnerUids(
+      recipientUids,
+      profiles,
+      excludedPhones,
+    );
+    logger.info('[BookNowAutoAssign] Filtered team-posted notifications to team partners', {
       taskId: String(task._id),
       stage,
       eligibleRecipientCount: recipientUids.length,
+      teamPartnerRecipientCount: allowedRecipientUids.length,
     });
-    return [];
+    return allowedRecipientUids;
   }
 
   private static async sendOfferNotification(
@@ -1728,10 +1751,7 @@ export class BookNowAutoAssignService {
     );
     const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
     const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
-    const notificationTiers = getBookNowNotificationTiers(
-      tiers,
-      isTeamPosted,
-    );
+    const notificationTiers = tiers;
     const firstStage = getFirstAvailableOfferStage(tiers);
     const dispatchStartedAt = new Date();
     const dispatchProgress = BookNowAutoAssignService.buildDispatchProgress(
@@ -1949,12 +1969,7 @@ export class BookNowAutoAssignService {
     const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
     const { tiers, configuredStageByUid } =
       await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
-    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
-    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
-    const notificationTiers = getBookNowNotificationTiers(
-      tiers,
-      isTeamPosted,
-    );
+    const notificationTiers = tiers;
     const activeUids = new Set(currentOffer.recipientUids || []);
     const rejectedUids = new Set(currentOffer.rejectedPartnerUids || []);
     for (let index = currentStageIndex + 1; index < OFFER_STAGES.length; index += 1) {
@@ -2029,10 +2044,7 @@ export class BookNowAutoAssignService {
       await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
     const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
     const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
-    const notificationTiers = getBookNowNotificationTiers(
-      tiers,
-      isTeamPosted,
-    );
+    const notificationTiers = tiers;
     if (stage === 'all') {
       const preferredProgress = task.dispatchProgress?.stages.find(
         (stageProgress) => stageProgress.stage === 'area_rule',
@@ -2073,13 +2085,21 @@ export class BookNowAutoAssignService {
           .filter((uid): uid is string => Boolean(uid)),
       ),
     );
+    const teamEligibleUids = new Set(
+      await BookNowAutoAssignService.filterTeamPostedRecipientUids(
+        task,
+        notificationTiers[stage].map((partner) => partner.uid),
+        stage,
+      ),
+    );
     const newlyNotifiedRecipients = notificationTiers[stage].filter(
-      (partner) => !alreadyNotifiedUids.has(partner.uid),
+      (partner) =>
+        teamEligibleUids.has(partner.uid) && !alreadyNotifiedUids.has(partner.uid),
     );
     if (!newlyNotifiedRecipients.length) {
       throw new BadRequestError(
         isTeamPosted
-          ? 'Partner notifications are disabled for team-posted work'
+          ? 'No eligible team partners with phones in Task-Posted Email exclusions are available in this stage'
           : `No unnotified eligible partners are available in the ${stage} stage`,
       );
     }
@@ -2189,10 +2209,7 @@ export class BookNowAutoAssignService {
     if (await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones)) {
       const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
       const { tiers } = await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
-      const notificationTiers = getBookNowNotificationTiers(
-        tiers,
-        true,
-      );
+      const notificationTiers = tiers;
       const notificationEligibleUids = new Set(
         OFFER_STAGES.flatMap((stage) => notificationTiers[stage]).map(
           (partner) => partner.uid,
@@ -2246,12 +2263,7 @@ export class BookNowAutoAssignService {
     const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
     const { tiers, configuredStageByUid } =
       await BookNowAutoAssignService.resolveOfferTiers(task, eligiblePartners);
-    const excludedPhones = await BookNowAutoAssignService.getTaskPostedExcludedPhones();
-    const isTeamPosted = await BookNowAutoAssignService.isExcludedCustomer(task, excludedPhones);
-    const notificationTiers = getBookNowNotificationTiers(
-      tiers,
-      isTeamPosted,
-    );
+    const notificationTiers = tiers;
     const rejectedUids = new Set(task.assignmentOffer.rejectedPartnerUids || []);
     const recipients = getAllBookNowOfferRecipients(notificationTiers).filter(
       (partner) => !rejectedUids.has(partner.uid),
