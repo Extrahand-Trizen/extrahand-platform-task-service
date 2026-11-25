@@ -3945,6 +3945,14 @@ export class BookingService {
     order.cancellationReason = cancelReason;
     await order.save();
 
+    void BookingService.notifyCustomerOnBookingCancelled({
+      customerUid,
+      orderId,
+      taskId: primaryTask ? String(primaryTask._id) : undefined,
+      taskTitle: primaryTask?.title || 'Project Booking',
+      isPaidOrRefund: Boolean(order.paidAt),
+    });
+
     logger.info('Project booking cancelled', {
       orderId,
       taskId: String(primaryTask._id),
@@ -4105,11 +4113,12 @@ export class BookingService {
 
     await order.save();
 
-    logger.info('Hourly cancellation settled and finalized', {
+    void BookingService.notifyCustomerOnBookingCancelled({
+      customerUid,
       orderId,
-      reasonCode: result.reasonCode,
-      refundAmountPaise: result.settlement.refundAmountPaise,
-      workerCompensationPaise: result.settlement.workerCompensationPaise,
+      taskId: tasks[0] ? String(tasks[0]._id) : undefined,
+      taskTitle: tasks[0]?.title || 'Hourly Helper Booking',
+      isPaidOrRefund: Boolean(order.paidAt),
     });
 
     return {
@@ -4147,20 +4156,20 @@ export class BookingService {
     }
 
     const items = await BookingItem.find({ orderId });
-    const item = items.find((i) => String(i.taskId) === taskId);
+    const item = items.find((i) => String(i.taskId) === String(taskId) || String(i._id) === String(taskId));
     if (!item) throw new NotFoundError('Service not found in this booking');
     if (item.status === 'cancelled') {
       throw new BadRequestError('This service is already cancelled');
     }
 
-    const task = await Task.findById(taskId);
+    const task = await Task.findById(item.taskId || taskId);
     if (!task) throw new NotFoundError('Task not found');
     if (task.status !== 'open' && task.status !== 'assigned') {
       throw new BadRequestError('This service can no longer be cancelled');
     }
 
     const remainingActive = items.filter(
-      (i) => i.status !== 'cancelled' && String(i.taskId) !== taskId,
+      (i) => i.status !== 'cancelled' && String(i.taskId) !== String(task._id) && String(i._id) !== String(item._id),
     );
     const isLastActiveItem = remainingActive.length === 0;
     const isMultiItem = items.length > 1;
@@ -4260,6 +4269,14 @@ export class BookingService {
 
     await order.save();
 
+    void BookingService.notifyCustomerOnBookingCancelled({
+      customerUid,
+      orderId,
+      taskId: String(task._id),
+      taskTitle: task.title || item.skuSnapshot?.name || 'Booking',
+      isPaidOrRefund: Boolean(order.paidAt || (paymentCancellationResult as any)?.success),
+    });
+
     return { order, item, remainingItems: remainingActive, paymentCancellationResult };
   }
 
@@ -4357,6 +4374,74 @@ export class BookingService {
     order.cancellationReason = reason;
     await order.save();
 
+    void BookingService.notifyCustomerOnBookingCancelled({
+      customerUid,
+      orderId,
+      taskId: taskIds[0] ? String(taskIds[0]) : undefined,
+      taskTitle: items[0]?.skuSnapshot?.name || 'Booking',
+      isPaidOrRefund: Boolean(order.paidAt || refundInitiated),
+    });
+
     return { order, items, paymentCancellationResult };
+  }
+
+  private static async notifyCustomerOnBookingCancelled(params: {
+    customerUid: string;
+    orderId: string;
+    taskId?: string;
+    taskTitle?: string;
+    isPaidOrRefund?: boolean;
+  }): Promise<void> {
+    const { customerUid, orderId, taskId, taskTitle } = params;
+    try {
+      const displayTitle = taskTitle || 'Booking';
+      const notifTitle = 'Booking cancelled';
+      const notifBody = `Your booking for "${displayTitle}" has been cancelled.`;
+
+      await InAppNotificationClient.send({
+        userId: customerUid,
+        title: notifTitle,
+        body: notifBody,
+        type: 'warning',
+        category: 'taskUpdates',
+        data: {
+          orderId,
+          ...(taskId ? { taskId } : {}),
+          eventKey: 'TASK_CANCELLED_CUSTOMER',
+          entityType: 'booking',
+          recipientRole: 'customer',
+        },
+      });
+
+      await NotificationClient.send({
+        eventKey: 'TASK_CANCELLED_CUSTOMER',
+        category: 'taskUpdates',
+        actorId: 'system',
+        recipients: [customerUid],
+        recipientRole: 'customer',
+        entity: { type: 'task', id: taskId || orderId },
+        title: notifTitle,
+        body: notifBody,
+        data: {
+          orderId,
+          ...(taskId ? { taskId } : {}),
+          eventKey: 'TASK_CANCELLED_CUSTOMER',
+          entityType: 'booking',
+          recipientRole: 'customer',
+        },
+      });
+      logger.info('Dispatched customer booking cancelled notification', {
+        orderId,
+        taskId,
+        customerUid,
+      });
+    } catch (err: any) {
+      logger.warn('Failed to dispatch customer cancellation notification', {
+        orderId,
+        taskId,
+        customerUid,
+        error: err?.message,
+      });
+    }
   }
 }
