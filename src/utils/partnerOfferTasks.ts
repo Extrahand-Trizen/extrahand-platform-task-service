@@ -14,14 +14,23 @@ const HOURLY_LABEL_PATTERN = /^hourly (based|helper)$/i;
 const HOURLY_SUBCATEGORY_PATTERN = /(?:^|[\s_-])hourly(?:[\s_-]*(?:help|helper|based))?(?:[\s_-]|$)/i;
 const HOURLY_ASSIST_TITLE_PATTERN = /^ExtraHand Assist(?:\s*[·-])?\s*(?:\d+(?:\.\d+)?|[Xx])?\s*(?:hour|hr|minute|min)s?(?:\b|$)/i;
 
-export function isHourlyPartnerOfferTask(task: PartnerOfferTask): boolean {
+export function isHourlyCleaningAssistTask(task: PartnerOfferTask): boolean {
+  const categoryValues = [task.category, task.categorySlug, task.categoryLabel]
+    .map((value) => String(value || '').trim().toLowerCase());
+  const isCleaningTask = categoryValues.some((value) =>
+    value === 'cleaning' || value.includes('cleaning'),
+  );
   const subcategory = String(task.subcategory || '').trim();
   const title = String(task.title || '').trim();
-  const category = String(task.category || '').trim().toLowerCase();
-  const categorySlug = String(task.categorySlug || '').trim().toLowerCase();
-  const isCleaningHourly =
-    (category === 'cleaning' || categorySlug.includes('clean') || categorySlug === 'hourly-helper') &&
-    (HOURLY_SUBCATEGORY_PATTERN.test(subcategory) || HOURLY_ASSIST_TITLE_PATTERN.test(title));
+
+  return isCleaningTask && (
+    HOURLY_SUBCATEGORY_PATTERN.test(subcategory) ||
+    HOURLY_ASSIST_TITLE_PATTERN.test(title)
+  );
+}
+
+export function isHourlyPartnerOfferTask(task: PartnerOfferTask): boolean {
+  const title = String(task.title || '').trim();
 
   return (
     HOURLY_CATEGORY_PATTERN.test(String(task.categorySlug || '').trim()) ||
@@ -29,7 +38,7 @@ export function isHourlyPartnerOfferTask(task: PartnerOfferTask): boolean {
     HOURLY_LABEL_PATTERN.test(String(task.categoryLabel || '').trim()) ||
     String(task.budget?.type || '').trim().toLowerCase() === 'hourly' ||
     task.hourlyHelper === true ||
-    isCleaningHourly ||
+    isHourlyCleaningAssistTask(task) ||
     HOURLY_ASSIST_TITLE_PATTERN.test(title)
   );
 }

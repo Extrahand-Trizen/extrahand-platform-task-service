@@ -3,8 +3,6 @@ import {
   BookNowAutoAssignService,
   buildOrderedWorkAreasForDispatch,
   canStartAllOfferStage,
-  filterTeamPostedOfferTiers,
-  filterTeamPostedRecipientUids,
   getBookNowScheduledStartAt,
   getAllBookNowOfferRecipients,
   getBookNowNotificationTiers,
@@ -158,6 +156,41 @@ assert.equal(
   ),
   true,
   'City-level preferences must apply when the work area is a neighborhood in that city',
+);
+const siddipetHourlyCleaningTask = {
+  ...siddipetBookNowCleaningTask,
+  categorySlug: 'hourly-helper',
+  categoryLabel: 'Hourly Helper',
+  subcategory: 'hourly-3h',
+  title: 'ExtraHand Assist · 3 hours',
+  location: { taskArea: 'Siddipet', city: 'Siddipet' },
+} as any;
+assert.equal(
+  isApplicableAreaRuleForTask(siddipetHourlyCleaningTask, {
+    area: 'Siddipet',
+    category: 'cleaning',
+    workTypes: ['hourly'],
+  }),
+  true,
+  'Book Now Hourly Helper cleaning must match its exact Siddipet hourly preferred-partner rule',
+);
+assert.equal(
+  isApplicableAreaRuleForTask(siddipetHourlyCleaningTask, {
+    area: 'Siddipet',
+    category: 'cleaning',
+    workTypes: ['book_now'],
+  }),
+  false,
+  'Book Now source must not override the Hourly Helper preference rule',
+);
+assert.equal(
+  isApplicableAreaRuleForTask(siddipetHourlyCleaningTask, {
+    area: 'Siddipet Rural',
+    category: 'cleaning',
+    workTypes: ['hourly'],
+  }),
+  false,
+  'A partial area-name match must not add another preferred-partner rule',
 );
 
 const siddipetTask = {
@@ -342,17 +375,21 @@ assert.equal(
 const preferredNotAllowlisted = {
   preferred: [],
   area_rule: [partner('preferred-not-allowlisted', '1111111111')],
-  all: [partner('team-allowlisted-other', '9999999999')],
+  all: [partner('other-not-allowlisted', '8888888888')],
 };
 const teamFilteredPreferred = getBookNowNotificationTiers(
   preferredNotAllowlisted,
   true,
-  ['9999999999'],
 );
 assert.deepStrictEqual(
   teamFilteredPreferred.area_rule,
   [],
-  'Team-posted preferred partners outside the allowlist must not receive notifications',
+  'Team-posted preferred partners must not receive notifications',
+);
+assert.deepStrictEqual(
+  teamFilteredPreferred.all,
+  [],
+  'Team-posted other eligible partners must not receive notifications',
 );
 assert.equal(
   getFirstAvailableOfferStage(preferredNotAllowlisted),
@@ -459,30 +496,9 @@ const teamTiers = {
   area_rule: [partner('other-area-partner', '8888888888')],
   all: [partner('other-eligible-partner', '7777777777')],
 };
-const teamNotificationTiers = filterTeamPostedOfferTiers(teamTiers, ['9999999999']);
-assert.deepStrictEqual(
-  teamNotificationTiers.preferred.map(({ uid }) => uid),
-  ['allowlisted-partner'],
-  'Team work should notify only partners whose phone matches the exclusions list',
-);
-assert.deepStrictEqual(teamNotificationTiers.area_rule, []);
-assert.deepStrictEqual(teamNotificationTiers.all, []);
-assert.deepStrictEqual(
-  filterTeamPostedRecipientUids(
-    ['allowlisted-partner', 'other-partner'],
-    [
-      { uid: 'allowlisted-partner', phoneNumber: '+91 99999 99999' },
-      { uid: 'other-partner', phone: '8888888888' },
-    ],
-    ['9999999999'],
-  ),
-  ['allowlisted-partner'],
-  'The notification handoff must suppress recipients outside the team phone allowlist',
-);
 const customerNotificationTiers = getBookNowNotificationTiers(
   teamTiers,
   false,
-  ['9999999999'],
 );
 assert.deepStrictEqual(
   customerNotificationTiers,
