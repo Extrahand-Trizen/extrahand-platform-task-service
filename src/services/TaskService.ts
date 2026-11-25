@@ -3245,26 +3245,86 @@ export class TaskService {
               ? taskBudgetAmount
               : undefined,
         });
-        const payResult = await PaymentClient.cancelPaymentForTask({
-          taskId: cancelTaskId,
-          escrowId: escrowPublicId,
-          bookingOrderId:
-            typeof task.bookingOrderId === 'string' && task.bookingOrderId.trim()
-              ? task.bookingOrderId.trim()
+
+        // If this task belongs to a multi-item Book Now booking order,
+        // do NOT cancel the entire order's escrow here!
+        // Instead, perform a partial line-item refund so other services in the booking remain active.
+        let isMultiItemBookNow = false;
+        let bookNowOrderId: string | undefined = undefined;
+        if (typeof task.bookingOrderId === 'string' && task.bookingOrderId.trim()) {
+          bookNowOrderId = task.bookingOrderId.trim();
+          const siblingItems = await BookingItem.find({ orderId: bookNowOrderId });
+          if (siblingItems.length > 1) {
+            isMultiItemBookNow = true;
+          }
+        }
+
+        let payResult: any;
+        if (isMultiItemBookNow && bookNowOrderId) {
+          const siblingItems = await BookingItem.find({ orderId: bookNowOrderId });
+          const matchedItem = siblingItems.find((i) => String(i.taskId) === String(task._id));
+          const remainingActive = siblingItems.filter(
+            (i) => i.status !== 'cancelled' && String(i.taskId) !== String(task._id)
+          );
+          const isLastActiveItem = remainingActive.length === 0;
+          const assignedAtIso = task.assignedAt ? new Date(task.assignedAt).toISOString() : null;
+          const catalogId = matchedItem?.skuSnapshot?.categorySlug || task.categorySlug;
+          const partnerAssigned = Boolean(task.performerId);
+          const partnerReachedLocation = partnerAssigned && Boolean((task as any).reachedLocationAt);
+
+          payResult = await PaymentClient.partialRefundBookNowLineItem({
+            bookingOrderId: bookNowOrderId,
+            taskId: String(task._id),
+            lineAmountRupees: matchedItem?.lineTotal ?? taskBudgetAmount ?? 0,
+            taskStartDate: taskStart.toISOString(),
+            assignedAt: assignedAtIso,
+            reason: options?.cancellationReason || 'Task cancelled',
+            userId: uid,
+            taskTitle: task.title,
+            isLastActiveItem,
+            catalogId,
+            partnerReachedLocation,
+            partnerAssigned,
+          });
+
+          // Also mark the specific booking item as cancelled
+          if (matchedItem) {
+            matchedItem.status = 'cancelled';
+            matchedItem.cancelledAt = new Date();
+            matchedItem.cancellationReason = options?.cancellationReason || 'Task cancelled';
+            await matchedItem.save();
+          }
+          if (isLastActiveItem) {
+            const bOrder = await BookingOrder.findOne({ orderId: bookNowOrderId });
+            if (bOrder) {
+              bOrder.status = bOrder.paidAt ? 'refunded' : 'cancelled';
+              bOrder.cancelledAt = new Date();
+              bOrder.cancellationReason = options?.cancellationReason;
+              await bOrder.save();
+            }
+          }
+        } else {
+          payResult = await PaymentClient.cancelPaymentForTask({
+            taskId: cancelTaskId,
+            escrowId: escrowPublicId,
+            bookingOrderId:
+              typeof task.bookingOrderId === 'string' && task.bookingOrderId.trim()
+                ? task.bookingOrderId.trim()
+                : undefined,
+            reason: options?.cancellationReason,
+            userId: uid,
+            cancelledBy: isRequesterCancelled ? "poster" : "performer",
+            taskStartDate: taskStart.toISOString(),
+            assignedAt: task.assignedAt
+              ? new Date(task.assignedAt).toISOString()
               : undefined,
-          reason: options?.cancellationReason,
-          userId: uid,
-          cancelledBy: isRequesterCancelled ? "poster" : "performer",
-          taskStartDate: taskStart.toISOString(),
-          assignedAt: task.assignedAt
-            ? new Date(task.assignedAt).toISOString()
-            : undefined,
-          feeBaseAmount:
-            taskBudgetAmount !== undefined && Number.isFinite(taskBudgetAmount)
-              ? taskBudgetAmount
-              : undefined,
-          taskTitle: typeof task.title === "string" ? task.title : undefined,
-        });
+            feeBaseAmount:
+              taskBudgetAmount !== undefined && Number.isFinite(taskBudgetAmount)
+                ? taskBudgetAmount
+                : undefined,
+            taskTitle: typeof task.title === "string" ? task.title : undefined,
+          });
+        }
         cancellationPaymentResult = payResult;
         logger.info('[TaskService.updateTaskStatus] Cancellation payment workflow completed', {
           taskId,

@@ -4156,20 +4156,20 @@ export class BookingService {
     }
 
     const items = await BookingItem.find({ orderId });
-    const item = items.find((i) => String(i.taskId) === taskId);
+    const item = items.find((i) => String(i.taskId) === String(taskId) || String(i._id) === String(taskId));
     if (!item) throw new NotFoundError('Service not found in this booking');
     if (item.status === 'cancelled') {
       throw new BadRequestError('This service is already cancelled');
     }
 
-    const task = await Task.findById(taskId);
+    const task = await Task.findById(item.taskId || taskId);
     if (!task) throw new NotFoundError('Task not found');
     if (task.status !== 'open' && task.status !== 'assigned') {
       throw new BadRequestError('This service can no longer be cancelled');
     }
 
     const remainingActive = items.filter(
-      (i) => i.status !== 'cancelled' && String(i.taskId) !== taskId,
+      (i) => i.status !== 'cancelled' && String(i.taskId) !== String(task._id) && String(i._id) !== String(item._id),
     );
     const isLastActiveItem = remainingActive.length === 0;
     const isMultiItem = items.length > 1;
