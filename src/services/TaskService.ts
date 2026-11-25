@@ -3269,7 +3269,7 @@ export class TaskService {
           const isLastActiveItem = remainingActive.length === 0;
           const assignedAtIso = task.assignedAt ? new Date(task.assignedAt).toISOString() : null;
           const catalogId = matchedItem?.skuSnapshot?.categorySlug || task.categorySlug;
-          const partnerAssigned = Boolean(task.performerId);
+          const partnerAssigned = Boolean(task.acceptedApplicationId || (task as any).performerId);
           const partnerReachedLocation = partnerAssigned && Boolean((task as any).reachedLocationAt);
 
           payResult = await PaymentClient.partialRefundBookNowLineItem({
@@ -3279,7 +3279,7 @@ export class TaskService {
             taskStartDate: taskStart.toISOString(),
             assignedAt: assignedAtIso,
             reason: options?.cancellationReason || 'Task cancelled',
-            userId: uid,
+            userId: uid || '',
             taskTitle: task.title,
             isLastActiveItem,
             catalogId,
