@@ -133,6 +133,12 @@ export function isHourlyBookingFromHints(hints: HourlyLineHint[]): boolean {
   );
 }
 
+export function hasSingleActiveBookingItem(
+  items: ReadonlyArray<{ status?: string | null }>,
+): boolean {
+  return items.filter((item) => String(item.status || '').toLowerCase() !== 'cancelled').length === 1;
+}
+
 export function normalizeTaskExecutionPhase(
   raw: unknown,
 ): TaskExecutionPhase | null {

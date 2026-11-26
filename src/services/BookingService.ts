@@ -80,6 +80,7 @@ import {
   buildConsultationTaskProjectTransitionPatch,
 } from '../utils/consultationProject';
 import {
+  hasSingleActiveBookingItem,
   isHourlyBookingFromHints,
   resolveTaskStartForCancellationPolicy,
 } from './cancellation/cancellationContext';
@@ -4138,16 +4139,6 @@ export class BookingService {
     customerUid: string,
     reason?: string,
   ) {
-    // Hourly Helper is a single-visit order — cancel the whole booking.
-    if (await BookingService.isHourlyBookingOrder(orderId)) {
-      return BookingService.cancelHourlyBookingOrder(orderId, customerUid, reason);
-    }
-
-    // Multi-day consultation project — dedicated proration policy.
-    if (await BookingService.isProjectBookingOrder(orderId)) {
-      return BookingService.cancelProjectBookingOrder(orderId, customerUid, reason);
-    }
-
     const order = await BookingOrder.findOne({ orderId });
     if (!order) throw new NotFoundError('Booking not found');
     if (order.customerUid !== customerUid) throw new ForbiddenError('Not your booking');
@@ -4156,10 +4147,23 @@ export class BookingService {
     }
 
     const items = await BookingItem.find({ orderId });
-    const item = items.find((i) => String(i.taskId) === String(taskId) || String(i._id) === String(taskId));
+    const item =
+      items.find((i) => String(i._id) === String(taskId)) ||
+      items.find((i) => String(i.taskId) === String(taskId));
     if (!item) throw new NotFoundError('Service not found in this booking');
     if (item.status === 'cancelled') {
       throw new BadRequestError('This service is already cancelled');
+    }
+
+    // The item endpoint must not turn a single-service action into a whole-order cancellation.
+    // Special hourly/project settlement is safe here only when this is the last active line.
+    if (hasSingleActiveBookingItem(items)) {
+      if (await BookingService.isHourlyBookingOrder(orderId)) {
+        return BookingService.cancelHourlyBookingOrder(orderId, customerUid, reason);
+      }
+      if (await BookingService.isProjectBookingOrder(orderId)) {
+        return BookingService.cancelProjectBookingOrder(orderId, customerUid, reason);
+      }
     }
 
     const task = await Task.findById(item.taskId || taskId);
@@ -4169,7 +4173,7 @@ export class BookingService {
     }
 
     const remainingActive = items.filter(
-      (i) => i.status !== 'cancelled' && String(i.taskId) !== String(task._id) && String(i._id) !== String(item._id),
+      (i) => i.status !== 'cancelled' && String(i._id) !== String(item._id),
     );
     const isLastActiveItem = remainingActive.length === 0;
     const isMultiItem = items.length > 1;

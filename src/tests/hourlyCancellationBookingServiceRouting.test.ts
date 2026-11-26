@@ -3,7 +3,10 @@
  * Run: npx ts-node src/tests/hourlyCancellationBookingServiceRouting.test.ts
  */
 import assert from 'assert';
-import { isHourlyBookingFromHints } from '../services/cancellation/cancellationContext';
+import {
+  hasSingleActiveBookingItem,
+  isHourlyBookingFromHints,
+} from '../services/cancellation/cancellationContext';
 import { evaluateHourlyCancellation } from '../services/cancellation/cancellationEvaluator';
 import { HOURLY_HELPER_CATEGORY_SLUG } from '../constants/hourlyBooking';
 import { BadRequestError } from '../errors/AppError';
@@ -22,6 +25,17 @@ function testHourlyRouted() {
     isHourlyBookingFromHints([
       { categorySlug: HOURLY_HELPER_CATEGORY_SLUG, skuSlug: 'hourly-2h' },
     ]),
+    true,
+  );
+}
+
+function testItemCancellationDoesNotTreatMultiItemOrdersAsWholeBooking() {
+  assert.strictEqual(
+    hasSingleActiveBookingItem([{ status: 'active' }, { status: 'active' }]),
+    false,
+  );
+  assert.strictEqual(
+    hasSingleActiveBookingItem([{ status: 'cancelled' }, { status: 'active' }]),
     true,
   );
 }
@@ -54,5 +68,6 @@ function testDeniedMapsToBadRequest() {
 
 testFixedPriceNotRoutedToHourly();
 testHourlyRouted();
+testItemCancellationDoesNotTreatMultiItemOrdersAsWholeBooking();
 testDeniedMapsToBadRequest();
 console.log('hourlyCancellationBookingServiceRouting.test.ts: all tests passed');
