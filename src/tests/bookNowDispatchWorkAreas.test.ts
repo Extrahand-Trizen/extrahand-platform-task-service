@@ -5,7 +5,6 @@ import {
   canStartAllOfferStage,
   getBookNowScheduledStartAt,
   getAllBookNowOfferRecipients,
-  getBookNowNotificationTiers,
   getFirstAvailableOfferStage,
   hasAcceptedPreferredOffer,
   getPartnerCategoryValues,
@@ -14,8 +13,10 @@ import {
   isApplicableAreaRuleForTask,
   isEligiblePartnerForBookNowTask,
   isBookNowOfferBeforeScheduledStart,
+  filterTeamPostedPartnerUids,
   mergeActiveOfferRecipients,
   IDispatchAreaLog,
+  phoneMatchesExcluded,
 } from '../services/BookNowAutoAssignService';
 import { ITask } from '../models/Task';
 import {
@@ -372,29 +373,36 @@ assert.equal(
   'all',
   'Other eligible partners are the fallback when no area-rule partners are eligible',
 );
-const preferredNotAllowlisted = {
-  preferred: [],
-  area_rule: [partner('preferred-not-allowlisted', '1111111111')],
-  all: [partner('other-not-allowlisted', '8888888888')],
-};
-const teamFilteredPreferred = getBookNowNotificationTiers(
-  preferredNotAllowlisted,
+assert.equal(
+  phoneMatchesExcluded('+91 98765 43210', ['9876543210']),
   true,
-);
-assert.deepStrictEqual(
-  teamFilteredPreferred.area_rule,
-  [],
-  'Team-posted preferred partners must not receive notifications',
-);
-assert.deepStrictEqual(
-  teamFilteredPreferred.all,
-  [],
-  'Team-posted other eligible partners must not receive notifications',
+  'Team partners should match excluded phones with or without the country code',
 );
 assert.equal(
-  getFirstAvailableOfferStage(preferredNotAllowlisted),
+  phoneMatchesExcluded('9123456789', ['9876543210']),
+  false,
+  'Partners whose phone is not in the task-posted exclusion list must not be notified for team work',
+);
+assert.deepStrictEqual(
+  filterTeamPostedPartnerUids(
+    ['team-partner', 'customer-partner', 'missing-profile'],
+    [
+      { uid: 'team-partner', mobile: '+91 98765 43210' },
+      { uid: 'customer-partner', phone: '9123456789' },
+    ],
+    ['9876543210'],
+  ),
+  ['team-partner'],
+  'Team-posted notifications must include only requested partners with phones in Task-Posted Email exclusions',
+);
+assert.equal(
+  getFirstAvailableOfferStage({
+    preferred: [],
+    area_rule: [partner('team-preferred', '9876543210')],
+    all: [partner('other-eligible', '9123456789')],
+  }),
   'area_rule',
-  'The preferred acceptance window must start even when team filtering leaves no preferred notification recipients',
+  'Team partner notifications still start with eligible preferred partners',
 );
 const preferredDeadline = new Date('2026-11-13T10:45:00.000Z');
 assert.equal(
@@ -496,14 +504,10 @@ const teamTiers = {
   area_rule: [partner('other-area-partner', '8888888888')],
   all: [partner('other-eligible-partner', '7777777777')],
 };
-const customerNotificationTiers = getBookNowNotificationTiers(
-  teamTiers,
-  false,
-);
 assert.deepStrictEqual(
-  customerNotificationTiers,
-  teamTiers,
-  'Customer-posted work should retain all eligible partners in every notification stage',
+  teamTiers.area_rule.map(({ uid }) => uid),
+  ['other-area-partner'],
+  'Candidate tiers stay intact; team-recipient filtering happens before sending',
 );
 
 console.log('bookNowDispatchWorkAreas.test.ts: all tests passed');

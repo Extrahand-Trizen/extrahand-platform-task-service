@@ -43,6 +43,7 @@ import {
   isPartnerOfferTask,
   partnerOfferTaskMongoFilter,
 } from '../utils/partnerOfferTasks';
+import { hasBookNowOfferStarted } from '../utils/bookNowOfferState';
 import { notifyHelperRevisionRequested } from './revisionRequestedNotifications';
 import { isBookNowTaskForCompletion } from '../utils/isBookNowTaskForCompletion';
 import { assertMongoObjectIdTaskId } from '../utils/isMongoObjectId';
@@ -1311,6 +1312,13 @@ export class TaskService {
           !task.assigneeUid &&
           !task.partnerId &&
           !task.partnerUid;
+        if (isUnassignedOpenTask && !hasBookNowOfferStarted(task.assignmentOffer)) {
+          await BookNowAutoAssignService.dispatchBookNowOffers(task);
+          const refreshedTask = await Task.findById(taskId).lean();
+          if (refreshedTask) {
+            task = refreshedTask as unknown as ITask;
+          }
+        }
         const savedDispatchLogs = Array.isArray(task.dispatchLogs)
           ? task.dispatchLogs
           : [];
@@ -1345,14 +1353,6 @@ export class TaskService {
             savedDispatchLogs,
           );
         } else if (isUnassignedOpenTask) {
-          if (!task.assignmentOffer) {
-            await BookNowAutoAssignService.dispatchBookNowOffers(task);
-            const refreshedTask = await Task.findById(taskId).lean();
-            if (refreshedTask) {
-              task = refreshedTask as unknown as ITask;
-            }
-          }
-
           const eligiblePartners = await BookNowAutoAssignService.findEligiblePartners(task);
           const dispatchLogs = await BookNowAutoAssignService.buildDispatchLog(task);
           const mergedDispatchLogs = BookNowAutoAssignService.mergeEligiblePartnersIntoDispatchLog(
